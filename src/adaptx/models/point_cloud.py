@@ -7,7 +7,7 @@ intensity. The column layout is described by :attr:`PointCloudFrame.fields`.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -44,14 +44,22 @@ class PointCloudBounds(AdaptXModel):
         )
 
 
-class PointCloudFrame(TimestampedModel):
-    """A single timestamped LiDAR frame.
+class BasePointCloudFrame(TimestampedModel):
+    """Shared structure and metadata for a timestamped LiDAR frame.
 
-    Validation performed here is structural only: shape, dtype, finiteness and
-    column layout. Geometric processing (ground segmentation, downsampling,
-    clustering) is the responsibility of a
+    Validation here is *structural* only: array type, dimensionality, column
+    count, floating dtype and column layout. Whether non-finite values are
+    permitted is decided by the subclass:
+
+    * :class:`RawPointCloudFrame` allows them - real sensors emit NaN for a
+      non-return.
+    * :class:`PointCloudFrame` forbids them, so holding one is a guarantee
+      that every coordinate is finite.
+
+    Geometric processing beyond Phase 2A preprocessing (voxelisation, ground
+    segmentation, clustering) is the responsibility of a
     :class:`adaptx.perception.interfaces.LiDARProcessor` implementation and is
-    not implemented in Phase 1.
+    not implemented.
     """
 
     model_config = ConfigDict(
@@ -69,7 +77,7 @@ class PointCloudFrame(TimestampedModel):
 
     @field_validator("points")
     @classmethod
-    def _validate_points(cls, value: np.ndarray) -> np.ndarray:
+    def _validate_points_structure(cls, value: np.ndarray) -> np.ndarray:
         if not isinstance(value, np.ndarray):
             raise ValueError("points must be a numpy.ndarray")
         if value.ndim != 2:
@@ -80,12 +88,10 @@ class PointCloudFrame(TimestampedModel):
             )
         if not np.issubdtype(value.dtype, np.floating):
             raise ValueError(f"points must have a floating dtype, got {value.dtype}")
-        if value.size and not np.isfinite(value).all():
-            raise ValueError("points must not contain NaN or infinite values")
         return value
 
     @model_validator(mode="after")
-    def _validate_field_layout(self) -> PointCloudFrame:
+    def _validate_field_layout(self) -> BasePointCloudFrame:
         expected = XYZ_FIELDS if self.points.shape[1] == 3 else XYZI_FIELDS
         if self.fields != expected:
             raise ValueError(
@@ -105,10 +111,25 @@ class PointCloudFrame(TimestampedModel):
         return self.points.shape[1] == 4
 
     def bounds(self) -> PointCloudBounds | None:
-        """Axis-aligned bounds, or ``None`` for an empty frame."""
+        """Axis-aligned bounds, or ``None`` when there is nothing to bound.
+
+        Bounds are computed over points whose x, y and z are all finite. A
+        :class:`PointCloudFrame` is finite by construction, so this is exactly
+        its extent; for a :class:`RawPointCloudFrame` the non-finite points are
+        excluded, because an infinity would otherwise propagate into a bound
+        and serialise as a null, which reads as missing data rather than as the
+        infinity it actually was.
+
+        Returns ``None`` for an empty frame or one with no finite point.
+        """
         if self.point_count == 0:
             return None
         xyz = self.points[:, :3]
+        finite = np.isfinite(xyz).all(axis=1)
+        if not finite.any():
+            return None
+        if not finite.all():
+            xyz = xyz[finite]
         minimum = xyz.min(axis=0)
         maximum = xyz.max(axis=0)
         return PointCloudBounds(
@@ -139,7 +160,7 @@ class PointCloudFrame(TimestampedModel):
         cls,
         points: list[list[float]] | list[tuple[float, ...]],
         **kwargs: Any,
-    ) -> PointCloudFrame:
+    ) -> Self:
         """Build a frame from nested sequences (used by the JSON API layer).
 
         Raises ``ValueError`` for ragged or non-numeric input, which the API
@@ -154,6 +175,33 @@ class PointCloudFrame(TimestampedModel):
         columns = array.shape[1] if array.ndim == 2 else 0
         kwargs.setdefault("fields", XYZI_FIELDS if columns == 4 else XYZ_FIELDS)
         return cls(points=array, **kwargs)
+
+
+class RawPointCloudFrame(BasePointCloudFrame):
+    """An unprocessed frame as it arrives from a sensor or simulator.
+
+    Structurally valid but **may contain NaN or infinite coordinates**: a
+    scanner reports a non-return that way, and dropping those points is the
+    job of the preprocessing pipeline
+    (:class:`adaptx.perception.preprocessing.PointCloudPreprocessor`), which
+    counts them rather than hiding them.
+    """
+
+
+class PointCloudFrame(BasePointCloudFrame):
+    """A structurally valid frame whose coordinates are all finite.
+
+    This is the contract every downstream module consumes. Constructing one
+    with NaN or infinite values fails, so a `PointCloudFrame` in hand is proof
+    the data has been validated.
+    """
+
+    @field_validator("points")
+    @classmethod
+    def _require_finite_points(cls, value: np.ndarray) -> np.ndarray:
+        if value.size and not np.isfinite(value).all():
+            raise ValueError("points must not contain NaN or infinite values")
+        return value
 
 
 class PointCloudSummary(TimestampedModel):

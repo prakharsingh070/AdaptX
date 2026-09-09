@@ -13,9 +13,10 @@ Definitions
     in the window: ``(n - 1) / (t_last - t_first)``. Requires at least two
     frames.
 ``latency_ms``
-    Mean server-side ingest processing time over the window. It measures
-    validation and bookkeeping only; it is not sensor-to-output latency, which
-    cannot be measured until the perception pipeline exists.
+    Mean server-side processing time per frame over the window: validation and
+    bookkeeping, plus the preprocessing pipeline when it ran for that frame.
+    It is not sensor-to-output latency, which cannot be measured until the rest
+    of the perception pipeline exists.
 ``processing_time_ms``
     Ingest processing time of the most recent frame.
 ``cpu_percent`` / ``memory_mb``

@@ -77,7 +77,16 @@ class CarlaSettings(BaseModel):
 
 
 class LiDARSettings(BaseModel):
-    """Constraints applied to incoming point-cloud frames."""
+    """Constraints applied to incoming point-cloud frames, and the Phase 2A
+    preprocessing bounds.
+
+    Coordinate convention for every ROI bound below (ADR-009): a right-handed
+    frame with **+x forward, +y left, +z up**, origin at the sensor, in metres.
+
+    The default ROI and range values are plausible starting points for an
+    automotive roof-mounted scanner, not measured or tuned values. They are
+    configuration, not results.
+    """
 
     min_points: int = Field(default=1, ge=0)
     max_points: int = Field(default=500_000, gt=0)
@@ -86,10 +95,33 @@ class LiDARSettings(BaseModel):
     # Size of the rolling window used to measure ingest FPS and latency.
     metrics_window: int = Field(default=30, ge=2, le=1000)
 
+    # --- Range filtering (Euclidean distance from the sensor origin) --------
+    min_range_m: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="Points closer than this are dropped (sensor blind zone, ego returns).",
+    )
+    max_range_m: float = Field(default=100.0, gt=0.0, description="Points beyond this are dropped.")
+
+    # --- Region of interest (axis-aligned box, inclusive bounds) ------------
+    roi_x_min_m: float = Field(default=-50.0, description="Behind the sensor is negative x.")
+    roi_x_max_m: float = Field(default=80.0, description="Ahead of the sensor is positive x.")
+    roi_y_min_m: float = Field(default=-40.0, description="Right of the sensor is negative y.")
+    roi_y_max_m: float = Field(default=40.0, description="Left of the sensor is positive y.")
+    roi_z_min_m: float = Field(default=-3.0, description="Below the sensor is negative z.")
+    roi_z_max_m: float = Field(default=5.0, description="Above the sensor is positive z.")
+
     @model_validator(mode="after")
     def _check_bounds(self) -> LiDARSettings:
         if self.min_points > self.max_points:
             raise ValueError("lidar.min_points must be <= lidar.max_points")
+        if self.min_range_m >= self.max_range_m:
+            raise ValueError("lidar.min_range_m must be < lidar.max_range_m")
+        for axis in ("x", "y", "z"):
+            low = getattr(self, f"roi_{axis}_min_m")
+            high = getattr(self, f"roi_{axis}_max_m")
+            if low >= high:
+                raise ValueError(f"lidar.roi_{axis}_min_m must be < lidar.roi_{axis}_max_m")
         return self
 
 

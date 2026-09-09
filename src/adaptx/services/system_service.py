@@ -37,7 +37,7 @@ from adaptx.services.carla_service import CarlaService
 from adaptx.services.lidar_service import LiDARIngestService
 
 
-def _phase_1_components() -> list[ComponentStatus]:
+def _declared_components() -> list[ComponentStatus]:
     """Declared implementation state of every ADAPT-X subsystem."""
     return [
         ComponentStatus(
@@ -76,10 +76,23 @@ def _phase_1_components() -> list[ComponentStatus]:
             required=True,
         ),
         ComponentStatus(
+            name="lidar_preprocessing",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "input validation, NaN/Inf removal, ROI and range filtering; "
+                "no downsampling, ground segmentation or clustering"
+            ),
+            phase=2,
+        ),
+        ComponentStatus(
             name="perception",
             readiness=ComponentReadiness.NOT_READY,
             implementation=ImplementationStatus.PLANNED,
-            detail="object detection contract only; no detector implemented",
+            detail=(
+                "object detection contract only; no detector implemented "
+                "(LiDAR preprocessing is reported separately)"
+            ),
             phase=3,
         ),
         ComponentStatus(
@@ -132,7 +145,7 @@ class SystemService:
         self._lidar = lidar
         self._carla = carla
         self._started_monotonic = time.monotonic()
-        self._components = _phase_1_components()
+        self._components = _declared_components()
 
     @property
     def uptime_s(self) -> float:

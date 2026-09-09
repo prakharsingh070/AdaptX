@@ -27,11 +27,19 @@ from adaptx.models.objects import DetectedObject
 from adaptx.models.point_cloud import (
     XYZ_FIELDS,
     XYZI_FIELDS,
+    BasePointCloudFrame,
     PointCloudBounds,
     PointCloudFrame,
     PointCloudSummary,
+    RawPointCloudFrame,
 )
 from adaptx.models.prediction import PredictedTrajectory, TrajectoryPoint
+from adaptx.models.processing import (
+    PointCloudProcessingResult,
+    ProcessingMetrics,
+    ProcessingStage,
+    StageMetrics,
+)
 from adaptx.models.risk import ObjectRisk, RiskCell, RiskFactors, RiskField, RiskLevel
 from adaptx.models.system import (
     CarlaConnectionStatus,
@@ -55,6 +63,7 @@ __all__ = [
     "AdaptXModel",
     "AdaptiveMap",
     "AdaptiveMapCell",
+    "BasePointCloudFrame",
     "BoundingBox3D",
     "CarlaConnectionStatus",
     "CarlaStatus",
@@ -72,14 +81,19 @@ __all__ = [
     "OccupancyState",
     "PointCloudBounds",
     "PointCloudFrame",
+    "PointCloudProcessingResult",
     "PointCloudSummary",
     "PredictedTrajectory",
+    "ProcessingMetrics",
+    "ProcessingStage",
+    "RawPointCloudFrame",
     "ResolutionContext",
     "ResolutionLevel",
     "RiskCell",
     "RiskFactors",
     "RiskField",
     "RiskLevel",
+    "StageMetrics",
     "SystemMetrics",
     "SystemState",
     "SystemStatus",

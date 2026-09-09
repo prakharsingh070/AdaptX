@@ -20,7 +20,12 @@ from adaptx.models.common import (
     utc_now,
 )
 from adaptx.models.map import ResolutionLevel
-from adaptx.models.point_cloud import PointCloudFrame, PointCloudSummary
+from adaptx.models.point_cloud import (
+    PointCloudFrame,
+    PointCloudSummary,
+    RawPointCloudFrame,
+)
+from adaptx.models.processing import ProcessingMetrics
 from adaptx.models.risk import RiskLevel
 from adaptx.models.system import ComponentStatus
 
@@ -72,6 +77,29 @@ class LiDARFrameRequest(AdaptXModel):
         default=None, description="Frame time (UTC, timezone-aware). Defaults to now."
     )
     coordinate_frame: CoordinateFrame = CoordinateFrame.LIDAR
+    preprocess: bool = Field(
+        default=False,
+        description=(
+            "Run the Phase 2A preprocessing pipeline (NaN/Inf removal, ROI and "
+            "range filtering) before ingest. Default false preserves the "
+            "original behaviour, where any non-finite value is rejected."
+        ),
+    )
+
+    def to_raw_frame(self) -> RawPointCloudFrame:
+        """Convert to the raw contract, which tolerates NaN and infinities.
+
+        Used only when ``preprocess`` is true; the pipeline is what removes
+        and counts those points.
+        """
+        return RawPointCloudFrame.from_sequence(
+            self.points,
+            frame_id=self.frame_id,
+            sensor_id=self.sensor_id,
+            source=self.source,
+            coordinate_frame=self.coordinate_frame,
+            timestamp=self.timestamp if self.timestamp is not None else utc_now(),
+        )
 
     def to_frame(self) -> PointCloudFrame:
         """Convert to the domain contract.
@@ -91,15 +119,27 @@ class LiDARFrameRequest(AdaptXModel):
 
 
 class LiDARFrameResponse(AdaptXModel):
-    """Result of accepting a frame."""
+    """Result of accepting a frame.
+
+    ``summary`` always describes the frame that was ingested: the frame as
+    submitted when ``preprocess`` was false, or the processed frame when it was
+    true. ``processing`` is null unless preprocessing ran.
+    """
 
     accepted: bool
     summary: PointCloudSummary
     detail: str = Field(
         default=(
-            "Frame validated and accounted for. Phase 1 performs no filtering, "
-            "detection, mapping or tracking."
+            "Frame validated and accounted for. No detection, mapping or tracking is performed."
         )
+    )
+    processing: ProcessingMetrics | None = Field(
+        default=None,
+        description="Measured preprocessing counts and duration; null when not requested.",
+    )
+    input_summary: PointCloudSummary | None = Field(
+        default=None,
+        description="Metadata of the frame as submitted; null when not preprocessed.",
     )
 
 

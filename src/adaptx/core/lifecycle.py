@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from adaptx.config.settings import Settings, get_settings
 from adaptx.core.logging import configure_logging, get_logger
 from adaptx.perception.lidar import FrameValidationProcessor
+from adaptx.perception.preprocessing import PointCloudPreprocessor
 from adaptx.risk.baseline import BaselineProximityRiskEngine
 from adaptx.services.carla_service import CarlaService
 from adaptx.services.lidar_service import LiDARIngestService
@@ -31,6 +32,7 @@ class ApplicationContext:
     carla: CarlaService
     system: SystemService
     risk_engine: BaselineProximityRiskEngine
+    preprocessor: PointCloudPreprocessor
 
 
 def build_context(settings: Settings | None = None) -> ApplicationContext:
@@ -52,6 +54,7 @@ def build_context(settings: Settings | None = None) -> ApplicationContext:
         carla=carla,
         system=system,
         risk_engine=BaselineProximityRiskEngine(resolved.risk),
+        preprocessor=PointCloudPreprocessor(resolved.lidar),
     )
 
 
