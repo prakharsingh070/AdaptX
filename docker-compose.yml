@@ -1,0 +1,25 @@
+# ADAPT-X development environment.
+#
+# Starts the backend only. Add a CARLA service here when a containerised
+# simulator is actually required; until then CARLA stays optional and external.
+
+services:
+  backend:
+    build: .
+    image: adaptx-backend:dev
+    container_name: adaptx-backend
+    ports:
+      - "8000:8000"
+    environment:
+      ADAPTX_APP__ENVIRONMENT: development
+      ADAPTX_LOGGING__LEVEL: INFO
+      ADAPTX_LOGGING__JSON_FORMAT: "true"
+      # CARLA is disabled by default; the backend reports DISCONNECTED.
+      ADAPTX_CARLA__ENABLED: "false"
+      # When running a CARLA server on the host, enable it and use:
+      #   ADAPTX_CARLA__ENABLED: "true"
+      #   ADAPTX_CARLA__HOST: host.docker.internal
+    volumes:
+      # Scenario and recorded data, read-write for future replay work.
+      - ./data:/app/data
+    restart: unless-stopped
