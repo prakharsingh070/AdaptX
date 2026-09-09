@@ -125,6 +125,40 @@ class TestLiDARIngestService:
         assert status.status is LiDARStatus.DISCONNECTED
         assert "staleness limit" in status.detail
 
+    def test_pre_validated_frames_skip_the_input_limits(self) -> None:
+        """A frame preprocessing reduced to zero is a valid observation.
+
+        min_points is a limit on the raw input, not on the filtered output, so
+        re-applying it after preprocessing would reject a legitimate result.
+        """
+        import numpy as np
+
+        from adaptx.models.point_cloud import PointCloudFrame
+
+        service = self._service()
+        empty = PointCloudFrame(
+            frame_id=0, sensor_id="s", points=np.empty((0, 3), dtype=np.float64)
+        )
+
+        with pytest.raises(InvalidPointCloudError):
+            service.ingest(empty)
+
+        summary = service.ingest(empty, pre_validated=True)
+        assert summary.point_count == 0
+        assert service.frames_received == 1
+
+    def test_upstream_duration_is_added_to_the_measured_time(self) -> None:
+        metrics = MetricsService()
+        settings = LiDARSettings(min_points=0, max_points=1000)
+        service = LiDARIngestService(
+            settings=settings,
+            processor=FrameValidationProcessor(settings),
+            metrics=metrics,
+        )
+
+        service.ingest(make_frame(5), pre_validated=True, upstream_duration_s=0.25)
+        assert metrics.snapshot().processing_time_ms >= 250.0
+
     def test_oversized_frames_are_rejected_and_not_counted(self) -> None:
         service = self._service()
         with pytest.raises(InvalidPointCloudError):
