@@ -73,7 +73,9 @@ Record events such as object detection, track updates, risk changes, prediction 
 
 ## Current Development Status
 
-- Phase 1: Project foundation - TODO
+- Phase 1: Project foundation - DONE (backend foundation, data contracts, module
+  interfaces, FastAPI + WebSocket, LiDAR ingest validation, CARLA boundary, tests,
+  Docker. No perception algorithm implemented. See `docs/ARCHITECTURE.md`.)
 - Phase 2: LiDAR processing - TODO
 - Phase 3: Object detection - TODO
 - Phase 4: Tracking - TODO
