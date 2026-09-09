@@ -44,12 +44,15 @@ tests/
     test_logging.py         JSON and text formatters, context, idempotent setup
     test_models.py          vehicle, object, track, trajectory, map and risk contracts
     test_point_cloud.py     point-cloud contract + Phase 1 frame validator
+    test_preprocessing.py   Phase 2A pipeline: validation, NaN/Inf, ROI, range, metrics
     test_risk_baseline.py   proximity baseline behaviour and thresholds
     test_services.py        metrics, LiDAR ingest, system status aggregation
     test_carla_mock.py      CARLA boundary: real client without CARLA, mock, service
   integration/
     test_api.py             startup, routing, all seven endpoints, error paths
     test_websocket.py       /ws/telemetry envelope, sequencing, connection registry
+    test_lidar_preprocessing_api.py
+                            preprocess flag, backward compatibility, OpenAPI contract
 ```
 
 ---
@@ -101,6 +104,8 @@ enforced by CI rather than by review:
 | `test_mock_is_selected_only_by_configuration` | The mock becoming a silent fallback |
 | `test_failed_connection_does_not_raise` | CARLA absence crashing the backend |
 | `test_field_is_flagged_as_baseline_and_has_no_cells` | The baseline being mistaken for the ADAPT-X risk engine |
+| `test_detection_is_still_reported_as_planned` | Preprocessing existing making object detection look implemented |
+| `test_duration_is_measured_and_positive` | A preprocessing duration that is not actually measured |
 | `test_no_secret_fields_are_declared` | Credentials creeping into the settings surface |
 
 ---

@@ -27,16 +27,29 @@ Not delivered, by design: any perception algorithm.
 
 ---
 
-## Phase 2 — LiDAR processing · **To do**
+## Phase 2 — LiDAR processing · **2A done, 2B to do**
 
-Region-of-interest filtering, voxelisation/downsampling, ground segmentation, noise
-filtering, coordinate transforms.
+### Phase 2A — input and preprocessing · **Done**
 
-- Implement `perception.interfaces.LiDARProcessor` (one class per stage, chained).
-- Install the `pointcloud` extra (Open3D) and record the decision as an ADR.
+Input validation, NaN/Inf removal, ROI filtering and range filtering, with per-stage
+counts and a measured duration, behind `PointCloudPreprocessor`.
+
+- Coordinate convention fixed and documented (ADR-009); range convention documented
+  (ADR-011); raw vs validated frame types separated (ADR-010).
+- Reachable through `POST /api/v1/lidar/frame` with `preprocess: true`; the default path
+  is unchanged.
+- Open3D was **not** added: every operation is a NumPy boolean mask, so the dependency
+  would have bought nothing.
+
+### Phase 2B — downsampling and segmentation · **To do**
+
+- Voxel grid downsampling, ground segmentation, statistical outlier removal.
+- Coordinate transforms between the `lidar`, `ego` and `world` frames.
+- Reconsider Open3D here: voxelisation and normal estimation are where it would earn its
+  place. Record the decision as an ADR either way.
 - Reference: [`knowledge-base/04_lidar-knowledge.md`](knowledge-base/04_lidar-knowledge.md).
-- Done when: processors are configurable, measured on representative data, and
-  `lidar_ingest` moves from `PARTIAL` toward `IMPLEMENTED`.
+- Done when: the stages are configurable, measured on representative data, and
+  `lidar_preprocessing` moves from `PARTIAL` toward `IMPLEMENTED`.
 
 ## Phase 3 — Object detection · **To do**
 
@@ -118,6 +131,6 @@ filtering, coordinate transforms.
 - Record accepted architecture decisions in
   [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md) and measured
   work in [`experiments/experiment-log.md`](experiments/experiment-log.md).
-- When a module becomes real, update its row in `_phase_1_components()`
+- When a module becomes real, update its row in `_declared_components()`
   (`src/adaptx/services/system_service.py`), remove its stream from `not_yet_available` in
   the telemetry payload, and update [`ARCHITECTURE.md`](ARCHITECTURE.md).

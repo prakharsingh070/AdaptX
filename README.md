@@ -11,7 +11,8 @@ obstacles, high uncertainty or predicted collision risk receive finer detail.
 
 ## Implementation status
 
-> **Phase 1 (engineering foundation) is what exists today.**
+> **Phase 1 (engineering foundation) and Phase 2A (LiDAR input and preprocessing) are
+> what exist today.**
 > Object detection, tracking, trajectory prediction, 2.5D mapping and the adaptive
 > resolution algorithm are **not implemented**. The repository provides their data
 > contracts and interfaces so they can be added without architectural rewrites.
@@ -19,7 +20,8 @@ obstacles, high uncertainty or predicted collision risk receive finer detail.
 | Subsystem | State | Notes |
 |---|---|---|
 | Configuration, logging, API, telemetry | **Implemented** | Phase 1 |
-| LiDAR ingest | **Partial** | Structural validation, point count, bounds, metadata. No filtering, ground segmentation, voxelisation or clustering. |
+| LiDAR ingest | **Partial** | Structural validation, point count, bounds, metadata. |
+| LiDAR preprocessing | **Partial** | Phase 2A: NaN/Inf removal, ROI and range filtering, per-stage counts, measured duration. No downsampling, ground segmentation or clustering. |
 | Risk | **Partial** | Contract + a proximity-only *baseline* for testing. Not the ADAPT-X risk engine. |
 | CARLA | **Boundary only** | Connection + world info. Optional dependency; the backend runs without it. |
 | Perception (detection) | Planned | Phase 3 |
@@ -100,7 +102,7 @@ Convenience wrappers are available: `scripts/dev.ps1 <task>` on Windows and
 | GET | `/api/v1/system/status` | Backend state and per-subsystem implementation status |
 | GET | `/api/v1/system/metrics` | Measured runtime metrics |
 | GET | `/api/v1/carla/status` | CARLA connection state |
-| POST | `/api/v1/lidar/frame` | Submit a point-cloud frame for validation |
+| POST | `/api/v1/lidar/frame` | Submit a point-cloud frame for validation, optionally preprocessed |
 | GET | `/api/v1/map/status` | Mapping readiness and configured resolution levels |
 | GET | `/api/v1/risk/status` | Risk engine readiness, thresholds and modelled factors |
 | WS | `/ws/telemetry` | Live system status and measured metrics |

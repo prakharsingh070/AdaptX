@@ -76,7 +76,9 @@ Record events such as object detection, track updates, risk changes, prediction 
 - Phase 1: Project foundation - DONE (backend foundation, data contracts, module
   interfaces, FastAPI + WebSocket, LiDAR ingest validation, CARLA boundary, tests,
   Docker. No perception algorithm implemented. See `docs/ARCHITECTURE.md`.)
-- Phase 2: LiDAR processing - TODO
+- Phase 2: LiDAR processing - 2A DONE (input validation, NaN/Inf removal, ROI and
+  range filtering, measured per-stage metrics; coordinate convention documented in
+  ADR-009). 2B TODO (voxel downsampling, ground segmentation, coordinate transforms).
 - Phase 3: Object detection - TODO
 - Phase 4: Tracking - TODO
 - Phase 5: 2.5D mapping - TODO

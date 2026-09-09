@@ -19,7 +19,8 @@ an abstract interface.
 | API | **Implemented** | 7 HTTP endpoints + OpenAPI (`api/`) |
 | Telemetry (WebSocket) | **Implemented** | `/ws/telemetry`, carrying system status and measured metrics only |
 | Metrics | **Implemented** | Measured ingest FPS/latency and process CPU/memory; unmeasured values are `null` |
-| LiDAR ingest | **Partial** | Structural validation, point count, bounds, provenance. **No** ROI filtering, voxelisation, ground segmentation, noise filtering or clustering |
+| LiDAR ingest | **Partial** | Structural validation, point count, bounds, provenance |
+| LiDAR preprocessing | **Partial** | Phase 2A: input validation, NaN/Inf removal, ROI filtering, range filtering, per-stage counts and measured duration. **No** voxelisation/downsampling, ground segmentation, statistical outlier removal or clustering |
 | Risk | **Partial** | `RiskEngine` contract + a proximity-only **baseline**. The ADAPT-X risk engine does not exist |
 | CARLA | **Boundary only** | Interface, real client (connect + world info), deterministic mock, status service. Sensor and actor operations raise explicitly |
 | Object detection | *Planned* | `ObjectDetector` contract only |
@@ -75,7 +76,7 @@ dashboard or API code (knowledge-base boundary rule).
 | `adaptx.config` | Typed settings loaded from the environment; validation of ranges and orderings |
 | `adaptx.core` | `logging`, `exceptions`, `lifecycle` (the service graph and startup/shutdown) |
 | `adaptx.models` | All data contracts. State and validation only — no business logic |
-| `adaptx.perception` | `LiDARProcessor` / `ObjectDetector` contracts; `FrameValidationProcessor` (Phase 1) |
+| `adaptx.perception` | `LiDARProcessor` / `ObjectDetector` contracts; `FrameValidationProcessor` (Phase 1); `PointCloudPreprocessor` (Phase 2A) |
 | `adaptx.mapping` | `AdaptiveMapper` and `ResolutionController` contracts |
 | `adaptx.risk` | `RiskEngine` contract; `BaselineProximityRiskEngine` |
 | `adaptx.tracking` | `ObjectTracker` contract |
@@ -92,7 +93,10 @@ Defined in `adaptx/models/`, re-exported from `adaptx.models`.
 
 | Model | Purpose |
 |---|---|
-| `PointCloudFrame` | Timestamped LiDAR frame; NumPy `(N,3)` or `(N,4)` points, validated for shape, dtype and finiteness |
+| `BasePointCloudFrame` | Shared frame metadata and structural validation (shape, dtype, column layout) |
+| `RawPointCloudFrame` | A frame as received; **may** contain NaN/Inf (a sensor reports a non-return that way) |
+| `PointCloudFrame` | A frame whose coordinates are all finite - the contract every downstream module consumes |
+| `ProcessingMetrics` / `StageMetrics` / `PointCloudProcessingResult` | Per-stage counts and measured duration for one preprocessed frame |
 | `PointCloudSummary` / `PointCloudBounds` | JSON-safe metadata and axis-aligned bounds |
 | `VehicleState` | Ego position, velocity, acceleration, heading, dimensions |
 | `DetectedObject` | Per-frame detection; identity is frame-local |
@@ -157,18 +161,60 @@ per test.
 
 ## 7. LiDAR path today
 
+Two paths, selected by the request's `preprocess` flag.
+
+**`preprocess: false`** (default, unchanged from Phase 1)
+
 ```
 POST /api/v1/lidar/frame
    → LiDARFrameRequest             JSON body, source required
-   → PointCloudFrame.from_sequence structural validation (shape, dtype, finiteness)
+   → PointCloudFrame.from_sequence structural validation + finiteness
    → FrameValidationProcessor      configured min/max point-count limits
    → LiDARIngestService            record summary, count, measured processing time
-   → MetricsService                rolling window for FPS and latency
-   → PointCloudSummary             frame_id, sensor_id, point count, bounds, provenance
+   → PointCloudSummary
 ```
 
-The frame is **not** stored, filtered, downsampled or interpreted. There is no detector to
-hand it to.
+**`preprocess: true`** (Phase 2A)
+
+```
+POST /api/v1/lidar/frame
+   → RawPointCloudFrame            structural validation only; NaN/Inf permitted
+   → PointCloudPreprocessor.run
+        ├ validation        configured min/max point-count limits (on the RAW input)
+        ├ invalid removal   drop rows with any non-finite value, count them
+        ├ ROI filter        inclusive axis-aligned box, count rejects
+        └ range filter      inclusive 3D Euclidean band, count rejects
+   → PointCloudProcessingResult    processed frame + input summary + measured metrics
+   → LiDARIngestService            pre_validated, upstream duration folded into latency
+   → PointCloudSummary + ProcessingMetrics
+```
+
+Points are only ever **removed**; nothing is repaired, clamped or invented. The counts
+partition the input exactly, and each stage's output is the next stage's input.
+
+The frame is still **not** stored or interpreted: there is no detector to hand it to.
+
+### Coordinate convention (ADR-009)
+
+Right-handed, origin at the sensor, metres: **+x forward, +y left, +z up**. This is what
+Phase 1 already implied, since `BoundingBox3D.yaw_rad` and `VehicleState.heading_rad` are
+counter-clockwise about +z from +x.
+
+CARLA uses a **left-handed** frame (+y right). Converting is the CARLA boundary's job in
+Phase 9 and does not exist yet; no module currently transforms coordinates.
+
+### Range convention (ADR-011)
+
+`sqrt(x² + y² + z²)` from the sensor origin, **not** the ground-plane distance, because
+the minimum range models a physically 3D blind zone. Bounds are inclusive at both ends.
+Squared distances are compared against squared bounds to avoid a square root over the
+array.
+
+### Point-count limits apply to the input
+
+`min_points` / `max_points` bound how large a **raw** scan may be. A frame that filtering
+legitimately reduces to zero points is a valid observation ("everything was out of
+range"), not malformed input, so it is accepted and reported with its metrics.
 
 ---
 
@@ -209,7 +255,7 @@ services or models:
 
 | To add | Implement | Then wire in |
 |---|---|---|
-| Point-cloud processing (Phase 2) | `perception.interfaces.LiDARProcessor` | `build_context()` — chain processors before `LiDARIngestService` |
+| More point-cloud processing (Phase 2B) | `perception.interfaces.LiDARProcessor` | chain after `PointCloudPreprocessor` in `build_context()` |
 | Object detection (Phase 3) | `perception.interfaces.ObjectDetector` | a detection service consuming ingested frames |
 | Tracking (Phase 4) | `tracking.interfaces.ObjectTracker` | a tracking service consuming detections |
 | 2.5D mapping (Phase 5) | `mapping.interfaces.AdaptiveMapper` | map service; set `AdaptiveMap.is_adaptive` per variant |
@@ -217,7 +263,7 @@ services or models:
 | Adaptive resolution (Phase 7) | `mapping.interfaces.ResolutionController` | consumed by the adaptive mapper |
 | Prediction (Phase 8) | `prediction.interfaces.TrajectoryPredictor` | prediction service feeding predicted risk |
 
-When a module becomes real, update its row in `_phase_1_components()`
+When a module becomes real, update its row in `_declared_components()`
 (`services/system_service.py`) and add its stream to the telemetry payload, removing it
 from `not_yet_available`.
 

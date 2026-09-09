@@ -230,6 +230,10 @@ filtered, detected on, tracked or mapped — those modules do not exist.
 | `points` | yes | Rows of `[x, y, z]` or `[x, y, z, intensity]`, in metres. Hard request cap 1,000,000 rows; the effective limit is `ADAPTX_LIDAR__MAX_POINTS` |
 | `timestamp` | no | Timezone-aware UTC; defaults to now. Naive datetimes are rejected |
 | `coordinate_frame` | no | Defaults to `lidar` |
+| `preprocess` | no | Defaults to `false`. When `true`, runs the Phase 2A pipeline before ingest |
+
+Coordinates are in the ADAPT-X convention (ADR-009): right-handed, origin at the sensor,
+**+x forward, +y left, +z up**, metres.
 
 **202 Accepted**
 
@@ -255,11 +259,65 @@ filtered, detected on, tracked or mapped — those modules do not exist.
 }
 ```
 
-`bounds` is `null` for an empty frame.
+`bounds` is `null` for an empty frame, and is computed over points with finite
+coordinates. `processing` and `input_summary` are `null` unless preprocessing ran.
 
 **422** — ragged rows, non-numeric values, wrong column count (not 3 or 4), NaN or infinite
-values, a naive timestamp, an unknown `source`, or a point count outside
-`[ADAPTX_LIDAR__MIN_POINTS, ADAPTX_LIDAR__MAX_POINTS]`.
+values (when `preprocess` is false), a naive timestamp, an unknown `source`, or a point
+count outside `[ADAPTX_LIDAR__MIN_POINTS, ADAPTX_LIDAR__MAX_POINTS]`.
+
+### With `preprocess: true` (Phase 2A)
+
+The frame is accepted as *raw* — NaN and infinite coordinates are permitted — and run
+through validation, non-finite removal, ROI filtering and range filtering before ingest.
+Points are only ever **removed**; nothing is repaired, clamped or invented.
+
+`summary` then describes the **processed** frame, `input_summary` the frame as submitted,
+and `processing` carries the measured counts and duration:
+
+```json
+{
+  "accepted": true,
+  "summary": { "frame_id": 7, "point_count": 2, "bounds": { } },
+  "input_summary": { "frame_id": 7, "point_count": 5, "bounds": { } },
+  "processing": {
+    "schema_version": "1.0",
+    "timestamp": "2026-09-09T18:58:33.745999Z",
+    "processor": "preprocessing_v1",
+    "input_point_count": 5,
+    "invalid_point_count": 1,
+    "roi_rejected_count": 1,
+    "range_rejected_count": 1,
+    "output_point_count": 2,
+    "duration_ms": 0.6086,
+    "stages": [
+      { "stage": "validation",      "input_points": 5, "output_points": 5, "rejected_points": 0 },
+      { "stage": "invalid_removal", "input_points": 5, "output_points": 4, "rejected_points": 1 },
+      { "stage": "roi_filter",      "input_points": 4, "output_points": 3, "rejected_points": 1 },
+      { "stage": "range_filter",    "input_points": 3, "output_points": 2, "rejected_points": 1 }
+    ]
+  }
+}
+```
+
+Semantics:
+
+| Rule | Behaviour |
+|---|---|
+| Stage order | validation → non-finite removal → ROI → range |
+| Attribution | Each stage counts only points that reached it, so the counts partition the input. A point failing both ROI and range is attributed to the ROI |
+| Boundaries | ROI and range bounds are **inclusive**; a point exactly on a face or at exactly `min_range_m` / `max_range_m` is kept |
+| Range | 3D Euclidean `sqrt(x²+y²+z²)` from the sensor origin, not planar (ADR-011) |
+| Intensity | A non-finite intensity invalidates the whole point |
+| Point-count limits | Applied to the **raw input**. A frame filtered down to zero points is accepted (`202`) with `output_point_count: 0`, because that is a valid observation, not malformed input |
+| `duration_ms` | Measured with `time.perf_counter` around the pipeline for this frame on this machine. Not a performance claim |
+
+`duration_ms` is also folded into the `latency_ms` reported by
+`GET /api/v1/system/metrics`, so that figure covers the real work done per frame.
+
+**Compatibility:** `preprocess` is optional and defaults to `false`; `processing` and
+`input_summary` are optional response fields that are `null` on the default path. A Phase 1
+client is unaffected.
 
 Example:
 

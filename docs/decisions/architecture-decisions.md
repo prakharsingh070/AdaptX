@@ -136,6 +136,92 @@ recorded-measurement format.
 
 **Status:** Accepted
 
+## ADR-009: Coordinate Convention (+x forward, +y left, +z up)
+
+**Decision:** ADAPT-X uses a right-handed frame with the origin at the sensor,
+**+x forward, +y left, +z up**, in metres, for the `lidar` and `ego` coordinate
+frames.
+
+**Reason:** Phase 1 already implied this convention without stating it:
+`BoundingBox3D.yaw_rad` and `VehicleState.heading_rad` are defined as
+counter-clockwise about +z measured from the +x axis, which describes only a
+right-handed frame. Phase 2A introduces ROI bounds whose meaning depends
+entirely on the convention, so it has to be written down. It matches ISO 8855
+and ROS REP-103.
+
+**Alternatives considered:** CARLA's left-handed frame (+y right), which would
+avoid a conversion at the simulator boundary but contradicts the yaw definition
+already in the Phase 1 models and the wider automotive/robotics convention.
+
+**Impact:** ROI configuration is expressed in this frame. CARLA data must be
+converted at the CARLA boundary in Phase 9; the conversion does not exist yet
+and no module currently transforms coordinates. Frames carry a
+`coordinate_frame` field, so a mislabelled frame is visible rather than silent.
+
+**Risks:** Ingesting CARLA data before the Phase 9 conversion exists would
+mirror the y axis. Mitigated by documenting it here, in the preprocessing module
+docstring and in `docs/ARCHITECTURE.md`.
+
+**Status:** Accepted
+
+## ADR-010: Separate Raw and Validated Point-Cloud Frame Types
+
+**Decision:** `RawPointCloudFrame` may contain NaN and infinite coordinates;
+`PointCloudFrame` may not. Both derive from `BasePointCloudFrame`, which holds
+the metadata and the structural validation. Preprocessing consumes the former
+and produces the latter.
+
+**Reason:** Phase 1 defined a single frame type that rejects non-finite values.
+That is the right contract for everything downstream, but a real scanner
+reports a non-return as NaN, so the input to the cleaning stage must be able to
+hold values that the output forbids. Relaxing `PointCloudFrame` would have
+removed a useful guarantee from every consumer; representing "not yet cleaned"
+as a separate type keeps the invariant in the type system - holding a
+`PointCloudFrame` is proof the data was validated.
+
+**Alternatives considered:** Allowing non-finite values in `PointCloudFrame`
+with a flag (weakens the contract for every consumer, and a flag is easy to
+ignore); passing a bare NumPy array plus loose metadata keyword arguments into
+the pipeline (no typing, and duplicates the metadata fields, which
+`20-constraints.md` warns against).
+
+**Impact:** Phase 1 behaviour is unchanged: `PointCloudFrame` still rejects
+non-finite values with the same message, and every Phase 1 test passes
+untouched. `bounds()` is now defined over finite points so an infinity in a raw
+frame cannot propagate into a bound and serialise as a null.
+
+**Risks:** A future contributor could accept `BasePointCloudFrame` where a
+validated frame is required, losing the guarantee. Mitigated by the narrow
+signatures: only `PointCloudPreprocessor.run` accepts the base type.
+
+**Status:** Accepted
+
+## ADR-011: Range Filtering Uses 3D Euclidean Distance
+
+**Decision:** Range filtering uses the full 3D distance from the sensor origin,
+`sqrt(x^2 + y^2 + z^2)`, not the ground-plane distance `sqrt(x^2 + y^2)`. Both
+bounds are inclusive. The implementation compares squared distances against
+squared bounds.
+
+**Reason:** Minimum range models the sensor's blind zone and returns off the
+ego vehicle, which are physical 3D phenomena: a point 0.3 m directly above the
+sensor is inside the blind zone even though its planar distance is zero. Using
+planar distance would keep such points. Comparing squared distances avoids a
+square root over the whole array and is equivalent because both bounds are
+non-negative.
+
+**Alternatives considered:** Planar distance (cheaper and matches how a
+bird's-eye ROI is reasoned about, but wrong for the blind zone); per-axis limits
+only (already covered by the ROI box, and does not model a radial sensor
+limit).
+
+**Impact:** ROI filtering runs before range filtering, so a point failing both
+is attributed to the ROI. Squaring a coordinate above roughly 1e154 would
+overflow in float64; real LiDAR coordinates are many orders of magnitude below
+that.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title
