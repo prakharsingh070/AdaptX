@@ -16,20 +16,20 @@ an abstract interface.
 | Configuration | **Implemented** | Typed, environment-driven settings with validation (`config/settings.py`) |
 | Logging | **Implemented** | Structured text/JSON logging with contextual fields (`core/logging.py`) |
 | Data contracts | **Implemented** | Point cloud, vehicle, object, track, trajectory, map, risk, system models (`models/`) |
-| API | **Implemented** | 14 HTTP endpoints + OpenAPI (`api/`) |
+| API | **Implemented** | 15 HTTP endpoints + OpenAPI (`api/`) |
 | Telemetry (WebSocket) | **Implemented** | `/ws/telemetry`, carrying system status, measured metrics and detection/tracking/prediction **summaries**. No per-frame geometry, no trajectory points |
 | Metrics | **Implemented** | Measured ingest FPS/latency and process CPU/memory; unmeasured values are `null` |
 | LiDAR ingest | **Partial** | Structural validation, point count, bounds, provenance |
 | LiDAR pipeline | **Partial** | Phase 2A: input validation, NaN/Inf removal, ROI and range filtering. Phase 2B (opt-in): voxel downsampling, baseline ground segmentation, baseline noise filtering. Phase 2C: `LiDARProcessingPipeline` orchestration, per-stage timing, configuration snapshot. **No** clustering, no coordinate transforms, no exact radius/statistical outlier removal |
 | Benchmarking (pipeline, detection, tracking, prediction) | **Implemented** | Deterministic synthetic datasets, fixed-resolution baseline profile, measured timing/throughput/memory (`adaptx.benchmark`, flags `--detect` / `--track` / `--predict`). Scope is **speed only** - not the Phase 11 ADAPT-X evaluation, and never perception accuracy |
-| Risk | **Partial** | `RiskEngine` contract + a proximity-only **baseline**. The ADAPT-X risk engine does not exist |
+| Risk | **Partial** | Phase 7: deterministic heuristic object-level risk and uncertainty (`risk/heuristic.py`) - proximity, rate of approach, predicted approach, with uncertainty reported separately. **Not** a probability of collision, not calibrated, never validated - no labelled risk data exists. **No** time-to-collision, no trajectory-map intersection, no spatial risk field. The proximity-only baseline is retained for comparison |
 | CARLA | **Boundary only** | Interface, real client (connect + world info), deterministic mock, status service. Sensor and actor operations raise explicitly |
 | Object detection | **Partial** | Phase 3: grid clustering, size filtering and baseline classification by dimension bands (`perception/{clustering,classification,detector}.py`). **No** trained model, no oriented boxes, no velocity, no camera fusion, no semantic segmentation |
 | Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle, stateful service (`tracking/`). **No** learned motion model, no appearance features, no re-identification |
 | 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution mapper - bounded dense grid, binary occupancy, per-cell height statistics (`mapping/grid_mapper.py`). **No** adaptive resolution, no temporal fusion, no probabilistic occupancy, no SLAM, no localisation. Correctness unmeasured - no labelled reference map exists |
 | Adaptive resolution | *Planned* | `ResolutionController` contract + `ResolutionContext` model only |
 | Trajectory prediction | **Partial** | Phase 5: deterministic constant-velocity baseline with heuristic uncertainty (`prediction/constant_velocity.py`). **No** acceleration model, no Kalman filter, no learned model, no map or lane conditioning, no interaction between objects. Accuracy unmeasured - no labelled trajectories exist |
-| Uncertainty engine | *Planned* | `uncertainty` fields exist on the models; nothing computes them |
+| Uncertainty engine | **Partial** | Phase 7: a heuristic per-object uncertainty scalar with its contributing reasons, reported beside risk rather than folded into it (ADR-033). Not a variance, not calibrated. `AdaptiveMapCell.uncertainty` is still unpopulated - that needs a per-cell formulation |
 | Fixed-resolution baseline | **Implemented** | Phase 6 shipped the baseline half of ADR-003 (`FixedResolutionMapper`, `is_adaptive: false`). The **adaptive** variant it is meant to be compared against does not exist yet, so no comparison has been made |
 | Scenario generation, event replay, benchmarking | *Planned* | Not started |
 | Dashboard | *Planned* | Not started (`dashboard/README.md`) |
@@ -80,11 +80,11 @@ dashboard or API code (knowledge-base boundary rule).
 | `adaptx.perception` | `LiDARProcessor` / `ObjectDetector` contracts; `FrameValidationProcessor` (Phase 1); `LiDARProcessingPipeline` orchestrator plus `VoxelDownsampler`, `GroundSegmenter`, `NoiseFilter` and the shared `grid` quantiser |
 | `adaptx.benchmark` | Synthetic datasets, the fixed-resolution baseline profile, pipeline, detection, tracking and prediction runners, and their record contracts |
 | `adaptx.mapping` | `AdaptiveMapper` / `ResolutionController` contracts; `FixedResolutionMapper` |
-| `adaptx.risk` | `RiskEngine` contract; `BaselineProximityRiskEngine` |
+| `adaptx.risk` | `RiskEngine` contract; `HeuristicRiskEngine`; `BaselineProximityRiskEngine` |
 | `adaptx.tracking` | `ObjectTracker` contract; `GeometricObjectTracker` and the association algorithm |
 | `adaptx.prediction` | `TrajectoryPredictor` contract; `ConstantVelocityPredictor` |
 | `adaptx.carla` | `CarlaSimulatorClient` contract, real client, mock, simulator-local models |
-| `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking, prediction and mapping services |
+| `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking, prediction, mapping and risk services |
 | `adaptx.api` | Routes, HTTP schemas, WebSocket telemetry, dependency wiring |
 
 ---
@@ -113,7 +113,9 @@ Defined in `adaptx/models/`, re-exported from `adaptx.models`.
 | `SpatialMap` / `MapBounds` / `MapAccounting` / `MappingConfiguration` | The Phase 6 grid itself: NumPy arrays of point count and min/max/mean height, plus bounds and full point accounting |
 | `ResolutionDecision` / `ResolutionSource` | The resolution in force and where it came from. The **output** of a resolution decision; `ResolutionContext` holds its inputs |
 | `ResolutionContext` | Inputs to the future resolution decision |
-| `RiskCell` / `ObjectRisk` / `RiskField` / `RiskFactors` | Normalised risk, attribution and spatial field |
+| `RiskCell` / `ObjectRisk` / `RiskField` / `RiskFactors` | Normalised risk, attribution and spatial field. `RiskCell` is still unpopulated - Phase 7 is object-level only |
+| `RiskAssessment` / `RiskAssessmentResult` | Phase 7 per-object risk: level, score (**null when UNKNOWN**), distance, closing speed, trajectory relevance, map context, uncertainty breakdown, computed factors and a generated explanation |
+| `UncertaintyBreakdown` / `TrajectoryRelevance` / `MapContext` | Heuristic uncertainty with visible reasons; closest predicted approach; what the map recorded at the object's cell |
 | `SystemStatus` / `ComponentStatus` / `SystemMetrics` | Backend state and measured metrics |
 
 Shared rules enforced by the base classes in `models/common.py`:
@@ -366,6 +368,61 @@ trajectory looks exactly as confident as a right one apart from its uncertainty 
 Prediction quality is bounded by tracking quality, which is bounded by detection quality.
 Cost is linear in trajectory points and dominated by contract validation rather than
 arithmetic (Experiment 004).
+
+### Risk and uncertainty (Phase 7)
+
+Consumes tracks, Phase 5 trajectories and the Phase 6 map, and answers one question per
+object: *how concerning is this object right now, and how sure are we?*
+
+```
+tracks + trajectories + map -> factors -> weighted mean -> level
+                            -> uncertainty breakdown -> RiskAssessment
+```
+
+Three factors, each normalised to `[0, 1]`, combined as a weighted mean **over the factors
+actually available** (ADR-032):
+
+```
+risk_score = sum(w_i * f_i) / sum(w_i)     over available i only
+```
+
+| Factor | Source | Unavailable when |
+|---|---|---|
+| `proximity` | planar distance; 1.0 at/below `proximity_near_m`, 0.0 at/above `proximity_far_m` | never |
+| `closing_speed` | radial rate of approach `-(p·v)/\|p\|`; receding contributes 0.0 | `velocity is None`, or the object sits exactly at the reference point |
+| `predicted_proximity` | closest approach of the Phase 5 trajectory | no trajectory for that track |
+
+**A missing factor is dropped and the remaining weights renormalise — never scored zero.**
+Zero is what an unmeasured value would look like, so scoring it that way would make the
+object we know least about appear least concerning. When no factor can be computed, the
+assessment is `UNKNOWN` with `risk_score = None`.
+
+**Uncertainty is reported beside risk, never folded into it** (ADR-033). Two tracks identical
+except for observability get the *same* risk and different uncertainty. That separation is
+what Phase 8 needs: a poorly observed region may deserve finer perception precisely because
+it is poorly observed.
+
+**Map context never lowers risk** (ADR-034). An empty cell means no returns landed there,
+which may be because nothing is present or because something occluded it — Phase 6 cannot
+tell the difference. It raises uncertainty instead.
+
+**The scene aggregate is a maximum, never a mean** (ADR-035), and an unassessed scene reports
+`UNKNOWN` rather than `LOW`.
+
+**What is deliberately not modelled:** time-to-collision (a precise-looking number over two
+approximations), trajectory-map intersection, occlusion, ego planned path, object
+interaction, and a per-cell spatial risk field. Object class is *reported* and appears in the
+explanation but is not a score multiplier — that would encode an unmeasured judgement.
+
+**Risk does not decide resolution** (ADR-036). The engine imports no resolution type,
+produces no `ResolutionDecision`, and `RiskAssessment` carries no cell size. Phase 8 consumes
+these assessments and decides spatial detail.
+
+**Limitations.** The score orders objects by concern; it measures nothing physical. It is not
+a probability of collision, is not calibrated, and has never been validated — no labelled
+risk data exists. Weights and thresholds are baseline engineering values that have never been
+tuned against outcomes. Quality is bounded by tracking and prediction, which are themselves
+baselines.
 
 ### Phase 2B stage semantics
 

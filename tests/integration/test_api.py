@@ -258,16 +258,41 @@ class TestMapStatus:
 
 
 class TestRiskStatus:
-    def test_reports_the_baseline_engine_explicitly(self, client: TestClient) -> None:
+    def test_reports_the_engine_and_its_limits_explicitly(self, client: TestClient) -> None:
+        """Retargeted in Phase 7: a heuristic engine replaced the baseline as configured.
+
+        Previously asserted the configured engine *was* ``baseline_proximity``.
+        The properties preserved are the ones that mattered: the endpoint names
+        its engine, flags it as a baseline rather than a finished model, states
+        what it does not model, and still exposes the proximity baseline that
+        the real engine must be compared against.
+        """
         response = client.get("/api/v1/risk/status")
         assert response.status_code == 200
 
         body = response.json()
-        assert body["engine"] == "baseline_proximity"
+        assert body["engine"] == "heuristic_risk_v1"
         assert body["is_baseline"] is True
+        assert body["baseline_engine"] == "baseline_proximity"
         assert body["component"]["implementation"] == "PARTIAL"
-        assert body["configuration"]["modelled_factors"] == ["proximity"]
+        assert "proximity" in body["configuration"]["modelled_factors"]
         assert "time_to_collision" in body["configuration"]["unmodelled_factors"]
+
+    def test_never_claims_a_collision_probability(self, client: TestClient) -> None:
+        """No calibrated probability model exists, and the endpoint must say so."""
+        body = client.get("/api/v1/risk/status").json()
+
+        assert body["score_is_heuristic"] is True
+        assert body["is_collision_probability"] is False
+        assert body["uncertainty_is_heuristic"] is True
+        assert "calibrated_collision_probability" in body["configuration"]["unmodelled_factors"]
+
+    def test_risk_does_not_decide_resolution(self, client: TestClient) -> None:
+        """The Phase 7/8 boundary, asserted at the API surface."""
+        body = client.get("/api/v1/risk/status").json()
+
+        assert body["decides_resolution"] is False
+        assert "resolution_m" not in body
 
     def test_thresholds_are_ordered_on_the_normalised_scale(self, client: TestClient) -> None:
         thresholds = client.get("/api/v1/risk/status").json()["thresholds"]

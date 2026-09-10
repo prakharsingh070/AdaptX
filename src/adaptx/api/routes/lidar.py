@@ -13,6 +13,8 @@ from adaptx.api.schemas import (
     LiDARMapRequest,
     LiDARMapResponse,
     LiDARPredictionResponse,
+    LiDARRiskRequest,
+    LiDARRiskResponse,
     LiDARTrackingResponse,
 )
 from adaptx.core.exceptions import InvalidPointCloudError
@@ -339,4 +341,88 @@ def map_frame(
         ground_summary=processed.ground_summary,
         cells=cells,
         cells_truncated=truncated,
+    )
+
+
+@router.post(
+    "/risk",
+    response_model=LiDARRiskResponse,
+    status_code=status.HTTP_200_OK,
+    responses={422: {"model": ErrorResponse, "description": "Malformed point cloud"}},
+    summary="Process, detect, track, predict, map, and assess risk",
+)
+def assess_risk(
+    payload: LiDARRiskRequest, service: LiDARServiceDep, context: ContextDep
+) -> LiDARRiskResponse:
+    """Run the whole perception chain and assess the risk of each tracked object.
+
+    **Stateful**, because it consumes tracks: post frames in temporal order,
+    send explicit timestamps, and call ``POST /api/v1/tracking/reset`` between
+    unrelated sequences. Risk assessment itself carries no state between frames.
+
+    **Risk is a deterministic engineering heuristic.** Three factors -
+    proximity, rate of approach, and how close the predicted path passes -
+    combined as a weighted mean over the factors actually available. A factor
+    that cannot be computed is dropped and the remaining weights renormalise; it
+    is never treated as zero. It is **not** a probability of collision, is not
+    calibrated, and has never been validated against labelled risk data.
+
+    **Uncertainty is reported separately, never folded into the score.** An
+    object can be low-risk and poorly observed, and that combination is exactly
+    what a later resolution policy would need to see.
+
+    A track whose velocity was never measured keeps its proximity factor but
+    loses the approach factor, and its uncertainty rises. A track that is lost,
+    or for which nothing could be computed, is reported ``UNKNOWN`` with a
+    **null score** rather than a fabricated number.
+
+    Map context never lowers risk. A cell with no returns is *unobserved*, not
+    free space.
+
+    Returns 422 for the same malformed input as the other LiDAR endpoints.
+    """
+    try:
+        raw_frame = payload.to_raw_frame()
+    except ValueError as exc:
+        raise InvalidPointCloudError(str(exc)) from exc
+
+    processed = context.preprocessor.run(raw_frame)
+    detection = context.detector.detect(processed.frame)
+    tracking = context.tracking.update(
+        detection.objects,
+        processed.frame.timestamp,
+        frame_id=processed.frame.frame_id,
+        sensor_id=processed.frame.sensor_id,
+    )
+    prediction = context.prediction.predict_from_tracking(tracking)
+    spatial_map = context.mapping.build(processed.frame) if payload.include_map_context else None
+    risk = context.risk.assess_from_pipeline(
+        tracking, prediction=prediction, spatial_map=spatial_map
+    )
+
+    upstream_ms = (
+        processed.metrics.duration_ms
+        + detection.duration_ms
+        + tracking.duration_ms
+        + prediction.duration_ms
+        + risk.duration_ms
+        + (0.0 if spatial_map is None else spatial_map.duration_ms)
+    )
+    service.ingest(processed.frame, pre_validated=True, upstream_duration_s=upstream_ms / 1000.0)
+
+    return LiDARRiskResponse(
+        accepted=True,
+        risk=risk,
+        tracking=tracking,
+        detection=detection,
+        processing=processed.metrics,
+        prediction_summary={
+            "predictor": prediction.predictor,
+            "considered_tracks": prediction.considered_track_count,
+            "predicted_tracks": prediction.predicted_track_count,
+            "skipped_tracks": prediction.skipped_track_count,
+            "counts_by_status": prediction.counts_by_status(),
+        },
+        map_summary=None if spatial_map is None else spatial_map.summary(),
+        summary=processed.output_summary,
     )

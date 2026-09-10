@@ -975,6 +975,229 @@ add; until then, an unobserved cell must never be read as free space.
 
 **Status:** Accepted
 
+## ADR-032: A Deterministic Heuristic Risk Score, With Missing Factors Dropped
+
+**Decision:** Phase 7 scores each tracked object with a **deterministic engineering
+heuristic** over three normalised factors - proximity, rate of approach, and how close the
+predicted path passes - combined as a weighted mean over the factors that are **actually
+available**:
+
+```
+risk_score = sum(w_i * f_i) / sum(w_i)     over available i only
+```
+
+A factor that could not be computed is **dropped and the remaining weights renormalise**. It
+is never substituted with zero. When no factor at all can be computed, the object is reported
+`RiskLevel.UNKNOWN` with `risk_score = None`.
+
+**Reason:** The renormalisation rule is the whole decision. The obvious alternative - treat a
+missing factor as 0.0 - is quietly catastrophic here, because *low* is exactly what an
+unmeasured value would look like. A track whose velocity has never been measured would score
+as though it were standing still, and the object we know least about would look like the one
+we need to worry about least. That is the precise inversion the project's honesty rules exist
+to prevent, and ADR-023 already settled the same question for velocity itself.
+
+Renormalising says something narrower and true: *of the evidence we have, this is how
+concerning the object is.* The fact that evidence is missing is not lost - it is reported in
+the uncertainty breakdown, which is where a consumer can act on it.
+
+`UNKNOWN` with a null score exists for the same reason. A terminated track, or one where
+nothing could be computed, must not be handed a number; a number would be indistinguishable
+from a measurement.
+
+Three factors was a deliberate floor rather than a starting point. Each one uses a quantity
+the pipeline genuinely measures. Object class, map occupancy and time-to-collision were all
+considered and left out - see below.
+
+**Alternatives considered:**
+
+- *Treat missing factors as zero* (the inversion described above).
+- *Skip objects with incomplete data.* Worse: it hides the object entirely, and an object we
+  cannot fully assess is not an object we can ignore.
+- *A fixed formula requiring all factors.* Would make prediction and map mandatory inputs,
+  when both are legitimately absent on a first frame.
+- *Object class as a score multiplier.* Rejected: it would encode an unmeasured judgement
+  that a pedestrian is inherently N times more concerning than a vehicle. Class is reported
+  on the assessment and appears in the explanation, so a later phase can weigh it with
+  evidence this project does not yet have.
+- *Map occupancy as a score term.* Rejected under ADR-034 - see there.
+- *Time-to-collision.* Rejected as premature: TTC over a constant-velocity extrapolation with
+  heuristic uncertainty would produce a precise-looking number resting on two approximations.
+  It is named in `unmodelled_factors` rather than approximated.
+
+**Impact:** Risk is reported `READY` / `PARTIAL`, never `IMPLEMENTED`. The status endpoint
+reports `score_is_heuristic: true` and `is_collision_probability: false`, and no accuracy
+figure appears anywhere - there is no labelled risk data to measure one against. Thresholds
+reuse the existing `threshold_medium/high/critical`, so this engine and the proximity
+baseline classify on the same scale and stay directly comparable.
+
+`RiskLevel.UNKNOWN` was **added** to the existing enum. `CRITICAL` is retained: it predates
+Phase 7, is exercised by tests, and appears in the API thresholds. `UNKNOWN` has no
+threshold, because it is not a point on the scored scale.
+
+**Risks:** A weighted mean is easy to explain and easy to over-read. The score orders objects
+by concern; it does not measure anything physical, and two objects scoring 0.6 are not
+"equally likely" to do anything. The weights are baseline engineering values that have never
+been tuned against outcomes, because no outcomes have been recorded.
+
+**Status:** Accepted
+
+## ADR-033: Uncertainty Is Reported Beside Risk, Never Folded Into It
+
+**Decision:** Uncertainty is **not** a term in the risk score. Every assessment carries a
+separate `UncertaintyBreakdown` - a heuristic scalar on `[0, 1]` plus the list of reasons that
+produced it: unknown velocity, stale observation, low track confidence, no prediction, wide
+prediction uncertainty, tentative track, coasting track, unobserved map context, no map.
+
+**Reason:** The pre-existing contract in `models/risk.py` already states the principle - *an
+object can be low-risk but uncertain, or high-risk and well observed* - and Phase 7 keeps it.
+
+The reason it matters is Phase 8. The ADAPT-X thesis is that perception effort should follow
+risk **and uncertainty**: a poorly observed region may deserve finer perception precisely
+*because* it is poorly observed, even when its computed risk is low. Summing uncertainty into
+the score would collapse two independent signals into one number and destroy exactly the
+distinction a resolution controller most needs. A low score would then be ambiguous between
+"we looked and it is quiet" and "we could barely see it".
+
+Keeping the reasons visible beside the scalar matters for the same reason. A consumer can act
+on the cause - a stale track and an unconfirmed one are different problems with different
+remedies - rather than on an opaque number.
+
+The weights per reason are baseline engineering values, with unknown velocity weighted
+highest because it is the single largest blind spot: it removes a factor from the score
+*and* leaves the object's motion entirely unmodelled.
+
+**Alternatives considered:** A single blended "confidence-adjusted risk" (destroys the
+signal, as above); uncertainty as a multiplier on risk (makes an uncertain object look
+*safer*, which is backwards); a bare scalar with no reasons (unactionable); modelling
+uncertainty as a variance (would imply a distribution that has never been characterised).
+
+**Impact:** Two tracks identical except for observability score **identical risk** and
+different uncertainty - asserted by test. `RiskAssessmentResult` exposes `max_uncertainty`
+alongside `highest_risk_level`, so a scene can report "quiet but poorly observed" as a
+first-class state.
+
+**Risks:** A consumer that reads only `risk_score` gets a materially incomplete picture. The
+API detail string, the status endpoint and the component detail all say so, but nothing can
+force a consumer to look.
+
+**Status:** Accepted
+
+## ADR-034: Unobserved Map Cells Never Reduce Risk
+
+**Decision:** Map context is reported on every assessment as one of `OBSERVED_OCCUPIED`,
+`OBSERVED_EMPTY`, `OUT_OF_BOUNDS` or `NO_MAP`, and it is **never used to lower a risk score**.
+An empty or out-of-bounds cell raises *uncertainty* instead.
+
+**Reason:** This is ADR-031 carried into the phase that could most easily violate it. Phase 6
+records where LiDAR returns landed. A cell with no returns may be empty, or it may be
+occluded - the map cannot tell the difference, and it says so.
+
+The tempting move is the dangerous one: if a predicted path crosses cells with no points,
+lower the risk. That would treat *unobserved* as *clear*, and would reduce risk exactly where
+the sensor could see least - behind the vehicle that is occluding the pedestrian. It is the
+single most dangerous inference available in this phase, and it is precisely the inference a
+naive "free space" reading invites.
+
+So map context is a **context signal, not a scoring term**. It tells a consumer what the
+sensor actually saw, and it is a documented interface point for a future phase that can model
+occlusion properly.
+
+**Alternatives considered:** Treating empty cells as free space (the error above); scoring
+map occupancy as a fourth factor (would either reward occlusion or need an occlusion model
+that does not exist); ray-casting occlusion now (needs sensor-origin geometry and a proper
+visibility model - a phase of its own); omitting map context entirely (loses a real signal,
+and loses the interface Phase 8 will want).
+
+**Impact:** Adding a map to an assessment can only leave the score unchanged or raise
+uncertainty - asserted by test. `MapContext.is_observed` is true **only** for
+`OBSERVED_OCCUPIED`, so a consumer cannot accidentally read "we looked and it was empty" out
+of a value that means "no returns landed here".
+
+**Risks:** The map component is therefore quite weak: it contributes nothing to the score. It
+earns its place as an honest interface and an uncertainty source, and a future occlusion
+model can strengthen it without changing the contract.
+
+**Status:** Accepted
+
+## ADR-035: Scene Risk Aggregates By Maximum, Never By Mean
+
+**Decision:** `RiskAssessmentResult.highest_risk_level` is the **maximum** scored level
+present, not an average. A scene with no scored objects reports `UNKNOWN`, not `LOW`. Counts
+per level are reported alongside, including `unknown_count`.
+
+**Reason:** Averaging is the obvious aggregate and the wrong one. Ten quiet objects and one
+critical object average to something reassuring, and the one object that matters disappears
+into the arithmetic. A scene-level signal exists to answer "is anything concerning right
+now", and only the maximum answers that.
+
+Reporting `UNKNOWN` for an unscored scene follows the same reasoning as ADR-032. "Nothing is
+risky" and "nothing could be assessed" are different states, and an empty scene reporting
+`LOW` would be a claim about a scene nobody looked at.
+
+The per-level counts are kept because the maximum alone loses scale: one high-risk object and
+forty are different situations, and a consumer should not have to re-derive that.
+
+**Alternatives considered:** Mean or median score (buries the outlier); top-N average (same
+problem, softened); a count-weighted composite (invents a scale nothing calibrated); treating
+an empty scene as `LOW` (a claim without evidence).
+
+**Impact:** `highest_risk_score` and `max_uncertainty` return `None` rather than `0.0` on an
+empty scene. Telemetry ranks objects by score descending with `track_id` breaking ties, so
+the same result always produces the same ordering.
+
+**Risks:** A maximum is sensitive to a single spurious assessment - one bad detection can
+raise the whole scene's reported level. That is the intended failure direction, and the
+per-level counts let a consumer see it is a single object.
+
+**Status:** Accepted
+
+## ADR-036: Risk Does Not Decide Resolution
+
+**Decision:** The risk engine evaluates concern and stops. It does not choose spatial
+resolution, does not construct a `ResolutionDecision`, does not import `ResolutionController`
+or `MapSettings`, and `RiskAssessment` carries **no** `resolution_m`, cell size or resolution
+level. The chain of custody is:
+
+```
+tracks + trajectories + map -> RiskEngine -> RiskAssessment
+                                                  |
+                                                  v
+                              [Phase 8 ResolutionController] -> ResolutionDecision -> mapper
+```
+
+**Reason:** These are two different questions. *How concerning is this object?* is a
+perception judgement. *How much spatial detail should this region receive?* is a resource
+allocation decision that also depends on the compute budget, the map geometry and a
+stabilisation policy that stops resolution oscillating between frames.
+
+Fusing them would make the project's central claim untestable. ADAPT-X asserts that
+risk-aware resolution beats uniform resolution; demonstrating that requires holding the risk
+formulation fixed while the allocation policy varies, and vice versa. One module doing both
+means neither can be attributed.
+
+It also keeps the interface honest by construction, the same way ADR-029 did for the mapper.
+The engine is never *given* a cell size or a resolution vocabulary, so a resolution decision
+cannot leak in even by accident.
+
+**Alternatives considered:** Emitting a suggested resolution alongside the risk (Phase 8's
+decision, made in Phase 7 without the inputs it needs); tagging assessments with a resolution
+level (the same thing wearing an enum); letting the engine write `AdaptiveMapCell.risk_score`
+directly (couples risk to a map representation and skips the controller entirely).
+
+**Impact:** Phase 8 consumes `RiskAssessment` - `track_id`, `risk_level`, `risk_score`,
+`uncertainty`, `distance_m`, `closing_speed_mps`, `trajectory`, `map_context`, `factors` - and
+produces a `ResolutionDecision` through the contract Phase 6 already applies. Neither the
+mapper nor the risk engine changes when it arrives. The boundary is asserted by tests at both
+the model and the wire format, and `GET /api/v1/risk/status` reports
+`decides_resolution: false`.
+
+**Risks:** Two phases must agree on a contract before either is finished, so a genuinely
+unforeseen Phase 8 need may require an additive field. Additive is the operative word: the
+separation should survive it.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title

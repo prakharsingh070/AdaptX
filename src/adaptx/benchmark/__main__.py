@@ -26,6 +26,8 @@ from adaptx.benchmark.mapping import run_mapping_benchmark
 from adaptx.benchmark.models import BenchmarkReport
 from adaptx.benchmark.prediction import render as render_prediction
 from adaptx.benchmark.prediction import run_prediction_benchmark
+from adaptx.benchmark.risk import render as render_risk
+from adaptx.benchmark.risk import run_risk_benchmark
 from adaptx.benchmark.runner import DEFAULT_REPEATS, DEFAULT_WARMUP, BenchmarkRunner
 from adaptx.benchmark.tracking import render as render_tracking
 from adaptx.benchmark.tracking import run_tracking_benchmark
@@ -76,6 +78,11 @@ def _parse_args() -> argparse.Namespace:
         "--map",
         action="store_true",
         help="Benchmark 2.5D mapping across a resolution sweep instead.",
+    )
+    parser.add_argument(
+        "--risk",
+        action="store_true",
+        help="Benchmark risk assessment on synthetic tracks instead.",
     )
     parser.add_argument("--json", type=pathlib.Path, help="Write the full report here.")
     return parser.parse_args()
@@ -137,6 +144,18 @@ def main() -> None:
     scenarios = (
         tuple(DatasetScenario(name) for name in args.scenarios) if args.scenarios else SIZE_LADDER
     )
+
+    if args.risk:
+        risk_report = run_risk_benchmark(repeats=args.repeats, warmup=args.warmup)
+        print(render_risk(risk_report))
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(
+                json.dumps(risk_report.model_dump(mode="json"), indent=2),
+                encoding="utf-8",
+            )
+            print(f"\nfull report written to {args.json}")
+        return
 
     if args.map:
         mapping_report = run_mapping_benchmark(scenarios, repeats=args.repeats, warmup=args.warmup)

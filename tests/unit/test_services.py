@@ -243,15 +243,26 @@ class TestSystemService:
         assert perception.readiness is ComponentReadiness.READY
         assert "baseline" in perception.detail
 
-    def test_risk_is_partial_because_only_a_baseline_exists(
+    def test_risk_is_partial_because_it_is_a_heuristic_baseline(
         self, context: ApplicationContext
     ) -> None:
+        """Phase 7 implemented a heuristic risk engine, not a validated one.
+
+        Retargeted in Phase 7: risk was previously NOT_READY because only a
+        test baseline existed. An engine now runs, so the guarantee that
+        matters is that a heuristic never reports IMPLEMENTED and never hides
+        that its score is not a collision probability.
+        """
         components = {c.name: c for c in context.system.status().components}
         risk = components["risk"]
 
         assert risk.implementation is ImplementationStatus.PARTIAL
-        assert risk.readiness is ComponentReadiness.NOT_READY
+        assert risk.implementation is not ImplementationStatus.IMPLEMENTED
+        assert risk.readiness is ComponentReadiness.READY
         assert "baseline" in risk.detail
+        assert "heuristic" in risk.detail
+        assert "NOT A PROBABILITY OF COLLISION" in risk.detail
+        assert "RISK DOES NOT DECIDE SPATIAL RESOLUTION" in risk.detail
 
     def test_lidar_ingest_is_partial_and_required(self, context: ApplicationContext) -> None:
         components = {c.name: c for c in context.system.status().components}

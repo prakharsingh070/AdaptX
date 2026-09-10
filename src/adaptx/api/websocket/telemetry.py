@@ -3,19 +3,19 @@
 ``/ws/telemetry`` is the foundation of the dashboard's live feed. It carries
 only what the backend actually knows: the aggregated system status, the
 measured runtime metrics, and **summaries** of detection, tracking,
-prediction and mapping. It emits no risk cells, because none are produced yet -
-the payload's ``provides`` and ``not_yet_available`` fields say so explicitly,
-and a stream is removed from ``not_yet_available`` only once something
-genuinely produces it.
+prediction, mapping and risk. The payload's ``provides`` and
+``not_yet_available`` fields say what exists, and a stream is removed from
+``not_yet_available`` only once something genuinely produces it.
 
 The tracking summary carries counts, track identifiers and configuration -
 not per-track history. The prediction summary follows the same rule: counts,
 horizon, model and the ids that received a trajectory, never the trajectory
 points themselves. Mapping follows it too: dimensions, counts and an
 occupancy ratio, never the grid - a 0.5 m map over the default bounds is
-57,600 cells. Full trajectories and map cells are returned by
-``POST /api/v1/lidar/predict`` and ``POST /api/v1/lidar/map``; putting them on
-every tick would push frame geometry down a status channel.
+57,600 cells. Risk carries scene counts and a handful of the most concerning
+objects, never every assessment. Full trajectories, map cells and assessments
+are returned by ``POST /api/v1/lidar/predict``, ``/map`` and ``/risk``; putting
+them on every tick would push frame geometry down a status channel.
 
 Message envelope::
 
@@ -49,6 +49,9 @@ _POLICY_VIOLATION = 1008
 
 #: Streams the dashboard will eventually consume but which produce nothing yet.
 _NOT_YET_AVAILABLE = [
+    # Object-level risk exists (Phase 7) and is summarised as "risk". What does
+    # not exist is a spatial risk *field*: no per-cell risk formulation is
+    # implemented, so that stream stays listed as unavailable.
     "risk_field",
     # The 2.5D map exists (Phase 6) and is summarised as "mapping". What does
     # not exist is the *adaptive* map: no resolution controller allocates
@@ -77,6 +80,7 @@ def build_telemetry_payload(context: ApplicationContext) -> dict[str, Any]:
         "tracking": context.tracking.summary(),
         "prediction": context.prediction.summary(),
         "mapping": context.mapping.summary(),
+        "risk": context.risk.summary(),
         "provides": [
             "system",
             "metrics",
@@ -84,6 +88,7 @@ def build_telemetry_payload(context: ApplicationContext) -> dict[str, Any]:
             "tracking",
             "prediction",
             "mapping",
+            "risk",
         ],
         "not_yet_available": _NOT_YET_AVAILABLE,
     }

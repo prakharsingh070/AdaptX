@@ -1,24 +1,26 @@
 # ADAPT-X
 
-**Adaptive Dynamic Perception and Tracking** — a LiDAR-based perception framework that
-allocates spatial map resolution according to environmental risk instead of spending it
-uniformly.
+**Adaptive Dynamic Perception and Tracking** — a LiDAR-based perception framework whose
+goal is to allocate spatial map resolution according to environmental risk and uncertainty
+instead of spending it uniformly.
 
-Low-risk, open regions are represented coarsely. Regions containing pedestrians, vehicles,
-obstacles, high uncertainty or predicted collision risk receive finer detail.
+The intended behaviour: low-risk, open regions represented coarsely, while regions holding
+pedestrians, vehicles, obstacles or high uncertainty receive finer detail. **That allocation
+is not implemented yet** — see the implementation status below. Object-level risk and
+uncertainty exist as of Phase 7; the resolution policy that would act on them is Phase 8.
 
 ---
 
 ## Implementation status
 
-> **Phases 1 to 6 are what exist today** — foundation, LiDAR processing and
-> benchmarking, geometric object detection, temporal tracking, trajectory prediction and
-> 2.5D spatial mapping — each a deterministic, explainable baseline, not a finished
-> subsystem.
-> The **adaptive resolution algorithm** and the ADAPT-X **risk engine** are **not
-> implemented**. Phase 6 built the map; deciding how much detail a region deserves is a
-> later phase. The repository provides their data contracts and interfaces so they can be
-> added without architectural rewrites.
+> **Phases 1 to 7 are what exist today** — foundation, LiDAR processing and
+> benchmarking, geometric object detection, temporal tracking, trajectory prediction, 2.5D
+> spatial mapping, and object-level risk and uncertainty — each a deterministic, explainable
+> baseline, not a finished subsystem.
+> The **adaptive resolution algorithm** is **not implemented**. Phase 6 built the map and
+> Phase 7 measures concern; deciding how much spatial detail a region deserves is Phase 8.
+> The repository provides its data contracts and interfaces so it can be added without
+> architectural rewrites.
 >
 > **No accuracy figure appears anywhere in this repository**, because no labelled data
 > exists to measure one against. Detection, tracking and prediction are benchmarked for
@@ -30,14 +32,13 @@ obstacles, high uncertainty or predicted collision risk receive finer detail.
 | LiDAR ingest | **Partial** | Structural validation, point count, bounds, metadata. |
 | LiDAR pipeline | **Partial** | Validation, NaN/Inf removal, ROI and range filtering; opt-in voxel downsampling, baseline ground segmentation and baseline noise filtering; orchestration with per-stage measured timing. No clustering, no coordinate transforms. |
 | Benchmarking (pipeline speed) | **Implemented** | Deterministic synthetic datasets and a fixed-resolution baseline. Speed only — not the Phase 11 ADAPT-X evaluation. |
-| Risk | **Partial** | Contract + a proximity-only *baseline* for testing. Not the ADAPT-X risk engine. |
+| Risk and uncertainty | **Partial** | Phase 7: deterministic heuristic object-level risk from proximity, rate of approach and predicted approach, with uncertainty reported separately. **Not a probability of collision** — not calibrated, never validated. No time-to-collision, no spatial risk field. Proximity-only baseline retained for comparison. |
 | CARLA | **Boundary only** | Connection + world info. Optional dependency; the backend runs without it. |
 | Object detection | **Partial** | Phase 3: geometric clustering and baseline size-based classification. No trained model, no oriented boxes, no velocity. |
 | Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle. No learned model, no re-identification. |
 | Trajectory prediction | **Partial** | Phase 5: deterministic constant-velocity baseline with heuristic uncertainty. No acceleration model, no Kalman filter, no learned model, no map conditioning. Accuracy unmeasured. |
 | 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution grid with binary occupancy and per-cell height statistics. One cell size everywhere; no adaptive resolution, no temporal fusion, no SLAM. |
 | Adaptive resolution | Planned | Phase 8 |
-| ADAPT-X risk engine | Planned | Phase 7 |
 
 The running system reports this itself at `GET /api/v1/system/status`; each component
 carries a readiness (`READY` / `NOT_READY`) **and** an implementation status
@@ -96,7 +97,7 @@ The API then serves on <http://localhost:8000>, with interactive documentation a
 | Check formatting only | `.venv\Scripts\python.exe -m ruff format --check .` |
 | Type-check | `.venv\Scripts\python.exe -m mypy` |
 | Benchmark the LiDAR pipeline | `.venv\Scripts\python.exe -m adaptx.benchmark` |
-| Benchmark detection / tracking / prediction / mapping | `.venv\Scripts\python.exe -m adaptx.benchmark --detect` (or `--track`, `--predict`, `--map`) |
+| Benchmark a stage | `.venv\Scripts\python.exe -m adaptx.benchmark --detect` (or `--track`, `--predict`, `--map`, `--risk`) |
 | Build the Docker image | `docker compose build` |
 | Start the Docker environment | `docker compose up` |
 
@@ -119,10 +120,11 @@ Convenience wrappers are available: `scripts/dev.ps1 <task>` on Windows and
 | POST | `/api/v1/lidar/track` | Process, detect and track across frames (**stateful**) |
 | POST | `/api/v1/lidar/predict` | Process, detect, track and predict trajectories (**stateful**) |
 | POST | `/api/v1/lidar/map` | Process a frame and build a 2.5D spatial map (frame-local) |
+| POST | `/api/v1/lidar/risk` | Run the whole chain and assess object-level risk (**stateful**) |
 | POST | `/api/v1/tracking/reset` | Drop all tracks and restart identifiers |
 | GET | `/api/v1/tracking/status` | Current tracking state |
 | GET | `/api/v1/map/status` | Mapper, applied resolution, mapped extent and dimensions |
-| GET | `/api/v1/risk/status` | Risk engine readiness, thresholds and modelled factors |
+| GET | `/api/v1/risk/status` | Risk engine, thresholds, modelled factors and score semantics |
 | GET | `/api/v1/prediction/status` | Predictor, horizon and uncertainty semantics |
 | WS | `/ws/telemetry` | Live system status, measured metrics and perception summaries |
 
@@ -186,7 +188,7 @@ src/adaptx/
   models/       Data contracts shared by every layer
   perception/   LiDAR pipeline, clustering, classification and the geometric detector
   prediction/   Trajectory predictor contract + constant-velocity baseline
-  risk/         Risk engine contract + proximity baseline
+  risk/         Risk engine contract + heuristic engine and proximity baseline
   services/     Ingest, metrics, CARLA, status, tracking and prediction services
   tracking/     Tracker contract + geometric tracker and association
   benchmark/    Synthetic datasets and the pipeline/detection/tracking/prediction runners

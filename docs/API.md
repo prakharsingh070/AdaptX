@@ -5,8 +5,9 @@ Versioned prefix: `/api/v1`
 Interactive documentation: `/docs` (Swagger UI), `/redoc`, `/openapi.json`
 
 **This document describes only what is implemented.** Detection, tracking, trajectory
-prediction and 2.5D mapping exist as deterministic baselines. Endpoints for the **adaptive**
-map, the risk map, events, scenarios and benchmarking are sketched in
+prediction, 2.5D mapping and object-level risk exist as deterministic baselines. Endpoints
+for the **adaptive** map and the spatial **risk map** — a per-cell risk field, which Phase 7
+does not produce — plus events, scenarios and benchmarking are sketched in
 [`knowledge-base/16_api-contract.md`](knowledge-base/16_api-contract.md) and do not exist
 yet.
 
@@ -753,6 +754,132 @@ grid would exceed the configured cell budget.
 
 ---
 
+## `POST /api/v1/lidar/risk`
+
+Run the whole perception chain and assess the risk of each tracked object.
+
+**Stateful**, because it consumes tracks. Every rule on `POST /api/v1/lidar/track` applies
+unchanged — temporal order, explicit timestamps, reset between sequences. Risk assessment
+itself carries no state between frames.
+
+> **The score is a deterministic engineering heuristic. It is not a probability of
+> collision.** It is not calibrated, has never been validated against labelled risk data —
+> none exists — and its thresholds are baseline engineering values, not safety-certified
+> limits. No accuracy figure is reported anywhere, because there is nothing to measure one
+> against.
+
+### How the score is built
+
+Three factors, each normalised to `[0, 1]`, combined as a weighted mean **over the factors
+actually available** (ADR-032):
+
+```
+risk_score = sum(w_i * f_i) / sum(w_i)     over available i only
+```
+
+| Factor | Meaning | Unavailable when |
+|---|---|---|
+| `proximity` | 1.0 at/below `proximity_near_m`, 0.0 at/above `proximity_far_m` | never |
+| `closing_speed` | radial rate of approach; receding contributes 0.0 | `velocity` was never measured, or the object sits exactly at the reference point |
+| `predicted_proximity` | closest approach of the Phase 5 trajectory | the track has no predicted trajectory |
+
+**A missing factor is dropped and the remaining weights renormalise — never scored zero.**
+Zero is what an unmeasured value would look like, so scoring it that way would make the
+object the system knows least about appear least concerning. When nothing can be computed,
+the assessment is `UNKNOWN` with `risk_score: null`.
+
+**Request:** as `POST /api/v1/lidar/frame`, plus `include_map_context` (default `true`).
+Turning it off raises reported uncertainty rather than hiding the absence.
+
+**200 OK** (abridged, one assessment shown)
+
+```json
+{
+  "accepted": true,
+  "risk": {
+    "timestamp": "2026-01-01T12:00:01Z",
+    "frame_id": 2,
+    "sensor_id": "roof_lidar",
+    "engine": "heuristic_risk_v1",
+    "is_baseline": true,
+    "scoring_model": "heuristic_weighted_factors",
+    "considered_track_count": 1,
+    "duration_ms": 0.41,
+    "assessments": [
+      {
+        "track_id": 0,
+        "status": "assessed",
+        "risk_level": "high",
+        "risk_score": 0.72,
+        "distance_m": 8.4,
+        "closing_speed_mps": 6.0,
+        "speed_mps": 6.0,
+        "track_status": "confirmed",
+        "object_class": "vehicle",
+        "trajectory": {
+          "min_distance_m": 1.2,
+          "time_to_min_distance_s": 1.25,
+          "uncertainty_at_min_m": 1.13,
+          "horizon_s": 3.0,
+          "is_approaching": true
+        },
+        "map_context": {
+          "observation": "observed_occupied",
+          "point_count": 47,
+          "max_height_m": -0.82
+        },
+        "uncertainty": {
+          "score": 0.0,
+          "reasons": [],
+          "observation_age_s": 0.0,
+          "is_stale": false,
+          "velocity_known": true,
+          "prediction_available": true,
+          "track_confidence": 0.8
+        },
+        "factors": ["proximity", "closing_speed", "predicted_proximity"],
+        "factor_scores": {
+          "proximity": 0.90,
+          "relative_velocity": 0.40,
+          "trajectory_overlap": 1.0,
+          "uncertainty": 0.0
+        },
+        "reason": "High risk: vehicle at 8.4 m; closing at 6.0 m/s; predicted to pass within 1.2 m at t+1.25s (heuristic uncertainty 1.13 m)."
+      }
+    ],
+    "configuration": { }
+  },
+  "tracking": { },
+  "detection": { },
+  "processing": { },
+  "prediction_summary": { },
+  "map_summary": { },
+  "summary": { }
+}
+```
+
+### What the assessment fields mean
+
+| Field | Meaning |
+|---|---|
+| `risk_score` | Heuristic engineering score in `[0, 1]`. **`null` exactly when `risk_level` is `unknown`** — nothing is invented to fill the gap |
+| `risk_level` | `low` / `medium` / `high` / `critical` are scored bands. **`unknown` is not a point on that scale**: it means nothing could be computed, not that risk is low |
+| `status` | `assessed`, `insufficient_data`, or `track_lost`. A terminated track is history, not a present concern, and is never scored |
+| `closing_speed_mps` | Rate of approach; negative means receding. **`null` when velocity was never measured** — unknown motion is not a standstill (ADR-023). A *measured* standstill reports `0.0` |
+| `trajectory` | Closest approach of the predicted path. **Not a collision test and not proof of a collision** — the path is a constant-velocity extrapolation with heuristic uncertainty |
+| `map_context.observation` | `observed_occupied` / `observed_empty` / `out_of_bounds` / `no_map`. **`observed_empty` means unobserved, not free** — the cell may be empty or occluded, and Phase 6 cannot tell the difference. Map context **never lowers** risk (ADR-034) |
+| `uncertainty` | A **heuristic** scalar with its contributing reasons kept visible. **Reported beside risk, never folded into it** (ADR-033): two tracks identical except for observability get the same risk and different uncertainty |
+| `uncertainty.track_confidence` | Phase 3's **geometric fit score** carried through unchanged, not a probability that the classification is correct (ADR-021) |
+| `factors` | Only the factors **actually computed**. A factor absent here was not computed — different from computed-and-zero |
+| `reason` | Generated from the computed factors. Never free-form text, and never asserts probability, safety or validation |
+
+**No field carries a resolution.** Risk says *how concerning*; deciding *how much spatial
+detail* a region receives is a separate decision that is not implemented (ADR-036).
+
+**422** — malformed points, as the other LiDAR endpoints.
+
+---
+
 ## `GET /api/v1/prediction/status`
 
 Report the configured predictor, its horizon, and what its numbers mean.
@@ -914,41 +1041,68 @@ against.
 
 ## `GET /api/v1/risk/status`
 
-Risk engine readiness, normalisation bounds and — importantly — which factors the
-configured engine actually models.
+Report the configured risk engine and what its numbers mean.
 
-**200 OK**
+**200 OK** (abridged)
 
 ```json
 {
-  "schema_version": "1.0",
-  "timestamp": "2026-09-09T18:04:53.211552Z",
   "component": {
     "name": "risk",
-    "readiness": "NOT_READY",
+    "readiness": "READY",
     "implementation": "PARTIAL",
-    "detail": "contract plus a proximity-only baseline used for testing; the ADAPT-X risk engine is not implemented",
-    "phase": 6,
-    "required": false
+    "phase": 7,
+    "detail": "deterministic heuristic risk and uncertainty baseline ..."
   },
-  "configuration": {
-    "max_range_m": 60.0,
-    "scale": "normalised [0, 1]; dashboards may render 0-100",
-    "modelled_factors": ["proximity"],
-    "unmodelled_factors": [
-      "relative_velocity", "time_to_collision", "trajectory_overlap",
-      "object_importance", "uncertainty"
-    ]
-  },
-  "engine": "baseline_proximity",
+  "engine": "heuristic_risk_v1",
   "is_baseline": true,
-  "risk_levels": ["low", "medium", "high", "critical"],
-  "thresholds": { "low": 0.0, "medium": 0.35, "high": 0.6, "critical": 0.85 }
+  "baseline_engine": "baseline_proximity",
+  "scoring_model": "heuristic_weighted_factors",
+  "score_is_heuristic": true,
+  "is_collision_probability": false,
+  "uncertainty_is_heuristic": true,
+  "decides_resolution": false,
+  "risk_levels": ["low", "medium", "high", "critical", "unknown"],
+  "thresholds": { "low": 0.0, "medium": 0.35, "high": 0.6, "critical": 0.85 },
+  "frames_assessed": 0,
+  "last_assessment_timestamp": null,
+  "configuration": {
+    "proximity_near_m": 5.0,
+    "proximity_far_m": 40.0,
+    "closing_speed_high_mps": 15.0,
+    "weight_proximity": 0.5,
+    "weight_closing_speed": 0.25,
+    "weight_predicted_proximity": 0.25,
+    "modelled_factors": ["proximity", "closing_speed", "predicted_proximity"],
+    "unmodelled_factors": [
+      "time_to_collision", "trajectory_map_intersection", "object_interaction",
+      "road_and_lane_geometry", "ego_planned_path",
+      "calibrated_collision_probability"
+    ],
+    "uncertainty_sources": [
+      "unknown_velocity", "stale_observation", "low_track_confidence",
+      "no_prediction", "wide_prediction_uncertainty", "tentative_track",
+      "coasting_track", "unobserved_map_context"
+    ],
+    "thresholds_are": "baseline engineering values, not safety-certified limits",
+    "unobserved_map_cells": "treated as unobserved, never as free space"
+  },
+  "summary": { }
 }
 ```
 
-`thresholds` are lower bounds on the normalised scale. `is_baseline: true` means the
-configured engine is a comparison baseline, **not** the ADAPT-X risk engine.
+| Field | Meaning |
+|---|---|
+| `score_is_heuristic` | Always **true**. A deterministic engineering heuristic, not a calibrated model |
+| `is_collision_probability` | Always **false**. **No collision-probability model exists in this project** |
+| `uncertainty_is_heuristic` | Always **true**. Uncertainty is reported *separately* from risk — an object can be low-risk and poorly observed |
+| `decides_resolution` | Always **false**. The risk engine never chooses spatial resolution; that belongs to a resolution controller, which is not implemented (ADR-036) |
+| `baseline_engine` | The proximity-only engine retained alongside for comparison |
+| `thresholds` | Covers the four **scored** levels only. `unknown` appears in `risk_levels` but has no threshold, because it means nothing was scored |
+| `configuration.unmodelled_factors` | What this engine deliberately does not model. Time-to-collision is absent on purpose: over a constant-velocity extrapolation with heuristic uncertainty it would be a precise-looking number resting on two approximations |
+
+**No accuracy figure is reported** — no labelled risk data exists to measure one against.
+`implementation` is `PARTIAL` and never `IMPLEMENTED`.
 
 ---
 
@@ -1013,13 +1167,40 @@ produces it.
     "duration_ms": 0.27,
     "configuration": { }
   },
-  "provides": ["system", "metrics", "detection", "tracking", "prediction", "mapping"],
+  "risk": {
+    "risk_engine": "heuristic_risk_v1",
+    "is_baseline": true,
+    "scoring_model": "heuristic_weighted_factors",
+    "score_is_heuristic": true,
+    "is_collision_probability": false,
+    "frames_assessed": 12,
+    "total_objects": 4,
+    "low_count": 1,
+    "medium_count": 2,
+    "high_count": 1,
+    "critical_count": 0,
+    "unknown_count": 0,
+    "highest_risk_level": "high",
+    "highest_risk_score": 0.72,
+    "max_uncertainty": 0.35,
+    "processing_time_ms": 0.41,
+    "objects": [
+      { "track_id": 0, "risk_level": "high", "risk_score": 0.72,
+        "distance_m": 8.4, "uncertainty": 0.0 }
+    ],
+    "configuration": { }
+  },
+  "provides": [
+    "system", "metrics", "detection", "tracking", "prediction", "mapping", "risk"
+  ],
   "not_yet_available": ["risk_field", "adaptive_map"]
 }
 ```
 
 The `mapping` summary never carries the grid itself — a 0.5 m map over the default bounds is
-57,600 cells. Cells come from `POST /api/v1/lidar/map` instead.
+57,600 cells. The `risk` summary carries scene counts plus at most **five** ranked objects,
+never every assessment. Cells and full assessments come from `POST /api/v1/lidar/map` and
+`POST /api/v1/lidar/risk` instead.
 
 `system` is the `GET /api/v1/system/status` payload; `metrics` is the
 `GET /api/v1/system/metrics` payload. Before the first predicted frame the `prediction`
