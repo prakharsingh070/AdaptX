@@ -132,34 +132,68 @@ Deterministic multi-object tracking on the Phase 3 detections, built to be repla
 - Labelled sequences, the precondition for measuring tracking correctness at all.
 - Reference: [`knowledge-base/08_tracking.md`](knowledge-base/08_tracking.md).
 
-## Phase 5 — 2.5D mapping · **To do**
+## Phase 5 — Trajectory prediction · **Done (constant-velocity baseline)**
+
+> **Renumbered.** Prediction was Phase 8 and 2.5D mapping was Phase 5 until Phase 5 was
+> implemented. Prediction moved to 5 because it is what the risk engine needs next;
+> mapping, risk and adaptive resolution each shifted one later. `CLAUDE.md` and the
+> `phase` field on every component in `services/system_service.py` agree with the numbers
+> used here.
+
+Deterministic extrapolation of the Phase 4 measured velocity, built to be replaced.
+
+- `ConstantVelocityPredictor` — `position + velocity * (age_s + t)` over a configurable
+  horizon, sampled `t+0` to the horizon inclusive (ADR-026). Defaults: 3.0 s at 0.25 s,
+  so 13 points per track.
+- `age_s` is the measured staleness of a coasting track's last observation, so one
+  formula covers fresh and coasting tracks without special-casing.
+- Heuristic uncertainty growing linearly with extrapolation time. **Not** a calibrated
+  sigma, probability or confidence interval, and labelled as such everywhere it appears.
+- `velocity is None` produces **no trajectory** and a recorded skip reason (ADR-027); a
+  *measured* standstill produces a stationary one. Over-speed velocities are rejected,
+  never clipped.
+- `PredictionResult` accounts for every track: `considered == predicted + skipped`.
+- State-free with respect to perception: `PredictionService` holds counters only.
+- `POST /api/v1/lidar/predict`, `GET /api/v1/prediction/status`; prediction summary on
+  `/ws/telemetry`; prediction benchmark via `--predict`.
+- No ML framework, no SciPy, no new dependencies.
+
+### Phase 5B — deferred prediction work · **To do**
+
+- Constant-acceleration, Kalman or IMM motion models, once there is data to fit their
+  noise parameters against rather than guess them.
+- Class-conditioned motion, if measurement ever justifies the split points.
+- Map- and lane-conditioned prediction, which needs the 2.5D map (Phase 6).
+- Interaction-aware prediction between objects.
+- Labelled trajectories, the precondition for measuring prediction accuracy at all, and
+  for calibrating the uncertainty model into a real one.
+- Reference: [`knowledge-base/09_prediction.md`](knowledge-base/09_prediction.md).
+
+## Phase 6 — 2.5D mapping · **To do**
 
 - Implement `mapping.interfaces.AdaptiveMapper` in **two** variants: the fixed-resolution
   baseline (ADR-003) and the adaptive mapper, distinguished by `AdaptiveMap.is_adaptive`.
 - Reference: [`knowledge-base/05_2.5d-mapping.md`](knowledge-base/05_2.5d-mapping.md).
 
-## Phase 6 — Risk and uncertainty · **To do**
+## Phase 7 — Risk and uncertainty · **To do**
 
 - Implement `risk.interfaces.RiskEngine` as the real ADAPT-X engine; keep
   `BaselineProximityRiskEngine` for comparison.
+- Consume Phase 5 trajectories for conflict analysis, time-to-collision and trajectory
+  overlap. Treat `position_uncertainty_m` and `confidence` as first-class inputs, not
+  decoration (ADR-026).
 - Populate `RiskFactors` so resolution changes are attributable.
-- Add the uncertainty engine: define representation, propagation and its effect on risk and
-  resolution.
+- Add the uncertainty engine: define representation, propagation and its effect on risk
+  and resolution.
 - References: [`knowledge-base/06_risk-engine.md`](knowledge-base/06_risk-engine.md),
   [`knowledge-base/07_uncertainty.md`](knowledge-base/07_uncertainty.md).
 
-## Phase 7 — Adaptive resolution · **To do**
+## Phase 8 — Adaptive resolution · **To do**
 
 - Implement `mapping.interfaces.ResolutionController` consuming `ResolutionContext`.
 - Include a documented stabilisation mechanism (hysteresis, smoothing or minimum dwell
   time) so resolution does not oscillate between frames.
 - Reference: [`knowledge-base/10_adaptive-resolution.md`](knowledge-base/10_adaptive-resolution.md).
-
-## Phase 8 — Prediction · **To do**
-
-- Implement `prediction.interfaces.TrajectoryPredictor`; add conflict analysis against the
-  ego trajectory and predictive refinement of resolution.
-- Reference: [`knowledge-base/09_prediction.md`](knowledge-base/09_prediction.md).
 
 ## Phase 9 — CARLA · **To do**
 

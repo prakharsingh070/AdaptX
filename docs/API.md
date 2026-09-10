@@ -4,10 +4,11 @@ Base URL (development): `http://localhost:8000`
 Versioned prefix: `/api/v1`
 Interactive documentation: `/docs` (Swagger UI), `/redoc`, `/openapi.json`
 
-**This document describes only what is implemented.** Endpoints for objects, tracking,
-prediction, the adaptive map, the risk map, events, scenarios and benchmarking are sketched
-in [`knowledge-base/16_api-contract.md`](knowledge-base/16_api-contract.md) and do not
-exist yet.
+**This document describes only what is implemented.** Detection, tracking and trajectory
+prediction exist as deterministic baselines. Endpoints for the adaptive map, the risk map,
+events, scenarios and benchmarking are sketched in
+[`knowledge-base/16_api-contract.md`](knowledge-base/16_api-contract.md) and do not exist
+yet.
 
 ---
 
@@ -535,6 +536,170 @@ tracker by one frame.
 
 ---
 
+## `POST /api/v1/lidar/predict`
+
+Process a frame, detect objects, track them, and predict where the tracked objects will
+be over the next few seconds.
+
+**This endpoint is stateful**, for the same reason `/track` is: prediction consumes
+tracks, and a track exists only because of the frames before it. Every rule in the
+`/track` table above applies here unchanged — temporal order, explicit timestamps, reset
+between sequences, one track set per backend.
+
+Prediction *itself* carries no state between frames. The same tracks and timestamp always
+produce the same trajectories.
+
+**The predictor is a deterministic constant-velocity baseline** (ADR-026). It extrapolates
+each track's measured velocity and models nothing else: no acceleration, no turning, no
+road or lane geometry, no interaction between objects. **Its accuracy is unmeasured**,
+because no labelled trajectories exist.
+
+**Request:** identical to `POST /api/v1/lidar/frame`.
+
+**200 OK** (abridged)
+
+```json
+{
+  "accepted": true,
+  "prediction": {
+    "timestamp": "2026-01-01T12:00:01Z",
+    "frame_id": 2,
+    "sensor_id": "roof_lidar",
+    "predictor": "constant_velocity_v1",
+    "model_name": "constant_velocity",
+    "is_baseline": true,
+    "uncertainty_model": "heuristic_linear_growth",
+    "trajectories": [
+      {
+        "track_id": 0,
+        "timestamp": "2026-01-01T12:00:01Z",
+        "horizon_s": 3.0,
+        "timestep_s": 0.25,
+        "status": "predicted",
+        "observation_age_s": 0.0,
+        "confidence": 1.0,
+        "predictor_name": "constant_velocity_v1",
+        "coordinate_frame": "ego",
+        "source": "live_sensor",
+        "points": [
+          {
+            "time_offset_s": 0.0,
+            "timestamp": "2026-01-01T12:00:01Z",
+            "position": { "x": 12.0, "y": -3.0, "z": -1.0 },
+            "velocity": { "x": 2.0, "y": 0.0, "z": 0.0 },
+            "confidence": 1.0,
+            "position_uncertainty_m": 0.5
+          },
+          {
+            "time_offset_s": 1.0,
+            "timestamp": "2026-01-01T12:00:02Z",
+            "position": { "x": 14.0, "y": -3.0, "z": -1.0 },
+            "velocity": { "x": 2.0, "y": 0.0, "z": 0.0 },
+            "confidence": 0.5,
+            "position_uncertainty_m": 1.0
+          }
+        ]
+      }
+    ],
+    "skipped": [],
+    "considered_track_count": 1,
+    "duration_ms": 0.27,
+    "configuration": { }
+  },
+  "tracking": { },
+  "detection": { },
+  "processing": { },
+  "summary": { },
+  "ground_summary": { }
+}
+```
+
+Points run from `t+0` to the horizon **inclusive**, so the default 3.0 s horizon at a
+0.25 s interval yields **13 points** per track. The example above is abridged to two.
+
+### What the prediction fields mean
+
+| Field | Meaning |
+|---|---|
+| `timestamp` (on the result and each trajectory) | The **source** time predictions were made from — the tracking frame's time. Every `time_offset_s` is measured forward from it |
+| `timestamp` (on a point) | `source timestamp + time_offset_s`, computed arithmetically. **Never a wall clock**, so a trajectory is reproducible |
+| `status` | `predicted` (extrapolated from a velocity measured this frame) or `extrapolated` (the track is coasting, so the starting position is itself already stale) |
+| `observation_age_s` | **Measured** seconds between the track's last observation and the prediction time. `0.0` for a track seen this frame; positive for a coasting track, whose whole trajectory is shifted by it |
+| `position` | An **extrapolation, not a measurement.** Predicted positions appear only here, and are never written back onto `tracking.tracks[].position` |
+| `velocity` | The constant velocity the trajectory was built from, repeated on each point |
+| `position_uncertainty_m` | A **heuristic** radius: `base_uncertainty_m + uncertainty_growth_mps * (observation_age_s + time_offset_s)`. Not a calibrated sigma, **not a probability**, not a confidence interval — no labelled trajectories exist to calibrate one (ADR-026) |
+| `confidence` (trajectory) | An **evidence** score from the track's `hits` and `missed_frames`. Not a probability that the prediction is correct |
+| `confidence` (point) | The trajectory confidence decayed exactly as fast as uncertainty grows: `track_confidence * uncertainty(t+0) / uncertainty(t)` |
+| `skipped` | Tracks considered and deliberately **not** predicted, each with a status and reason. `considered_track_count == len(trajectories) + len(skipped)`, enforced by the contract |
+
+### Why a track may be skipped
+
+| `status` | Meaning |
+|---|---|
+| `insufficient_velocity` | The track has **no measured velocity** — usually its first frame. Null is not zero (ADR-023): emitting a "stays where it is" path would fabricate a measurement. A *measured* standstill is different and does produce a stationary trajectory |
+| `invalid_velocity` | Measured speed exceeds `ADAPTX_PREDICTION__MAX_SPEED_MPS`. The value is **rejected, not clipped** — a clipped velocity is a number no sensor produced |
+| `stale_observation` | The last observation is older than the horizon, so the output would be more gap-filling than prediction |
+| `track_lost` | The track is terminated; no active prediction is published for it |
+| `limit_exceeded` | `ADAPTX_PREDICTION__MAX_TRACKS` was reached. Tracks are **not** prioritised — Phase 5 has no risk signal to prioritise by |
+
+**422** — same conditions as the other LiDAR endpoints.
+
+---
+
+## `GET /api/v1/prediction/status`
+
+Report the configured predictor, its horizon, and what its numbers mean.
+
+**200 OK** (abridged)
+
+```json
+{
+  "component": {
+    "name": "prediction",
+    "readiness": "READY",
+    "implementation": "PARTIAL",
+    "phase": 5,
+    "detail": "deterministic constant-velocity baseline with heuristic uncertainty ..."
+  },
+  "predictor": "constant_velocity_v1",
+  "model_name": "constant_velocity",
+  "is_baseline": true,
+  "horizon_s": 3.0,
+  "interval_s": 0.25,
+  "points_per_trajectory": 13,
+  "uncertainty_model": "heuristic_linear_growth",
+  "uncertainty_is_heuristic": true,
+  "prediction_statuses": [
+    "predicted", "extrapolated", "insufficient_velocity", "invalid_velocity",
+    "stale_observation", "track_lost", "limit_exceeded"
+  ],
+  "configuration": {
+    "horizon_s": 3.0,
+    "interval_s": 0.25,
+    "max_tracks": 256,
+    "max_speed_mps": 80.0,
+    "base_uncertainty_m": 0.5,
+    "uncertainty_growth_mps": 0.5,
+    "confidence_hits_full": 3,
+    "modelled_factors": ["measured_velocity"],
+    "unmodelled_factors": [
+      "acceleration", "turning", "road_and_lane_geometry",
+      "object_interaction", "object_class_specific_motion"
+    ]
+  },
+  "summary": { }
+}
+```
+
+`uncertainty_is_heuristic` is always `true`, and **no accuracy figure is reported** — there
+is nothing to measure one against. `implementation` is `PARTIAL` and never `IMPLEMENTED`:
+this is a baseline.
+
+`summary` carries counts from the most recent prediction, or a note saying no frame has
+been predicted yet.
+
+---
+
 ## `POST /api/v1/tracking/reset`
 
 Drop every track and restart identifier allocation from zero.
@@ -656,9 +821,14 @@ configured engine is a comparison baseline, **not** the ADAPT-X risk engine.
 
 ## `WS /ws/telemetry`
 
-Live channel for the dashboard. In Phase 1 it carries the aggregated system status and the
-measured metrics — nothing else. It emits no detections, tracks, predictions, risk cells or
-map cells, and names those absent streams in `not_yet_available`.
+Live channel for the dashboard. It carries the aggregated system status, the measured
+metrics, and **summaries** of detection, tracking and prediction. It emits no risk cells
+and no map cells, and names those absent streams in `not_yet_available`.
+
+The perception entries are deliberately summaries — counts, identifiers and configuration.
+The channel never carries per-frame geometry, trajectory points or point arrays; those come
+from the LiDAR endpoints. A stream leaves `not_yet_available` only once something genuinely
+produces it.
 
 **Envelope**
 
@@ -679,7 +849,7 @@ map cells, and names those absent streams in `not_yet_available`.
   "environment": "development",
   "interval_s": 1.0,
   "provides": ["system", "metrics"],
-  "not_yet_available": ["detected_objects", "tracked_objects", "predicted_trajectories", "risk_field", "adaptive_map"]
+  "not_yet_available": ["risk_field", "adaptive_map"]
 }
 ```
 
@@ -690,15 +860,36 @@ map cells, and names those absent streams in `not_yet_available`.
 {
   "system":  { },
   "metrics": { },
-  "provides": ["system", "metrics"],
-  "not_yet_available": ["detected_objects", "tracked_objects", "predicted_trajectories", "risk_field", "adaptive_map"]
+  "detection": { },
+  "tracking": { },
+  "prediction": {
+    "predictor": "constant_velocity_v1",
+    "model": "constant_velocity",
+    "is_baseline": true,
+    "uncertainty_model": "heuristic_linear_growth",
+    "uncertainty_is_heuristic": true,
+    "horizon_s": 3.0,
+    "interval_s": 0.25,
+    "frames_predicted": 12,
+    "considered_tracks": 3,
+    "predicted_tracks": 2,
+    "skipped_tracks": 1,
+    "predicted_points": 26,
+    "predicted_track_ids": [0, 1],
+    "counts_by_status": { "predicted": 2, "insufficient_velocity": 1 },
+    "duration_ms": 0.27,
+    "configuration": { }
+  },
+  "provides": ["system", "metrics", "detection", "tracking", "prediction"],
+  "not_yet_available": ["risk_field", "adaptive_map"]
 }
 ```
 
 `system` is the `GET /api/v1/system/status` payload; `metrics` is the
-`GET /api/v1/system/metrics` payload.
+`GET /api/v1/system/metrics` payload. Before the first predicted frame the `prediction`
+summary carries a `note` saying so instead of the counts.
 
-The channel is send-only in Phase 1; client messages are not interpreted. When
+The channel is send-only; client messages are not interpreted. When
 `ADAPTX_WEBSOCKET__MAX_CONNECTIONS` is reached, the connection is closed with code `1008`
 and reason `telemetry connection limit reached`.
 

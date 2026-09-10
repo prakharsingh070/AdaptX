@@ -232,6 +232,84 @@ over. **No real-time claim is made.** No correctness claim is made or possible.
 **Artifacts:** Reproduce with
 `python -m adaptx.benchmark --track --repeats 5 --warmup 2 --json <path>`.
 
+## Experiment 004 - Phase 5 trajectory prediction throughput
+
+**Date:** 2026-09-10
+
+**Scenario:** Synthetic tracks on a grid, each carrying a measured constant
+velocity, predicted over a 3.0 s horizon at 0.25 s intervals - 13 points per
+track, `t+0` to `t+3.00` inclusive. Every track is eligible, so the measurement
+reflects the full extrapolation path rather than a run of cheap skips. The
+predictor is measured **alone**, not behind the LiDAR pipeline: prediction cost
+scales with track count and points per trajectory, not with point count, and
+running the pipeline first would bury it under clustering.
+
+**Random seed:** Not applicable - the scene is deterministic by construction,
+with no random element. Velocities vary by index (`5 + index % 7` m/s forward,
+`index % 3 - 1` m/s lateral) so no case degenerates into one repeated
+computation.
+
+**Hardware and software:** Windows 11, 16 logical CPUs, Python 3.13.7,
+NumPy 2.5.3, adaptx 0.1.0. Single-threaded.
+
+**Configuration:** `horizon_s=3.0`, `interval_s=0.25`, `base_uncertainty_m=0.5`,
+`uncertainty_growth_mps=0.5`, `confidence_hits_full=3`, `max_speed_mps=80.0`,
+`max_tracks` raised so no track is skipped by the limit.
+
+**Measurement window:** 4 warm-up passes discarded, 15 timed repeats, median
+reported. Peak memory measured in a separate dedicated `tracemalloc` run, never
+during the timed repeats.
+
+**Results:**
+
+| Tracks | Points | Median ms | Spread ms | Tracks/s | Points/s | Peak MB |
+|---|---|---|---|---|---|---|
+| 5 | 65 | 1.184 | 0.80-4.03 | 4,224 | 54,917 | 0.10 |
+| 25 | 325 | 5.936 | 5.13-7.09 | 4,211 | 54,749 | 0.54 |
+| 100 | 1,300 | 27.045 | 22.41-31.55 | 3,698 | 48,068 | 2.18 |
+| 500 | 6,500 | 143.753 | 121.03-233.41 | 3,478 | 45,216 | 10.98 |
+
+- Prediction correctness: **not measured, and not measurable.** No labelled
+  trajectories exist. A constant-velocity extrapolation of a vehicle that then
+  brakes or turns is wrong, and no figure above says otherwise.
+- CPU / GPU: not measured for this experiment.
+
+**Observations:**
+
+1. Cost is **linear** in trajectory points: throughput sits between 45,000 and
+   55,000 points/s across a 100x range of track counts. Unlike Phase 4
+   association (`O(T x D)`, Experiment 003), prediction has no quadratic term -
+   each track is extrapolated independently of every other.
+2. The dominant cost is **contract validation, not arithmetic**. A cProfile run
+   at 500 tracks attributed 0.95 s of a 1.51 s five-pass total to
+   `pydantic.main.__init__` across 67,510 calls - 27 model constructions per
+   track (13 `TrajectoryPoint`, 13 `Vector3`, 1 `PredictedTrajectory`). The
+   extrapolation itself is a handful of multiplications per point.
+3. Building each point's absolute timestamp inside the per-track loop was
+   redundant work: the absolute times are identical for every track. Hoisting
+   them to once per call removes a measured **13.4 ms per 500-track pass**
+   (measured in isolation: 6,500 `datetime + timedelta` operations), about 11%
+   of that pass. End-to-end the difference sits inside this machine's run-to-run
+   spread (stdev 13.4 ms at 500 tracks), so **no end-to-end speedup is claimed** -
+   only that strictly less work is now done, with all 109 prediction tests
+   unchanged.
+4. At the track counts this pipeline actually produces - the large detection
+   scene yields 96 objects - prediction costs roughly 27 ms, comparable to
+   Phase 4 tracking at the same scale (10.6 ms) and small against the ~700 ms
+   that frame spends in processing.
+5. Memory scales linearly and stays modest: 11 MB of Python-tracked allocation
+   for 6,500 trajectory points, which is the cost of the point objects
+   themselves.
+
+**Conclusion:** Prediction is linear in output size and cheap at realistic track
+counts, with validation rather than arithmetic setting the floor. If the cost
+ever matters, the lever is the number of points emitted (`interval_s`), not the
+motion model. **No real-time claim is made.** No correctness claim is made or
+possible.
+
+**Artifacts:** Reproduce with
+`python -m adaptx.benchmark --predict --repeats 15 --warmup 4 --json <path>`.
+
 ## Experiment Template
 
 ### Experiment XXX

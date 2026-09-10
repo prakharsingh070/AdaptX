@@ -39,7 +39,17 @@ from adaptx.models.point_cloud import (
     PointCloudSummary,
     RawPointCloudFrame,
 )
-from adaptx.models.prediction import PredictedTrajectory, TrajectoryPoint
+from adaptx.models.prediction import (
+    PRODUCED_STATUSES,
+    PredictedTrajectory,
+    PredictionStatus,
+    TrajectoryPoint,
+)
+from adaptx.models.prediction_result import (
+    PredictionConfiguration,
+    PredictionResult,
+    SkippedTrack,
+)
 from adaptx.models.processing import (
     PipelineConfiguration,
     PointCloudProcessingResult,
@@ -65,6 +75,7 @@ from adaptx.models.tracking_result import TrackingConfiguration, TrackingResult
 from adaptx.models.vehicle import VehicleState
 
 __all__ = [
+    "PRODUCED_STATUSES",
     "SCHEMA_VERSION",
     "XYZI_FIELDS",
     "XYZ_FIELDS",
@@ -96,6 +107,9 @@ __all__ = [
     "PointCloudProcessingResult",
     "PointCloudSummary",
     "PredictedTrajectory",
+    "PredictionConfiguration",
+    "PredictionResult",
+    "PredictionStatus",
     "ProcessingMetrics",
     "ProcessingStage",
     "RawPointCloudFrame",
@@ -106,6 +120,7 @@ __all__ = [
     "RiskFactors",
     "RiskField",
     "RiskLevel",
+    "SkippedTrack",
     "StageMetrics",
     "SystemMetrics",
     "SystemState",

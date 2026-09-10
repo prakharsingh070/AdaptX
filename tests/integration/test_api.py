@@ -77,11 +77,12 @@ class TestSystemStatus:
         assert expected <= set(components)
 
     def test_planned_modules_are_not_presented_as_working(self, client: TestClient) -> None:
+        """Phase 5 moved prediction out of this list; mapping is still planned."""
         components = {
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
 
-        for name in ("mapping", "prediction"):
+        for name in ("mapping",):
             assert components[name]["implementation"] == "PLANNED"
             assert components[name]["readiness"] == "NOT_READY"
 
@@ -96,13 +97,23 @@ class TestSystemStatus:
         assert "baseline" in tracking["detail"]
         assert "no re-identification" in tracking["detail"]
 
-    def test_prediction_remains_unimplemented(self, client: TestClient) -> None:
-        """Tracking existing must not make trajectory prediction look real."""
+    def test_prediction_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
+        """Phase 5 shipped a constant-velocity baseline, not a finished predictor.
+
+        Retargeted in Phase 5: this test previously asserted PLANNED, because
+        nothing implemented the predictor. A predictor now exists, so the
+        property worth guarding is that shipping a *baseline* must never make
+        prediction look finished or its numbers look validated.
+        """
         components = {
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
-        assert components["prediction"]["implementation"] == "PLANNED"
-        assert components["prediction"]["readiness"] == "NOT_READY"
+        prediction = components["prediction"]
+
+        assert prediction["implementation"] == "PARTIAL"
+        assert prediction["implementation"] != "IMPLEMENTED"
+        assert "baseline" in prediction["detail"]
+        assert "unmeasured" in prediction["detail"]
 
     def test_detection_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
         """Phase 3 shipped a geometric baseline, which is not a finished detector."""

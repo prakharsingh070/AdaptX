@@ -1,13 +1,19 @@
 """Real-time telemetry channel.
 
-``/ws/telemetry`` is the foundation of the dashboard's live feed. In Phase 1 it
-carries only what the backend actually knows: the aggregated system status and
-the measured runtime metrics. It emits no detections, tracks, predictions, risk
-cells or map cells, because none are produced yet - the payload's ``provides``
-and ``not_yet_available`` fields say so explicitly.
+``/ws/telemetry`` is the foundation of the dashboard's live feed. It carries
+only what the backend actually knows: the aggregated system status, the
+measured runtime metrics, and **summaries** of detection, tracking and
+prediction. It emits no risk cells and no map cells, because none are produced
+yet - the payload's ``provides`` and ``not_yet_available`` fields say so
+explicitly, and a stream is removed from ``not_yet_available`` only once
+something genuinely produces it.
 
 The tracking summary carries counts, track identifiers and configuration -
-not per-track history and not future trajectories, which do not exist.
+not per-track history. The prediction summary follows the same rule: counts,
+horizon, model and the ids that received a trajectory, never the trajectory
+points themselves. Full trajectories are returned by
+``POST /api/v1/lidar/predict``; putting them on every tick would push frame
+geometry down a status channel.
 
 Message envelope::
 
@@ -41,7 +47,6 @@ _POLICY_VIOLATION = 1008
 
 #: Streams the dashboard will eventually consume but which produce nothing yet.
 _NOT_YET_AVAILABLE = [
-    "predicted_trajectories",
     "risk_field",
     "adaptive_map",
 ]
@@ -65,7 +70,8 @@ def build_telemetry_payload(context: ApplicationContext) -> dict[str, Any]:
         "metrics": metrics.model_dump(mode="json"),
         "detection": _detection_summary(context),
         "tracking": context.tracking.summary(),
-        "provides": ["system", "metrics", "detection", "tracking"],
+        "prediction": context.prediction.summary(),
+        "provides": ["system", "metrics", "detection", "tracking", "prediction"],
         "not_yet_available": _NOT_YET_AVAILABLE,
     }
 

@@ -10,6 +10,7 @@ from adaptx.api.schemas import (
     LiDARDetectionResponse,
     LiDARFrameRequest,
     LiDARFrameResponse,
+    LiDARPredictionResponse,
     LiDARTrackingResponse,
 )
 from adaptx.core.exceptions import InvalidPointCloudError
@@ -182,6 +183,78 @@ def track_frame(
 
     return LiDARTrackingResponse(
         accepted=True,
+        tracking=tracking,
+        detection=detection,
+        processing=processed.metrics,
+        summary=processed.output_summary,
+        ground_summary=processed.ground_summary,
+    )
+
+
+@router.post(
+    "/predict",
+    response_model=LiDARPredictionResponse,
+    status_code=status.HTTP_200_OK,
+    responses={422: {"model": ErrorResponse, "description": "Malformed point cloud"}},
+    summary="Process, detect, track, and predict future trajectories",
+)
+def predict_frame(
+    payload: LiDARFrameRequest, service: LiDARServiceDep, context: ContextDep
+) -> LiDARPredictionResponse:
+    """Run processing, detection, tracking and trajectory prediction for one frame.
+
+    **Stateful**, for the same reason ``/track`` is: prediction consumes tracks,
+    and a track exists only because of the frames that came before. Every
+    caveat on ``POST /api/v1/lidar/track`` applies here unchanged - post frames
+    in temporal order, send explicit timestamps, and call
+    ``POST /api/v1/tracking/reset`` between unrelated sequences.
+
+    Prediction itself carries no state between frames: the same tracks and
+    timestamp always produce the same trajectories.
+
+    The predictor is a **deterministic constant-velocity baseline**. It
+    extrapolates each track's measured velocity and models nothing else - no
+    acceleration, no turning, no lane geometry, no interaction between objects.
+    Its accuracy is **unmeasured**, because no labelled trajectories exist.
+
+    A track's first frame has no measured velocity, so no trajectory is
+    produced for it; it appears in ``prediction.skipped`` with
+    ``insufficient_velocity``. A *measured* standstill is different and yields
+    a stationary trajectory. Predicted positions appear only in
+    ``prediction``; nothing in ``tracking`` is overwritten with a forecast.
+
+    Returns 422 for the same malformed input as the other LiDAR endpoints.
+    """
+    try:
+        raw_frame = payload.to_raw_frame()
+    except ValueError as exc:
+        raise InvalidPointCloudError(str(exc)) from exc
+
+    processed = context.preprocessor.run(raw_frame)
+    detection = context.detector.detect(processed.frame)
+    tracking = context.tracking.update(
+        detection.objects,
+        processed.frame.timestamp,
+        frame_id=processed.frame.frame_id,
+        sensor_id=processed.frame.sensor_id,
+    )
+    prediction = context.prediction.predict_from_tracking(tracking)
+
+    service.ingest(
+        processed.frame,
+        pre_validated=True,
+        upstream_duration_s=(
+            processed.metrics.duration_ms
+            + detection.duration_ms
+            + tracking.duration_ms
+            + prediction.duration_ms
+        )
+        / 1000.0,
+    )
+
+    return LiDARPredictionResponse(
+        accepted=True,
+        prediction=prediction,
         tracking=tracking,
         detection=detection,
         processing=processed.metrics,

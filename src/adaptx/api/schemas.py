@@ -26,6 +26,8 @@ from adaptx.models.point_cloud import (
     PointCloudSummary,
     RawPointCloudFrame,
 )
+from adaptx.models.prediction import PredictionStatus
+from adaptx.models.prediction_result import PredictionResult
 from adaptx.models.processing import ProcessingMetrics
 from adaptx.models.risk import RiskLevel
 from adaptx.models.system import ComponentStatus
@@ -206,6 +208,39 @@ class LiDARTrackingResponse(AdaptXModel):
     )
 
 
+class LiDARPredictionResponse(AdaptXModel):
+    """Result of processing a frame, detecting, tracking and predicting.
+
+    Carries all four stages so a caller can see what each contributed. Raw
+    point arrays are absent throughout: summaries, object geometry and
+    trajectories only.
+
+    Predicted positions live in ``prediction`` and nowhere else. Nothing in
+    ``tracking`` is ever overwritten with a forecast.
+    """
+
+    accepted: bool
+    prediction: PredictionResult
+    tracking: TrackingResult
+    detection: DetectionResult
+    processing: ProcessingMetrics
+    summary: PointCloudSummary = Field(
+        description="Metadata of the non-ground frame the detector consumed."
+    )
+    ground_summary: PointCloudSummary | None = Field(
+        default=None, description="Metadata of the separated ground points, if any."
+    )
+    detail: str = Field(
+        default=(
+            "Prediction is a deterministic constant-velocity baseline with "
+            "heuristic uncertainty. Positions are extrapolations, not "
+            "measurements, and their accuracy is unmeasured: no labelled "
+            "trajectories exist. Tracks without a measured velocity are "
+            "reported in prediction.skipped rather than assumed stationary."
+        )
+    )
+
+
 class TrackingResetResponse(AdaptXModel):
     """Confirmation that tracking state was cleared."""
 
@@ -254,4 +289,33 @@ class RiskStatusResponse(ModuleStatusResponse):
     risk_levels: list[RiskLevel]
     thresholds: dict[str, float] = Field(
         description="Lower bound of each risk level on the normalised [0, 1] scale."
+    )
+
+
+class PredictionStatusResponse(ModuleStatusResponse):
+    """Trajectory prediction status."""
+
+    predictor: str = Field(description="Identifier of the currently configured predictor.")
+    model_name: str = Field(description="Motion model applied. Not a learned model.")
+    is_baseline: bool = Field(
+        description="True while the configured predictor is a deterministic baseline."
+    )
+    horizon_s: float = Field(gt=0.0, description="Supported prediction horizon in seconds.")
+    interval_s: float = Field(gt=0.0, description="Spacing between trajectory points.")
+    points_per_trajectory: int = Field(
+        ge=1, description="Points a full-horizon trajectory contains, t+0 inclusive."
+    )
+    uncertainty_model: str = Field(description="Identifier of the uncertainty model applied.")
+    uncertainty_is_heuristic: bool = Field(
+        default=True,
+        description=(
+            "True: uncertainty is a documented heuristic, not a calibrated "
+            "sigma, probability or confidence interval."
+        ),
+    )
+    prediction_statuses: list[PredictionStatus] = Field(
+        description="Every outcome a track can receive, produced or skipped."
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict, description="Counts from the most recent prediction, if any."
     )

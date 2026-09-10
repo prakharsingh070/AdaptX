@@ -168,8 +168,92 @@ across frames, velocity `null → 2.000 → 2.000 m/s` matching supplied timesta
 
 ---
 
+## Phase 5 — Trajectory prediction · verified
+
+**Purpose:** turn the Phase 4 measured velocity into a forward-looking trajectory the risk
+engine can reason over, without inventing anything the sensors never showed.
+
+**Renumbering.** Prediction was Phase 8 and 2.5D mapping was Phase 5. The discrepancy left
+open at the end of Phase 4 was resolved in favour of prediction being **Phase 5** — it is
+what the risk engine needs next — and mapping, risk and adaptive resolution each shifted one
+later. `CLAUDE.md`, `ROADMAP.md` and `system_service.py` were made to agree. The phase
+headings in this file were deliberately left as originally written: they are a record of
+what happened, and renaming them would falsify it.
+
+**Algorithm:** constant velocity, and nothing else (ADR-026):
+
+```
+position(t)    = position + velocity * (age_s + t)
+uncertainty(t) = base_uncertainty_m + uncertainty_growth_mps * (age_s + t)
+```
+
+Points run from `t+0` to the horizon inclusive — 13 at the defaults (3.0 s, 0.25 s). Each
+point's absolute timestamp is derived arithmetically from the source time, never from a wall
+clock, so a trajectory is reproducible.
+
+**The `age_s` insight.** A coasting track's stored position is stale by a *measured*
+interval: the gap between its `last_seen` and the prediction time. Folding that into the
+same formula makes one expression correct for both fresh and coasting tracks — `age_s` is
+zero for a track matched this frame, collapsing it to `p + v*t` — and avoids a second code
+path. Ignoring it would have silently pretended a missed frame never happened.
+
+**Eligibility is reported, not silent (ADR-027).** Every track appears either in
+`trajectories` or in `skipped` with a status and reason, enforced by
+`considered == predicted + skipped`. `velocity is None` yields **no trajectory** — null is
+not zero (ADR-023), and a flat "stays where it is" path would fabricate a measurement. A
+*measured* standstill is different and legitimately yields a stationary trajectory. An
+over-speed velocity is **rejected, never clipped**: a clipped value is a number no sensor
+produced. A `STALE_OBSERVATION` bound stops a coasting track being extrapolated across a gap
+longer than the horizon itself.
+
+Tentative tracks are predicted rather than skipped when they have a velocity — a velocity
+measured from two observations is real however new the track is — with the lower evidence
+expressed as lower confidence rather than as exclusion.
+
+**Uncertainty and confidence are evidence, not probability.** Uncertainty is a documented
+heuristic growing linearly with extrapolation time; point confidence is the track's evidence
+score decayed by exactly the ratio the uncertainty grew, so the two can never disagree.
+Neither is calibrated, and the status endpoint says so with `uncertainty_is_heuristic`.
+`base_uncertainty_m` is constrained strictly positive: a zero floor would claim a perfectly
+known position.
+
+**Contract reuse.** `PredictedTrajectory` and `TrajectoryPoint` had existed unused since
+Phase 1 and were reused rather than duplicated; `status` and `observation_age_s` were added
+additively. `TrajectoryPredictor.predict` was widened to return a `PredictionResult` — safe,
+because it had no implementations.
+
+**Statefulness.** `PredictionService` holds no perception state, unlike `TrackingService`.
+A prediction is a pure function of one tracking result, so its counters exist only for
+status and telemetry.
+
+**Four Phase 1–4 tests were retargeted, none weakened.** All four asserted that prediction
+was `PLANNED` / unimplemented — a premise Phase 5 genuinely changed. Each now guards the
+same underlying property: that a baseline never reports `IMPLEMENTED`, that a telemetry
+stream leaves `not_yet_available` only when something produces it, and that the channel
+still carries no raw trajectory geometry.
+
+**Measured (Experiment 004):** prediction is **linear** in trajectory points — 45,000 to
+55,000 points/s across a 100× range of track counts — with no quadratic term, unlike Phase 4
+association. Cost is dominated by **contract validation, not arithmetic**: cProfile
+attributed 0.95 s of a 1.51 s five-pass run at 500 tracks to Pydantic construction across
+67,510 calls. Hoisting per-point timestamp construction out of the per-track loop removed a
+measured 13.4 ms per 500-track pass (~11%), though the end-to-end difference sits inside this
+machine's run-to-run spread, so no end-to-end speedup was claimed.
+
+**Limitations:** constant velocity is wrong through turns and braking, and a wrong trajectory
+looks as confident as a right one apart from its uncertainty radius; accuracy is unmeasured
+and unmeasurable without labelled trajectories; quality is bounded by tracking, which is
+bounded by detection.
+
+**Status:** 733 tests, ruff and mypy clean, live multi-frame verification passed — a vehicle
+advancing 1 m per 0.5 s measured 2.000 m/s and predicted +1 m at t+0.5, +2 m at t+1, +4 m at
+t+2 and +6 m at t+3, with uncertainty rising 0.5 → 2.0 m and the first frame producing an
+explicit `insufficient_velocity` skip rather than a trajectory.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
-visible. No phase has added a dependency beyond the Phase 1 set.
+visible. No phase has added a dependency beyond the Phase 1 set - five phases, zero new dependencies.

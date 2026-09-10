@@ -642,6 +642,143 @@ HTTP requests rather than between scans.
 
 **Status:** Accepted
 
+## ADR-026: Deterministic Constant-Velocity Trajectory Prediction
+
+**Decision:** Phase 5 implements `prediction.interfaces.TrajectoryPredictor` as a
+**deterministic constant-velocity baseline**. For a track with a measured velocity, the
+predicted position at `t` seconds after the prediction time is
+`position + velocity * (age_s + t)`, sampled from `t+0` to a configurable horizon
+inclusive. Positional uncertainty is a **heuristic** that grows linearly with
+extrapolation time: `base_uncertainty_m + uncertainty_growth_mps * (age_s + t)`.
+
+`age_s` is the *measured* interval between a track's last observation and the prediction
+time. It is zero for a track matched in the current frame, so the formula collapses to
+`p + v*t`; it is positive for a coasting track, whose stored position is already stale by
+exactly that much. One formula therefore covers both cases without special-casing, and
+ignoring `age_s` would silently pretend a missed frame never happened.
+
+**Reason:** Constant velocity is the simplest model that uses only what Phase 4 actually
+measures. It is explainable frame by frame - a wrong prediction traces to a wrong
+velocity and nothing else - and deterministic, so the same tracks always produce the same
+trajectory. That makes it a reference an ML predictor would have to beat, exactly as the
+geometric detector (ADR-021) and tracker (ADR-024) are for theirs.
+
+It is **not** a claim about how objects move. Real vehicles accelerate, brake, turn and
+follow lanes. None of that is modelled, and the module says so in its docstring, its
+component detail and its API documentation.
+
+**Alternatives considered:**
+
+- *Constant acceleration.* Rejected: `TrackedObject.acceleration` is a second difference
+  of noisy centroids, so projecting it over a 3-second horizon amplifies detection jitter
+  into metres of error. NEXT_PHASE.md explicitly excluded it.
+- *Kalman filter / IMM.* Rejected for now: needs a process-noise model that cannot be
+  chosen honestly without labelled data to fit it against, and IMM needs a mode set that
+  would be guesswork. Both would also invite calling the resulting covariance a
+  calibrated uncertainty, which it would not be.
+- *Learned trajectory prediction.* Rejected: requires a labelled dataset the project does
+  not have, and would add an ML framework that ADR-008 declined.
+- *Map- or lane-conditioned prediction.* Rejected: there is no map. The 2.5D map is
+  Phase 6 under the agreed renumbering.
+- *Class-conditioned motion models.* Rejected as premature: the parameters would be
+  invented rather than measured, and Phase 3 classification is itself a heuristic that
+  returns `UNKNOWN` on ambiguity.
+- *Using `heading_rad` to steer the extrapolation.* Rejected: heading is derived from
+  velocity and is null below the tracker's speed floor. The velocity vector is the
+  authoritative motion vector; forcing motion along a heading that disagreed with it
+  would discard measured information.
+
+**Why the uncertainty is heuristic, and labelled as such:** `position_uncertainty_m` is a
+documented formula - not a calibrated sigma, not a probability, not a confidence
+interval. Calibrating one needs labelled trajectories to measure error against, and none
+exist. `GET /api/v1/prediction/status` reports `uncertainty_is_heuristic: true` and every
+result carries `uncertainty_model: "heuristic_linear_growth"`, so a consumer cannot
+mistake it for a validated quantity.
+
+`base_uncertainty_m` is constrained strictly positive: a zero floor would claim a
+perfectly known position, which no detection provides.
+
+Point `confidence` is `track_confidence * (uncertainty(t+0) / uncertainty(t))`. It starts
+at the track's evidence score and decays exactly as fast as uncertainty grows, so the two
+numbers can never disagree. Track confidence combines the only two evidence signals the
+tracker provides - `hits`, saturating at `confidence_hits_full`, and `missed_frames`. It
+measures **evidence, not correctness**, in the same sense as the classifier's fit score
+(ADR-021).
+
+**Impact:** Prediction is reported `READY` / `PARTIAL`, never `IMPLEMENTED`. Predicted
+positions live only in `PredictedTrajectory` and are never written back onto
+`TrackedObject.position`. Prediction accuracy is unmeasured and currently unmeasurable;
+the benchmark measures speed only.
+
+Replacing the model later means writing a new `TrajectoryPredictor` and changing one line
+in `build_context`. Nothing downstream depends on the model, only on the contract.
+
+**Risks:** A constant-velocity path through a turn or a braking event is wrong, and it
+looks exactly as confident as a correct one apart from its uncertainty radius. The risk
+engine must treat `position_uncertainty_m` and `confidence` as first-class inputs rather
+than using the positions alone.
+
+**Status:** Accepted
+
+## ADR-027: Track Eligibility and Skip Reporting in Prediction
+
+**Decision:** The predictor reports what it declined to predict, and why. Every track
+handed to it appears either in `PredictionResult.trajectories` or in
+`PredictionResult.skipped` with a `PredictionStatus` and a human-readable reason; a model
+validator enforces `considered == predicted + skipped`.
+
+The eligibility rules:
+
+| Condition | Outcome |
+|---|---|
+| `velocity is None` | skipped, `INSUFFICIENT_VELOCITY` |
+| measured speed > `max_speed_mps` | skipped, `INVALID_VELOCITY` |
+| last observation older than the horizon | skipped, `STALE_OBSERVATION` |
+| `status is LOST` | skipped, `TRACK_LOST` |
+| beyond `max_tracks` for this call | skipped, `LIMIT_EXCEEDED` |
+| `CONFIRMED`, seen this frame | predicted, `PREDICTED` |
+| `TENTATIVE` with a measured velocity | predicted, `PREDICTED`, lower confidence |
+| `COASTING`, or any stale observation | predicted, `EXTRAPOLATED` |
+
+**Reason:** This is the ADR-022 / ADR-024 rule applied to prediction. A caller given only
+the surviving trajectories cannot tell a scene with no tracks from one where every track
+was on its first frame - and those mean very different things to a risk engine.
+
+The individual rules follow from ADR-023. `velocity is None` means *not measurable*, not
+*zero*: emitting a flat "stays where it is" path would fabricate a measurement from
+nothing. A measured `Vector3(0, 0, 0)` is genuinely different - it is an observed
+standstill - and legitimately produces a stationary trajectory. The two cases are handled
+separately and tested separately.
+
+An over-speed velocity is **rejected, never clipped**: a clipped velocity is a number no
+sensor produced, and substituting one silently would be exactly the fabrication the
+project rules forbid.
+
+`TENTATIVE` tracks are predicted rather than skipped when they have a velocity, because a
+velocity measured from two observations is a real measurement however new the track is.
+What differs is the amount of evidence, and that belongs in the confidence score rather
+than in a binary include/exclude decision that would discard usable information.
+
+`COASTING` tracks are predicted but marked `EXTRAPOLATED`, with `observation_age_s`
+stating the measured staleness and uncertainty widened by it. `STALE_OBSERVATION` bounds
+this: once the last observation is older than the horizon, the output would be more
+gap-filling than prediction, so none is produced.
+
+**Alternatives considered:** Returning a bare `list[PredictedTrajectory]` (loses every
+skip reason); skipping tentative and coasting tracks entirely (discards measured velocity
+and hides objects from the risk engine precisely when they are occluded); clipping
+over-speed velocities (fabricates data); emitting a stationary trajectory when velocity is
+null (the specific error ADR-023 exists to prevent).
+
+**Impact:** `TrajectoryPredictor.predict` returns a `PredictionResult` rather than a list.
+The abstract signature was widened to match; it had no implementations, so nothing broke.
+`max_tracks` overflow is recorded rather than dropped, but the predictor does **not**
+prioritise which tracks to keep - it has no risk signal to prioritise by. That is
+Phase 6's job, and inventing a priority here would be an unmeasured heuristic dressed as a
+safety feature.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title

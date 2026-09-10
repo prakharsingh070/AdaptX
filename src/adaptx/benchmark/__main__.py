@@ -22,6 +22,8 @@ from adaptx.benchmark.datasets import SIZE_LADDER, DatasetScenario
 from adaptx.benchmark.detection import render as render_detection
 from adaptx.benchmark.detection import run_detection_benchmark
 from adaptx.benchmark.models import BenchmarkReport
+from adaptx.benchmark.prediction import render as render_prediction
+from adaptx.benchmark.prediction import run_prediction_benchmark
 from adaptx.benchmark.runner import DEFAULT_REPEATS, DEFAULT_WARMUP, BenchmarkRunner
 from adaptx.benchmark.tracking import render as render_tracking
 from adaptx.benchmark.tracking import run_tracking_benchmark
@@ -62,6 +64,11 @@ def _parse_args() -> argparse.Namespace:
         "--track",
         action="store_true",
         help="Benchmark the tracker on synthetic detections instead.",
+    )
+    parser.add_argument(
+        "--predict",
+        action="store_true",
+        help="Benchmark trajectory prediction on synthetic tracks instead.",
     )
     parser.add_argument("--json", type=pathlib.Path, help="Write the full report here.")
     return parser.parse_args()
@@ -123,6 +130,18 @@ def main() -> None:
     scenarios = (
         tuple(DatasetScenario(name) for name in args.scenarios) if args.scenarios else SIZE_LADDER
     )
+
+    if args.predict:
+        prediction_report = run_prediction_benchmark(repeats=args.repeats, warmup=args.warmup)
+        print(render_prediction(prediction_report))
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(
+                json.dumps(prediction_report.model_dump(mode="json"), indent=2),
+                encoding="utf-8",
+            )
+            print(f"\nfull report written to {args.json}")
+        return
 
     if args.track:
         tracking_report = run_tracking_benchmark(repeats=args.repeats, warmup=args.warmup)

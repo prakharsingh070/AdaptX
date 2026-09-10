@@ -32,14 +32,26 @@ class TestTelemetryChannel:
         assert "unavailable" in data["metrics"]
 
     def test_no_perception_data_is_fabricated(self, client: TestClient) -> None:
-        """Telemetry must not invent tracks, predictions, risk or map cells."""
+        """Telemetry must not invent risk or map cells, nor stream raw paths.
+
+        Retargeted in Phase 5: ``predicted_trajectories`` left
+        ``not_yet_available`` because a predictor now genuinely exists. The
+        property preserved is that a stream leaves that list only when
+        something produces it, and that the channel still carries no raw
+        trajectory geometry - prediction appears as a summary under a
+        different key.
+        """
         with client.websocket_connect("/ws/telemetry") as websocket:
             websocket.receive_json()
             data = websocket.receive_json()["data"]
 
-        for stream in ("predicted_trajectories", "risk_field", "adaptive_map"):
+        for stream in ("risk_field", "adaptive_map"):
             assert stream not in data
             assert stream in data["not_yet_available"]
+
+        assert "predicted_trajectories" not in data
+        assert "predicted_trajectories" not in data["not_yet_available"]
+        assert "prediction" in data
 
     def test_tracking_telemetry_is_a_summary_without_future_paths(self, client: TestClient) -> None:
         """Counts and ids only - no per-track history, no forecast trajectories."""

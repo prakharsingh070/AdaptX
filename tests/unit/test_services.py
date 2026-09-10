@@ -181,10 +181,28 @@ class TestSystemService:
     ) -> None:
         components = {c.name: c for c in context.system.status().components}
 
-        for name in ("mapping", "prediction"):
+        for name in ("mapping",):
             assert components[name].implementation is ImplementationStatus.PLANNED
             assert components[name].readiness is ComponentReadiness.NOT_READY
             assert components[name].required is False
+
+    def test_prediction_is_partial_because_it_is_a_baseline(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 5 implemented a constant-velocity predictor, not a finished one.
+
+        Retargeted in Phase 5: prediction was previously asserted PLANNED here.
+        It is now implemented as a baseline, so the guarantee that matters is
+        that it never reports IMPLEMENTED and never hides what it cannot do.
+        """
+        components = {c.name: c for c in context.system.status().components}
+        prediction = components["prediction"]
+
+        assert prediction.implementation is ImplementationStatus.PARTIAL
+        assert prediction.required is False
+        assert "constant-velocity baseline" in prediction.detail
+        assert "heuristic" in prediction.detail
+        assert "unmeasured" in prediction.detail
 
     def test_tracking_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext

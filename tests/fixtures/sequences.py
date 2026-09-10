@@ -24,6 +24,7 @@ from adaptx.models.common import (
     Vector3,
 )
 from adaptx.models.objects import DetectedObject
+from adaptx.models.tracking import TrackedObject, TrackStatus
 
 #: Fixed epoch so every sequence is reproducible.
 EPOCH = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -180,3 +181,59 @@ def parallel_pair(
             )
         )
     return sequence
+
+
+def track(
+    position: tuple[float, float, float] = (10.0, 0.0, 0.0),
+    velocity: tuple[float, float, float] | None = (2.0, 0.0, 0.0),
+    *,
+    track_id: int = 0,
+    status: TrackStatus = TrackStatus.CONFIRMED,
+    object_class: ObjectClass = ObjectClass.VEHICLE,
+    hits: int = 5,
+    age_frames: int = 5,
+    missed_frames: int = 0,
+    last_seen_offset_s: float = 0.0,
+    confidence: float = 0.8,
+    coordinate_frame: CoordinateFrame = CoordinateFrame.EGO,
+    source: DataSource = DataSource.SYNTHETIC_TEST,
+) -> TrackedObject:
+    """A tracked object with an explicit state, for prediction tests.
+
+    Built directly rather than produced by the tracker: these tests exercise
+    prediction, and routing them through association would make a prediction
+    failure indistinguishable from a tracking one. The tracker's own tests
+    already prove it produces states of this shape.
+
+    ``velocity=None`` is the important case, and it is the caller's job to ask
+    for it: it means *not measurable*, never zero (ADR-023).
+
+    ``last_seen_offset_s`` is how long **before** the epoch the track was last
+    observed, so a coasting track can be given a measured staleness.
+    """
+    length, width, height = SIZES[object_class]
+    centre = Vector3(x=position[0], y=position[1], z=position[2])
+    return TrackedObject(
+        timestamp=EPOCH,
+        track_id=track_id,
+        object_class=object_class,
+        status=status,
+        position=centre,
+        velocity=(
+            None if velocity is None else Vector3(x=velocity[0], y=velocity[1], z=velocity[2])
+        ),
+        bounding_box=BoundingBox3D(
+            center=centre,
+            dimensions=Dimensions(length=length, width=width, height=height),
+            yaw_rad=0.0,
+        ),
+        point_count=500,
+        hits=hits,
+        first_seen=EPOCH - timedelta(seconds=age_frames * 0.1),
+        confidence=confidence,
+        age_frames=age_frames,
+        missed_frames=missed_frames,
+        last_seen=EPOCH - timedelta(seconds=last_seen_offset_s),
+        coordinate_frame=coordinate_frame,
+        source=source,
+    )

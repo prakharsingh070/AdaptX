@@ -109,7 +109,7 @@ def _declared_components() -> list[ComponentStatus]:
                 "No learned motion model, no appearance features, no "
                 "re-identification - a track retired for missing too many frames "
                 "does not come back. Tracking quality is bounded by detection "
-                "quality, and no trajectory prediction is performed"
+                "quality. Trajectory prediction is a separate component"
             ),
             phase=4,
         ),
@@ -121,7 +121,7 @@ def _declared_components() -> list[ComponentStatus]:
                 "2.5D map and resolution contracts only; no mapper and no "
                 "adaptive resolution algorithm implemented"
             ),
-            phase=5,
+            phase=6,
         ),
         ComponentStatus(
             name="risk",
@@ -131,14 +131,26 @@ def _declared_components() -> list[ComponentStatus]:
                 "contract plus a proximity-only baseline used for testing; "
                 "the ADAPT-X risk engine is not implemented"
             ),
-            phase=6,
+            phase=7,
         ),
         ComponentStatus(
             name="prediction",
-            readiness=ComponentReadiness.NOT_READY,
-            implementation=ImplementationStatus.PLANNED,
-            detail="predictor contract only; no predictor implemented",
-            phase=8,
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "deterministic constant-velocity baseline with heuristic "
+                "uncertainty. Measured velocity is extrapolated over a "
+                "configurable horizon; a track without a measured velocity is "
+                "reported as skipped rather than assumed stationary. No "
+                "acceleration model, no Kalman filter, no learned model, no "
+                "lane or map conditioning, and no interaction between objects. "
+                "Uncertainty grows with extrapolation time by a documented "
+                "formula and is not a calibrated sigma or probability. "
+                "Prediction accuracy is unmeasured: no labelled trajectories "
+                "exist. Collision and conflict reasoning belong to the risk "
+                "engine, not here"
+            ),
+            phase=5,
         ),
     ]
 

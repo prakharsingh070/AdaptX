@@ -331,6 +331,81 @@ class TrackingSettings(BaseModel):
         return self
 
 
+class PredictionSettings(BaseModel):
+    """Trajectory prediction (Phase 5).
+
+    Coordinate convention as everywhere else (ADR-009): +x forward, +y left,
+    +z up, metres, origin at the sensor.
+
+    These are **engineering defaults** for a deterministic constant-velocity
+    baseline, not measured real-world limits. None has been tuned or validated
+    against labelled trajectories, because no labelled trajectories exist.
+    """
+
+    horizon_s: float = Field(
+        default=3.0,
+        gt=0.0,
+        description="How far ahead a trajectory extends, in seconds.",
+    )
+    interval_s: float = Field(
+        default=0.25,
+        gt=0.0,
+        description=(
+            "Spacing between trajectory points. Points run from t+0 to the "
+            "horizon inclusive, so the count is horizon/interval + 1."
+        ),
+    )
+    max_tracks: int = Field(
+        default=256,
+        ge=1,
+        description=(
+            "Upper bound on tracks predicted in one call. Tracks beyond it are "
+            "recorded as skipped rather than silently dropped."
+        ),
+    )
+    max_speed_mps: float = Field(
+        default=80.0,
+        gt=0.0,
+        description=(
+            "Sanity bound on measured track speed. A faster track is reported "
+            "as invalid and skipped; the velocity is never clipped, because a "
+            "clipped value would be a number no sensor produced."
+        ),
+    )
+
+    base_uncertainty_m: float = Field(
+        default=0.5,
+        gt=0.0,
+        description=(
+            "Heuristic uncertainty radius at t+0, standing in for detection "
+            "and tracking positional error. Not a calibrated sigma. Strictly "
+            "positive: a zero floor would claim a perfectly known position."
+        ),
+    )
+    uncertainty_growth_mps: float = Field(
+        default=0.5,
+        ge=0.0,
+        description=(
+            "Metres of additional heuristic uncertainty per second of "
+            "extrapolation. Not a calibrated growth rate."
+        ),
+    )
+    confidence_hits_full: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Associated detections at which a track contributes full evidence "
+            "to the trajectory confidence score. Fewer hits scale it down."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> PredictionSettings:
+        if self.interval_s > self.horizon_s:
+            raise ValueError("prediction.interval_s must be <= prediction.horizon_s")
+        return self
+
+
 class MapSettings(BaseModel):
     """2.5D map geometry and the cell size bound to each resolution level.
 
@@ -403,6 +478,7 @@ class Settings(BaseSettings):
     lidar: LiDARSettings = Field(default_factory=LiDARSettings)
     detection: DetectionSettings = Field(default_factory=DetectionSettings)
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
+    prediction: PredictionSettings = Field(default_factory=PredictionSettings)
     map: MapSettings = Field(default_factory=MapSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     websocket: WebSocketSettings = Field(default_factory=WebSocketSettings)
