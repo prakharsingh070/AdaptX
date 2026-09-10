@@ -338,8 +338,97 @@ consecutive requests confirmed independent.
 
 ---
 
+## Phase 7 — Risk and uncertainty · verified
+
+**Purpose:** turn tracks, trajectories and the map into a single per-object answer to *how
+concerning is this, and how sure are we* - the signal Phase 8 needs to allocate perception
+effort.
+
+**Three conflicts with the brief, resolved against the repository.** The instruction asked
+for risk levels `LOW/MEDIUM/HIGH/UNKNOWN`, but `RiskLevel` already had `CRITICAL`, exercised
+by tests and present in the API thresholds. `UNKNOWN` was **added**; `CRITICAL` kept. The
+instruction sketched `RiskEngine.assess_many` on the interface, but `RiskEngine` already had
+one implementation, so widening it would have forced changes to Phase 1 code; instead the new
+engine implements the **existing** abstract methods - keeping it comparable to the baseline
+through `RiskField` - and adds `assess_many` as its own richer API, matching how the mapping
+and prediction services already type against concrete engines. The instruction's example
+formula summed uncertainty into the score, but `models/risk.py` states the opposite; the
+repository won (ADR-033).
+
+**Algorithm (ADR-032):** three factors, each normalised to `[0, 1]` - proximity, radial rate
+of approach, and how close the Phase 5 predicted path passes - combined as a weighted mean
+**over the factors actually available**::
+
+    risk_score = sum(w_i * f_i) / sum(w_i)   over available i only
+
+**The renormalisation rule is the whole decision.** Treating a missing factor as zero is
+quietly catastrophic, because *low* is exactly what an unmeasured value would look like: a
+track whose velocity was never measured would score as though standing still, and the object
+we know least about would look least concerning. That inversion is the reason ADR-023 exists,
+applied one phase later. When no factor can be computed at all, the assessment is `UNKNOWN`
+with `risk_score = None` - never a fabricated number.
+
+**Uncertainty is reported beside risk, never folded into it (ADR-033).** Two tracks identical
+except for observability score the *same* risk and different uncertainty - asserted by test.
+That separation is not fastidiousness: it is what Phase 8 needs. A poorly observed region may
+deserve finer perception precisely *because* it is poorly observed, and summing the two would
+collapse the signal a resolution controller most needs, leaving a low score ambiguous between
+"we looked and it is quiet" and "we could barely see it". Nine contributing reasons stay
+visible beside the scalar so a consumer can act on the cause.
+
+**Map context never lowers risk (ADR-034).** This is ADR-031 carried into the phase most
+tempted to violate it. The seductive move - lower risk where a predicted path crosses cells
+with no points - would treat *unobserved* as *clear*, reducing risk exactly where the sensor
+saw least: behind the vehicle occluding the pedestrian. So map context is a context signal
+and an uncertainty source, contributing nothing to the score.
+
+**Aggregation is a maximum, never a mean (ADR-035).** Ten quiet objects and one critical one
+average to something reassuring, and the object that matters disappears into the arithmetic.
+An unassessed scene reports `UNKNOWN`, not `LOW`.
+
+**Deliberately excluded:** time-to-collision - over a constant-velocity extrapolation with
+heuristic uncertainty it would be a precise-looking number resting on two approximations;
+trajectory-map intersection and occlusion, which need a visibility model that does not exist;
+object class as a score multiplier, which would encode an unmeasured judgement that a
+pedestrian is inherently N times more concerning than a vehicle. Class is reported and
+appears in the explanation instead.
+
+**Explanations are generated, never written.** Every clause comes from a computed number or
+flag, and a parametrised test asserts the text never contains "probability", "guaranteed",
+"safe", "validated" or "calibrated".
+
+**Phase 8 boundary (ADR-036).** The engine imports no resolution type, produces no
+`ResolutionDecision`, and `RiskAssessment` carries no cell size or resolution level. Asserted
+at the model, the wire format and the module surface, and reported as
+`decides_resolution: false`.
+
+**Two Phase 1–6 tests were retargeted, none weakened.** Both asserted the *only* risk engine
+was the proximity baseline. Each now guards what mattered underneath: that the status endpoint
+names its engine and its limits, that the proximity baseline is still retained for comparison,
+and that risk never reports `IMPLEMENTED`.
+
+**Measured (Experiment 006):** linear in object count at 74-82 µs per object across a 200x
+range, with no quadratic term - each object is assessed independently. Cost is dominated by
+**contract construction, not arithmetic**: roughly five Pydantic models per assessment against
+a handful of multiplications and a `min` over 13 trajectory points. The same finding as
+Experiment 004. At the ~96 objects the pipeline actually produces, assessment costs about
+7 ms.
+
+**Limitations:** the score orders objects by concern but measures nothing physical; it is not
+a probability, not calibrated, never validated - no labelled risk data exists; weights and
+thresholds have never been tuned against outcomes because no outcomes have been recorded;
+risk is object-level only, so `RiskCell` and `AdaptiveMapCell.risk_score` stay unpopulated
+and `risk_field` stays unavailable; quality is bounded by tracking and prediction, themselves
+baselines.
+
+**Status:** 1021 tests, ruff and mypy clean, live verification passed - 15 endpoints
+responding, a real scene assessed end to end, unknown velocity reported as unknown rather
+than zero, and the Phase 8 boundary confirmed absent from every response.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
-visible. No phase has added a dependency beyond the Phase 1 set - six phases, zero new dependencies.
+visible. No phase has added a dependency beyond the Phase 1 set - seven phases, zero new dependencies.

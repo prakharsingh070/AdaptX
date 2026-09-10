@@ -61,6 +61,9 @@ tests/
                             lifecycle, horizon/interval, uncertainty growth, limits,
                             accounting, determinism, configuration validation
     test_risk_baseline.py   proximity baseline behaviour and thresholds
+    test_risk_engine.py     factors, unknown-velocity semantics, uncertainty,
+                            lifecycle, staleness, map context, levels, aggregation,
+                            determinism, edge cases, Phase 8 boundary
     test_services.py        metrics, LiDAR ingest, system status aggregation
     test_carla_mock.py      CARLA boundary: real client without CARLA, mock, service
   integration/
@@ -78,6 +81,8 @@ tests/
     test_mapping_pipeline.py
                             processed frame -> mapper with no parallel preprocessing
                             path, plus the map/status APIs and telemetry
+    test_risk_pipeline.py   whole chain through to risk, plus the risk/status APIs
+                            and telemetry
     test_prediction_pipeline.py
                             raw frame -> processing -> detection -> tracking ->
                             prediction, plus the predict/status APIs and telemetry
@@ -160,6 +165,15 @@ enforced by CI rather than by review:
 | `test_the_adaptive_map_stream_remains_unavailable` | A fixed-resolution map making the adaptive one look present |
 | `test_mapping_is_partial_because_it_is_a_fixed_resolution_baseline` | A baseline mapper reporting as IMPLEMENTED |
 | `test_the_payload_stays_small` | A dense grid being pushed down the status channel |
+| `test_unknown_velocity_and_measured_zero_produce_different_scores` | An unmeasured object scoring like a calm one |
+| `test_an_empty_cell_never_lowers_risk` | Unobserved space being read as free space |
+| `test_uncertainty_is_never_folded_into_the_risk_score` | Two independent signals collapsing into one number |
+| `test_the_aggregate_is_a_maximum_not_a_mean` | A critical object vanishing behind ten quiet ones |
+| `test_an_empty_scene_reports_unknown_not_low` | An unassessed scene claiming to be safe |
+| `test_the_explanation_never_overclaims` | An explanation asserting probability, safety or validation |
+| `test_never_claims_a_collision_probability` | A heuristic score presented as a calibrated probability |
+| `test_risk_does_not_decide_resolution` | Phase 8's decision leaking into Phase 7 |
+| `test_a_lost_track_is_not_scored` | A terminated track reported as a present threat |
 | `test_unknown_velocity_produces_no_trajectory` | Extrapolating a track whose motion was never measured |
 | `test_a_measured_standstill_produces_a_stationary_trajectory` | Conflating a measured zero with an unknown velocity |
 | `test_excessive_speed_is_rejected_not_clipped` | Substituting a corrected velocity no sensor produced |

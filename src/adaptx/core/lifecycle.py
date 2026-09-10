@@ -20,6 +20,7 @@ from adaptx.services.lidar_service import LiDARIngestService
 from adaptx.services.mapping_service import MappingService
 from adaptx.services.metrics_service import MetricsService
 from adaptx.services.prediction_service import PredictionService
+from adaptx.services.risk_service import RiskService
 from adaptx.services.system_service import SystemService
 from adaptx.services.tracking_service import TrackingService
 
@@ -41,6 +42,7 @@ class ApplicationContext:
     tracking: TrackingService
     prediction: PredictionService
     mapping: MappingService
+    risk: RiskService
 
 
 def build_context(settings: Settings | None = None) -> ApplicationContext:
@@ -67,6 +69,7 @@ def build_context(settings: Settings | None = None) -> ApplicationContext:
         tracking=TrackingService(resolved.tracking),
         prediction=PredictionService(resolved.prediction),
         mapping=MappingService(resolved.map),
+        risk=RiskService(resolved.risk),
     )
 
 
@@ -98,12 +101,13 @@ def shutdown(context: ApplicationContext) -> None:
     state in the process, and leaving it behind would let a restarted context
     inherit tracks from frames it never saw.
 
-    Prediction and mapping are reset too, though neither carries perception
+    Prediction, mapping and risk are reset too, though none carries perception
     state - only the counters behind their status summaries, which would
     otherwise describe frames a restarted context never processed.
     """
     context.tracking.reset()
     context.prediction.reset()
     context.mapping.reset()
+    context.risk.reset()
     context.carla.disconnect()
     logger.info("ADAPT-X stopped")

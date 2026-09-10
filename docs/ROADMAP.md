@@ -203,24 +203,57 @@ one.
 - Probabilistic occupancy, which needs a sensor model (ADR-031).
 - Reference: [`knowledge-base/05_2.5d-mapping.md`](knowledge-base/05_2.5d-mapping.md).
 
-## Phase 7 — Risk and uncertainty · **To do**
+## Phase 7 — Risk and uncertainty · **Done (heuristic baseline)**
 
-- Implement `risk.interfaces.RiskEngine` as the real ADAPT-X engine; keep
-  `BaselineProximityRiskEngine` for comparison.
-- Populate `AdaptiveMapCell.risk_score` and `uncertainty`, which Phase 6 deliberately leaves
-  unset.
-- Consume Phase 5 trajectories for conflict analysis, time-to-collision and trajectory
-  overlap. Treat `position_uncertainty_m` and `confidence` as first-class inputs, not
-  decoration (ADR-026).
-- Populate `RiskFactors` so resolution changes are attributable.
-- Add the uncertainty engine: define representation, propagation and its effect on risk
-  and resolution.
+A deterministic, explainable object-level risk and uncertainty layer, built to be replaced.
+
+- `HeuristicRiskEngine` — three normalised factors (proximity, rate of approach, predicted
+  approach) combined as a weighted mean **over the factors actually available** (ADR-032).
+- A factor that cannot be computed is **dropped and the weights renormalise**, never scored
+  zero. Unknown velocity is not a standstill.
+- `UNKNOWN` with a **null score** when nothing can be computed or the track is lost, rather
+  than a fabricated number. `RiskLevel.UNKNOWN` added additively; `CRITICAL` retained.
+- **Uncertainty is reported beside risk, never folded into it** (ADR-033), with the
+  contributing reasons kept visible.
+- Map context never lowers risk: an empty cell is *unobserved*, not free (ADR-034).
+- Scene aggregate is a **maximum, never a mean** — one critical object cannot vanish behind
+  ten quiet ones (ADR-035).
+- Explanations are generated from the computed factors, never free-form.
+- `BaselineProximityRiskEngine` retained **unchanged** as the comparison reference.
+- `POST /api/v1/lidar/risk`, extended `GET /api/v1/risk/status`; risk summary on
+  `/ws/telemetry`; risk benchmark via `--risk`.
+- No ML framework, no SciPy, no new dependencies.
+
+**The score is not a probability of collision.** It is not calibrated, has never been
+validated against labelled risk data — none exists — and its thresholds are baseline
+engineering values, not safety-certified limits.
+
+### Phase 7B — deferred risk work · **To do**
+
+- Time-to-collision, deliberately excluded: over a constant-velocity extrapolation with
+  heuristic uncertainty it would be a precise-looking number resting on two approximations.
+- Trajectory-map intersection and occlusion modelling, which need a visibility model the
+  project does not have (ADR-034).
+- A spatial risk **field** (`RiskCell`): Phase 7 is object-level only, so `risk_field` stays
+  listed as unavailable in telemetry.
+- Populating `AdaptiveMapCell.risk_score` / `uncertainty`, which needs that per-cell
+  formulation.
+- Ego planned path and object interaction.
+- Labelled risk data, the precondition for measuring whether any of this is *right*.
 - References: [`knowledge-base/06_risk-engine.md`](knowledge-base/06_risk-engine.md),
   [`knowledge-base/07_uncertainty.md`](knowledge-base/07_uncertainty.md).
 
 ## Phase 8 — Adaptive resolution · **To do**
 
-- Implement `mapping.interfaces.ResolutionController` consuming `ResolutionContext`.
+- **This is where the ADAPT-X claim gets tested.** Phase 6 built the fixed-resolution
+  mapper; Phase 7 produced risk and uncertainty. Phase 8 connects them and must show that
+  risk-aware allocation beats uniform allocation on measured workload.
+- Implement `mapping.interfaces.ResolutionController` consuming `ResolutionContext`, fed
+  from Phase 7 `RiskAssessment` values, and producing a `ResolutionDecision` the existing
+  mapper already applies unchanged (ADR-029, ADR-036).
+- Consume **uncertainty as well as risk**: a poorly observed region may deserve finer
+  perception even when its computed risk is low. That is the whole reason the two are kept
+  separate (ADR-033).
 - Include a documented stabilisation mechanism (hysteresis, smoothing or minimum dwell
   time) so resolution does not oscillate between frames.
 - Reference: [`knowledge-base/10_adaptive-resolution.md`](knowledge-base/10_adaptive-resolution.md).

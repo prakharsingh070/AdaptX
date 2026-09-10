@@ -510,10 +510,19 @@ class MapSettings(BaseModel):
 
 
 class RiskSettings(BaseModel):
-    """Risk normalisation bounds and level thresholds.
+    """Risk normalisation bounds, level thresholds and Phase 7 heuristics.
 
     Risk is normalised to ``[0, 1]``. Thresholds partition that range into the
-    LOW / MEDIUM / HIGH / CRITICAL levels.
+    LOW / MEDIUM / HIGH / CRITICAL levels. ``UNKNOWN`` has no threshold: it
+    means nothing was scored, not that a score fell in a band.
+
+    Every value here is a **baseline engineering value**, chosen as a plausible
+    starting point for an automotive scene. None has been tuned or validated
+    against labelled risk data, because no labelled risk data exists, and none
+    is a safety-certified limit.
+
+    Coordinate convention as everywhere else (ADR-009): +x forward, +y left,
+    +z up, metres, ego reference at the origin.
     """
 
     max_range_m: float = Field(default=60.0, gt=0)
@@ -521,11 +530,91 @@ class RiskSettings(BaseModel):
     threshold_high: float = Field(default=0.60, ge=0.0, le=1.0)
     threshold_critical: float = Field(default=0.85, ge=0.0, le=1.0)
 
+    # -- Phase 7 heuristic factors ----------------------------------------
+    proximity_near_m: float = Field(
+        default=5.0,
+        gt=0.0,
+        description=(
+            "At or inside this planar distance the proximity factor is 1.0. "
+            "A baseline engineering value, not a validated safety envelope."
+        ),
+    )
+    proximity_far_m: float = Field(
+        default=40.0,
+        gt=0.0,
+        description="At or beyond this distance the proximity factor is 0.0.",
+    )
+    closing_speed_high_mps: float = Field(
+        default=15.0,
+        gt=0.0,
+        description=(
+            "Rate of approach at which the closing-speed factor saturates at "
+            "1.0. Objects receding contribute 0.0."
+        ),
+    )
+    stale_observation_s: float = Field(
+        default=0.5,
+        gt=0.0,
+        description=(
+            "An observation older than this is treated as stale: it still "
+            "informs the assessment but raises uncertainty."
+        ),
+    )
+    low_track_confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Track confidence at or below this raises uncertainty. The value "
+            "is Phase 3's geometric fit score carried through, not a "
+            "probability (ADR-021)."
+        ),
+    )
+
+    # -- Factor weights ----------------------------------------------------
+    # Combined as a weighted mean over the factors that are actually
+    # available; a factor that could not be computed is dropped and the
+    # remaining weights renormalise, never treated as zero (ADR-032).
+    weight_proximity: float = Field(
+        default=0.5, ge=0.0, description="Weight of the proximity factor."
+    )
+    weight_closing_speed: float = Field(
+        default=0.25, ge=0.0, description="Weight of the closing-speed factor."
+    )
+    weight_predicted_proximity: float = Field(
+        default=0.25, ge=0.0, description="Weight of the predicted-proximity factor."
+    )
+
+    #: Objects predicted to pass within this distance count as approaching the
+    #: ego region. Not a collision test - the trajectory is a constant-velocity
+    #: extrapolation with heuristic uncertainty (ADR-026).
+    predicted_proximity_near_m: float = Field(default=5.0, gt=0.0)
+
+    max_assessed_tracks: int = Field(
+        default=512,
+        ge=1,
+        description="Upper bound on tracks assessed in one call, to bound response size.",
+    )
+
     @model_validator(mode="after")
     def _check_thresholds(self) -> RiskSettings:
         if not (self.threshold_medium < self.threshold_high < self.threshold_critical):
             raise ValueError("risk thresholds must satisfy medium < high < critical")
         return self
+
+    @model_validator(mode="after")
+    def _check_heuristics(self) -> RiskSettings:
+        if self.proximity_near_m >= self.proximity_far_m:
+            raise ValueError("risk.proximity_near_m must be < risk.proximity_far_m")
+        total = self.weight_proximity + self.weight_closing_speed + self.weight_predicted_proximity
+        if total <= 0.0:
+            raise ValueError("risk factor weights must not all be zero")
+        return self
+
+    @property
+    def total_weight(self) -> float:
+        """Sum of the factor weights, used to renormalise available factors."""
+        return self.weight_proximity + self.weight_closing_speed + self.weight_predicted_proximity
 
 
 class WebSocketSettings(BaseModel):

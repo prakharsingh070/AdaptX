@@ -135,11 +135,26 @@ def _declared_components() -> list[ComponentStatus]:
         ),
         ComponentStatus(
             name="risk",
-            readiness=ComponentReadiness.NOT_READY,
+            readiness=ComponentReadiness.READY,
             implementation=ImplementationStatus.PARTIAL,
             detail=(
-                "contract plus a proximity-only baseline used for testing; "
-                "the ADAPT-X risk engine is not implemented"
+                "deterministic heuristic risk and uncertainty baseline. Scores "
+                "proximity, rate of approach and predicted approach as a "
+                "weighted mean over the factors actually available; a factor "
+                "that cannot be computed is dropped, never treated as zero. "
+                "THE SCORE IS NOT A PROBABILITY OF COLLISION: it is not "
+                "calibrated and has never been validated against labelled risk "
+                "data, because none exists. Thresholds are baseline "
+                "engineering values, not safety-certified limits. Uncertainty "
+                "is heuristic and is reported separately from risk, never "
+                "folded into the score. A track that cannot be assessed is "
+                "reported UNKNOWN with a null score rather than a fabricated "
+                "number. No time-to-collision, no trajectory-map intersection, "
+                "no ego planned path, no object interaction, and no spatial "
+                "risk field. RISK DOES NOT DECIDE SPATIAL RESOLUTION - that is "
+                "a separate decision belonging to a resolution controller, "
+                "which is not implemented. The proximity-only baseline is "
+                "retained unchanged for comparison"
             ),
             phase=7,
         ),

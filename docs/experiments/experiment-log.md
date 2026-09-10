@@ -410,6 +410,91 @@ exists to measure. **No real-time claim is made.** No correctness claim is made 
 **Artifacts:** Reproduce with
 `python -m adaptx.benchmark --map --repeats 11 --warmup 3 --json <path>`.
 
+## Experiment 006 - Phase 7 risk assessment throughput
+
+**Date:** 2026-09-10
+
+**Scenario:** Synthetic tracks on a ring around the ego reference, each at a distance
+cycling through 3-42 m and closing radially at a rate cycling through 1-20 m/s, so the score
+spans the scale rather than collapsing into one band. Every track carries a measured
+velocity, a real Phase 5 trajectory and a real Phase 6 map, so every object exercises all
+three factors - the engine's worst realistic case rather than a lucky run of dropped
+factors.
+
+Trajectories come from the actual `ConstantVelocityPredictor` and the map from the actual
+`FixedResolutionMapper`, so the benchmark measures what the engine receives in the pipeline.
+The Phase 5 per-call track limit is raised for generation only; it bounds API responses and
+would otherwise leave the larger cases without trajectories.
+
+Only the assessment call is timed; generation is excluded.
+
+**Random seed:** Not applicable - the scene is deterministic by construction, with no random
+element. Risk assessment is deterministic, so a repeat run reproduces the level distribution
+exactly.
+
+**Hardware and software:** Windows 11, 16 logical CPUs, Python 3.13.7, NumPy 2.5.3,
+adaptx 0.1.0. Single-threaded.
+
+**Configuration:** Defaults - proximity 5-40 m, closing speed saturating at 15 m/s, weights
+0.50 / 0.25 / 0.25, thresholds 0.35 / 0.60 / 0.85. Map 120 m square at 0.5 m.
+
+**Measurement window:** 3 warm-up passes discarded, 11 timed repeats, median reported. Peak
+memory measured in a separate dedicated `tracemalloc` run, never during the timed repeats.
+
+**Results:**
+
+| Objects | Scored | With trajectory | Low | Medium | High | Critical | Unknown | Median ms | Spread ms | Objects/s | µs/object | Peak MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 5 | 5 | 5 | 0 | 0 | 5 | 0 | 0 | 0.370 | 0.33-0.60 | 13,510 | 74.0 | 0.02 |
+| 25 | 25 | 25 | 0 | 5 | 20 | 0 | 0 | 1.900 | 1.74-2.22 | 13,160 | 76.0 | 0.11 |
+| 100 | 100 | 100 | 0 | 40 | 60 | 0 | 0 | 7.369 | 6.77-11.84 | 13,571 | 73.7 | 0.45 |
+| 500 | 500 | 500 | 0 | 240 | 260 | 0 | 0 | 39.939 | 37.06-45.16 | 12,519 | 79.9 | 2.32 |
+| 1000 | 1000 | 1000 | 0 | 500 | 500 | 0 | 0 | 81.544 | 73.57-139.96 | 12,263 | 81.5 | 4.66 |
+
+**Synthetic benchmark; not a real-world autonomous-driving performance claim.**
+
+- Assessment correctness: **not measured, and not measurable.** No labelled risk data exists.
+  Nothing here says an assessment is right, and nothing says the thresholds are appropriate.
+- The level distribution describes the **generated scene**, not the quality of the engine. It
+  is reported so a reader can see the cases were not all trivially low, not as a result.
+- No `CRITICAL` objects appear because reaching 0.85 needs proximity, closing speed **and**
+  predicted proximity all near maximum simultaneously; the ring generator never places an
+  object that close while also closing that fast. The band is exercised in the unit tests.
+- CPU / GPU: not measured for this experiment.
+
+**Observations:**
+
+1. **Cost is linear in object count**, at 74-82 µs per object across a 200x range. There is
+   no quadratic term: each object is assessed independently, unlike Phase 4 association
+   (`O(T x D)`, Experiment 003), and unlike Phase 6 mapping there is no grid term that scales
+   independently of the data.
+2. **Per-object cost is dominated by contract construction, not arithmetic.** Each assessment
+   builds four Pydantic models - `RiskAssessment`, `UncertaintyBreakdown`, `MapContext` and
+   usually `TrajectoryRelevance` - plus a `RiskFactors`. The scoring itself is a handful of
+   multiplications and a `min` over 13 trajectory points. This mirrors the finding in
+   Experiment 004, where prediction cost was likewise validation-bound.
+3. **The trajectory scan is the only per-object loop over a collection**, and it is bounded by
+   the Phase 5 horizon and interval - 13 points at the defaults. Halving `interval_s` would
+   double it; the assessment cost would follow.
+4. At the object counts this pipeline actually produces - the large detection scene yields 96
+   - risk assessment costs roughly 7 ms, comparable to Phase 4 tracking (10.6 ms) and Phase 5
+   prediction (27 ms) at the same scale, and small against the ~700 ms that frame spends in
+   processing.
+5. Memory is modest and linear: 4.7 MB of Python-tracked allocation for 1000 assessments,
+   which is the cost of the model objects themselves.
+6. The spread widens at 1000 objects (73.6-140.0 ms). That is allocation pressure and garbage
+   collection during a pass that constructs ~5000 models, not variance in the algorithm - the
+   median is stable across repeats and the output is bit-identical.
+
+**Conclusion:** Risk assessment is linear in object count and cheap at realistic scales, with
+model construction rather than scoring setting the floor. If the cost ever matters, the levers
+are the number of objects assessed (`max_assessed_tracks`) and the number of trajectory points
+scanned (Phase 5's `interval_s`), not the scoring formulation. **No real-time claim is made.**
+No correctness claim is made or possible.
+
+**Artifacts:** Reproduce with
+`python -m adaptx.benchmark --risk --repeats 11 --warmup 3 --json <path>`.
+
 ## Experiment Template
 
 ### Experiment XXX

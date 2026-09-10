@@ -31,6 +31,7 @@ from adaptx.models.prediction_result import PredictionResult
 from adaptx.models.processing import ProcessingMetrics
 from adaptx.models.resolution import ResolutionSource
 from adaptx.models.risk import RiskLevel
+from adaptx.models.risk_assessment import RiskAssessmentResult
 from adaptx.models.spatial_map import (
     DEFAULT_MAX_PROJECTED_CELLS,
     MapBounds,
@@ -316,6 +317,54 @@ class LiDARMapResponse(AdaptXModel):
     )
 
 
+class LiDARRiskRequest(LiDARFrameRequest):
+    """A frame to be processed, tracked, predicted, mapped and risk-assessed."""
+
+    include_map_context: bool = Field(
+        default=True,
+        description=(
+            "Build the 2.5D map and use it for spatial context. Turning it off "
+            "raises reported uncertainty rather than hiding the absence."
+        ),
+    )
+
+
+class LiDARRiskResponse(AdaptXModel):
+    """Result of running the whole chain and assessing risk.
+
+    Carries the risk assessments and stage summaries. Raw point arrays, full
+    trajectories and map cells are absent throughout - those come from their own
+    endpoints.
+    """
+
+    accepted: bool
+    risk: RiskAssessmentResult
+    tracking: TrackingResult
+    detection: DetectionResult
+    processing: ProcessingMetrics
+    prediction_summary: dict[str, Any] = Field(
+        default_factory=dict, description="Counts from the prediction pass, not trajectories."
+    )
+    map_summary: SpatialMapSummary | None = Field(
+        default=None, description="Map dimensions and accounting; null when not built."
+    )
+    summary: PointCloudSummary = Field(
+        description="Metadata of the processed frame the chain consumed."
+    )
+    detail: str = Field(
+        default=(
+            "Risk is a deterministic engineering heuristic, not a probability of "
+            "collision. It is not calibrated and has never been validated against "
+            "labelled risk data, because none exists. Thresholds are baseline "
+            "engineering values, not safety-certified limits. Uncertainty is "
+            "reported separately from risk, never folded into the score. An "
+            "object that could not be assessed is reported UNKNOWN with a null "
+            "score rather than a fabricated number. Risk does not decide spatial "
+            "resolution - that is a separate decision, not implemented."
+        )
+    )
+
+
 class TrackingResetResponse(AdaptXModel):
     """Confirmation that tracking state was cleared."""
 
@@ -397,7 +446,49 @@ class RiskStatusResponse(ModuleStatusResponse):
     )
     risk_levels: list[RiskLevel]
     thresholds: dict[str, float] = Field(
-        description="Lower bound of each risk level on the normalised [0, 1] scale."
+        description=(
+            "Lower bound of each **scored** level on the normalised [0, 1] scale. "
+            "UNKNOWN is absent by design: it means nothing was scored, so it has "
+            "no threshold."
+        )
+    )
+    scoring_model: str = Field(
+        default="", description="Identifier of the scoring formulation in use."
+    )
+    score_is_heuristic: bool = Field(
+        default=True,
+        description=(
+            "True: the score is a deterministic engineering heuristic, not a "
+            "calibrated probability."
+        ),
+    )
+    is_collision_probability: bool = Field(
+        default=False,
+        description="False: no collision-probability model exists in this project.",
+    )
+    uncertainty_is_heuristic: bool = Field(
+        default=True,
+        description="True: uncertainty is a documented heuristic, reported separately from risk.",
+    )
+    decides_resolution: bool = Field(
+        default=False,
+        description=(
+            "False: the risk engine never chooses spatial resolution. That is a "
+            "separate decision belonging to a resolution controller, which is "
+            "not implemented."
+        ),
+    )
+    baseline_engine: str = Field(
+        default="",
+        description="Identifier of the proximity-only comparison baseline retained alongside.",
+    )
+    frames_assessed: int = Field(default=0, ge=0)
+    last_assessment_timestamp: datetime | None = Field(
+        default=None,
+        description="Source time of the most recent assessment; null before the first.",
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict, description="Counts from the most recent assessment, if any."
     )
 
 

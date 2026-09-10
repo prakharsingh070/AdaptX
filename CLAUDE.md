@@ -124,7 +124,20 @@ every component in `services/system_service.py` agree with the list below.
   localisation, no loop closure, no sensor fusion, no semantic labelling.
   Occupancy is binary, not probabilistic or temporally fused. Map correctness is
   unmeasured: no labelled reference map exists.
-- Phase 7: Risk and uncertainty - TODO
+- Phase 7: Risk and uncertainty - DONE as a deterministic heuristic baseline
+  (object-level risk from proximity, rate of approach and predicted approach,
+  combined as a weighted mean over the factors actually available; a factor that
+  cannot be computed is dropped, never scored zero; UNKNOWN with a null score
+  when nothing can be computed; uncertainty reported separately from risk with
+  its contributing reasons visible; map context never lowers risk; scene
+  aggregate is a maximum, never a mean; POST /api/v1/lidar/risk;
+  ADR-032/033/034/035/036). THE SCORE IS NOT A PROBABILITY OF COLLISION: it is
+  not calibrated and has never been validated against labelled risk data,
+  because none exists. Thresholds are baseline engineering values, not
+  safety-certified limits. No time-to-collision, no trajectory-map
+  intersection, no spatial risk field, no ego planned path. RISK DOES NOT
+  DECIDE SPATIAL RESOLUTION - that is Phase 8. The proximity-only baseline is
+  retained unchanged for comparison.
 - Phase 8: Adaptive resolution - TODO
 - Phase 9: CARLA - TODO
 - Phase 10: Scenario generation and replay - TODO

@@ -25,12 +25,33 @@ from adaptx.models.map import ResolutionLevel
 
 
 class RiskLevel(StrEnum):
-    """Discretised risk band derived from a normalised risk score."""
+    """Discretised risk band derived from a normalised risk score.
+
+    ``LOW``/``MEDIUM``/``HIGH``/``CRITICAL`` partition the normalised ``[0, 1]``
+    scale using the configured thresholds (ADR-006).
+
+    ``UNKNOWN`` is different in kind: it means the engine had too little
+    information to score the object at all, not that it scored low. It has no
+    threshold, because nothing was scored, and an assessment carrying it reports
+    ``risk_score = None`` rather than a fabricated number (ADR-032). Added in
+    Phase 7; the four scored bands are unchanged.
+    """
 
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+    UNKNOWN = "unknown"
+
+
+#: Bands that come from an actual score, in increasing order of concern.
+#: ``UNKNOWN`` is deliberately absent - it is not a point on this scale.
+SCORED_RISK_LEVELS: tuple[RiskLevel, ...] = (
+    RiskLevel.LOW,
+    RiskLevel.MEDIUM,
+    RiskLevel.HIGH,
+    RiskLevel.CRITICAL,
+)
 
 
 class RiskFactors(AdaptXModel):
