@@ -20,14 +20,22 @@ from adaptx.models.common import (
     utc_now,
 )
 from adaptx.models.detection import DetectionResult
-from adaptx.models.map import ResolutionLevel
+from adaptx.models.map import AdaptiveMap, ResolutionLevel
 from adaptx.models.point_cloud import (
     PointCloudFrame,
     PointCloudSummary,
     RawPointCloudFrame,
 )
+from adaptx.models.prediction import PredictionStatus
+from adaptx.models.prediction_result import PredictionResult
 from adaptx.models.processing import ProcessingMetrics
+from adaptx.models.resolution import ResolutionSource
 from adaptx.models.risk import RiskLevel
+from adaptx.models.spatial_map import (
+    DEFAULT_MAX_PROJECTED_CELLS,
+    MapBounds,
+    SpatialMapSummary,
+)
 from adaptx.models.system import ComponentStatus
 from adaptx.models.tracking_result import TrackingResult
 
@@ -206,6 +214,108 @@ class LiDARTrackingResponse(AdaptXModel):
     )
 
 
+class LiDARPredictionResponse(AdaptXModel):
+    """Result of processing a frame, detecting, tracking and predicting.
+
+    Carries all four stages so a caller can see what each contributed. Raw
+    point arrays are absent throughout: summaries, object geometry and
+    trajectories only.
+
+    Predicted positions live in ``prediction`` and nowhere else. Nothing in
+    ``tracking`` is ever overwritten with a forecast.
+    """
+
+    accepted: bool
+    prediction: PredictionResult
+    tracking: TrackingResult
+    detection: DetectionResult
+    processing: ProcessingMetrics
+    summary: PointCloudSummary = Field(
+        description="Metadata of the non-ground frame the detector consumed."
+    )
+    ground_summary: PointCloudSummary | None = Field(
+        default=None, description="Metadata of the separated ground points, if any."
+    )
+    detail: str = Field(
+        default=(
+            "Prediction is a deterministic constant-velocity baseline with "
+            "heuristic uncertainty. Positions are extrapolations, not "
+            "measurements, and their accuracy is unmeasured: no labelled "
+            "trajectories exist. Tracks without a measured velocity are "
+            "reported in prediction.skipped rather than assumed stationary."
+        )
+    )
+
+
+class LiDARMapRequest(LiDARFrameRequest):
+    """A frame to be mapped, plus map-specific options.
+
+    Extends the standard frame request rather than replacing it, so a caller
+    that can post to ``/detect`` can post here unchanged.
+    """
+
+    resolution_m: float | None = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Cell edge length for this request only. Omit to use the "
+            "configured value. Recorded on the map with source 'override' so a "
+            "one-off resolution is never mistaken for the configured baseline."
+        ),
+    )
+    include_cells: bool = Field(
+        default=False,
+        description=(
+            "Include occupied cells in the response. Off by default: a 0.5 m "
+            "map over the default bounds is 57,600 cells, and returning the "
+            "empty ones would say nothing at great length."
+        ),
+    )
+    max_cells: int = Field(
+        default=DEFAULT_MAX_PROJECTED_CELLS,
+        ge=1,
+        le=DEFAULT_MAX_PROJECTED_CELLS,
+        description="Upper bound on returned cells. Truncation is reported, never silent.",
+    )
+
+
+class LiDARMapResponse(AdaptXModel):
+    """Result of processing a frame and mapping it into a 2.5D grid.
+
+    The grid itself is **not** returned as a dense array. ``map`` carries the
+    dimensions, bounds, resolution and full point accounting; ``cells`` carries
+    occupied cells only, and only when asked for.
+    """
+
+    accepted: bool
+    map: SpatialMapSummary
+    processing: ProcessingMetrics
+    summary: PointCloudSummary = Field(
+        description="Metadata of the processed frame the mapper consumed."
+    )
+    ground_summary: PointCloudSummary | None = Field(
+        default=None, description="Metadata of the separated ground points, if any."
+    )
+    cells: AdaptiveMap | None = Field(
+        default=None,
+        description="Occupied cells only, when requested. Empty cells are omitted.",
+    )
+    cells_truncated: bool = Field(
+        default=False,
+        description="True when the cell projection hit the requested limit.",
+    )
+    detail: str = Field(
+        default=(
+            "Mapping is a deterministic, frame-local, fixed-resolution baseline. "
+            "One cell size applies everywhere; adaptive resolution is not "
+            "implemented. Occupancy is binary (a cell holds a point or it does "
+            "not), and an unobserved cell reports null height rather than zero. "
+            "Nothing accumulates between frames: this is not a persistent world "
+            "map."
+        )
+    )
+
+
 class TrackingResetResponse(AdaptXModel):
     """Confirmation that tracking state was cleared."""
 
@@ -233,14 +343,48 @@ class ModuleStatusResponse(TimestampedModel):
 
 
 class MapStatusResponse(ModuleStatusResponse):
-    """Adaptive 2.5D map status."""
+    """2.5D map status."""
 
     resolution_levels: dict[ResolutionLevel, float] = Field(
         description="Cell edge length in metres configured for each resolution level."
     )
     range_m: float
     active_cells: int = Field(
-        default=0, ge=0, description="Cells in the current map; 0 until a mapper exists."
+        default=0, ge=0, description="Occupied cells in the most recent map; 0 before the first."
+    )
+    mapper: str = Field(
+        default="", description="Identifier of the configured mapper; empty when none exists."
+    )
+    is_adaptive: bool = Field(
+        default=False,
+        description=(
+            "True only when a risk-aware mapper is configured. False for the "
+            "Phase 6 fixed-resolution baseline."
+        ),
+    )
+    adaptive_resolution_implemented: bool = Field(
+        default=False,
+        description="Whether a resolution controller exists. False in Phase 6.",
+    )
+    lifecycle: str = Field(
+        default="frame_local",
+        description="'frame_local': each map covers one frame and nothing accumulates.",
+    )
+    resolution_m: float | None = Field(
+        default=None, gt=0.0, description="Cell edge length the mapper applies."
+    )
+    resolution_source: ResolutionSource | None = Field(
+        default=None, description="Where that resolution came from."
+    )
+    bounds: MapBounds | None = Field(default=None, description="Extent actually mapped.")
+    width: int | None = Field(default=None, ge=1, description="Cells along x.")
+    height: int | None = Field(default=None, ge=1, description="Cells along y.")
+    total_cells: int | None = Field(default=None, ge=1, description="width * height.")
+    last_map_timestamp: datetime | None = Field(
+        default=None, description="Source time of the most recent map; null before the first."
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict, description="Counts from the most recent map, if any."
     )
 
 
@@ -254,4 +398,33 @@ class RiskStatusResponse(ModuleStatusResponse):
     risk_levels: list[RiskLevel]
     thresholds: dict[str, float] = Field(
         description="Lower bound of each risk level on the normalised [0, 1] scale."
+    )
+
+
+class PredictionStatusResponse(ModuleStatusResponse):
+    """Trajectory prediction status."""
+
+    predictor: str = Field(description="Identifier of the currently configured predictor.")
+    model_name: str = Field(description="Motion model applied. Not a learned model.")
+    is_baseline: bool = Field(
+        description="True while the configured predictor is a deterministic baseline."
+    )
+    horizon_s: float = Field(gt=0.0, description="Supported prediction horizon in seconds.")
+    interval_s: float = Field(gt=0.0, description="Spacing between trajectory points.")
+    points_per_trajectory: int = Field(
+        ge=1, description="Points a full-horizon trajectory contains, t+0 inclusive."
+    )
+    uncertainty_model: str = Field(description="Identifier of the uncertainty model applied.")
+    uncertainty_is_heuristic: bool = Field(
+        default=True,
+        description=(
+            "True: uncertainty is a documented heuristic, not a calibrated "
+            "sigma, probability or confidence interval."
+        ),
+    )
+    prediction_statuses: list[PredictionStatus] = Field(
+        description="Every outcome a track can receive, produced or skipped."
+    )
+    summary: dict[str, Any] = Field(
+        default_factory=dict, description="Counts from the most recent prediction, if any."
     )

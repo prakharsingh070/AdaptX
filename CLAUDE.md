@@ -12,7 +12,9 @@ The central innovation is risk-aware adaptive perception: low-risk regions use c
 
 ## Core Pipeline
 
-LiDAR / CARLA -> point-cloud processing -> ground and noise filtering -> object detection -> object tracking -> 2.5D occupancy mapping -> risk and uncertainty estimation -> trajectory prediction -> predictive risk -> adaptive resolution controller -> adaptive 2.5D map -> benchmarking -> dashboard.
+LiDAR / CARLA -> point-cloud processing -> ground and noise filtering -> object detection -> object tracking -> trajectory prediction -> 2.5D occupancy mapping -> risk and uncertainty estimation -> predictive risk -> adaptive resolution controller -> adaptive 2.5D map -> benchmarking -> dashboard.
+
+Stages up to and including trajectory prediction are implemented as deterministic, explainable baselines. Nothing after it is implemented.
 
 ## Core Modules
 
@@ -73,6 +75,11 @@ Record events such as object detection, track updates, risk changes, prediction 
 
 ## Current Development Status
 
+Phases 5 to 8 were renumbered when Phase 5 was implemented: trajectory prediction moved
+from 8 to 5, because it is what the risk engine needs next, and mapping, risk and
+adaptive resolution each shifted one later. `docs/ROADMAP.md` and the `phase` field on
+every component in `services/system_service.py` agree with the list below.
+
 - Phase 1: Project foundation - DONE (backend foundation, data contracts, module
   interfaces, FastAPI + WebSocket, LiDAR ingest validation, CARLA boundary, tests,
   Docker. No perception algorithm implemented. See `docs/ARCHITECTURE.md`.)
@@ -97,10 +104,28 @@ Record events such as object detection, track updates, risk changes, prediction 
   /api/v1/tracking/reset; ADR-023/024/025). No learned tracker, no
   re-identification, no trajectory prediction. Tracking correctness is
   unmeasured and unmeasurable without labelled sequences.
-- Phase 5: 2.5D mapping - TODO
-- Phase 6: Risk and uncertainty - TODO
-- Phase 7: Adaptive resolution - TODO
-- Phase 8: Prediction - TODO
+- Phase 5: Trajectory prediction - DONE as a deterministic constant-velocity
+  baseline (position + velocity * (age_s + t) over a configurable horizon, default
+  3.0 s at 0.25 s giving 13 points per track; heuristic uncertainty growing linearly
+  with extrapolation time; velocity=None yields no trajectory and a recorded skip
+  reason, while a measured standstill yields a stationary one; over-speed velocities
+  rejected, never clipped; POST /api/v1/lidar/predict and
+  GET /api/v1/prediction/status; ADR-026/027). Uncertainty is a documented heuristic,
+  not a calibrated sigma, probability or confidence interval. No acceleration model,
+  no Kalman filter, no learned model, no map or lane conditioning, no interaction
+  between objects. Prediction accuracy is unmeasured and unmeasurable without
+  labelled trajectories.
+- Phase 6: 2.5D mapping - DONE as a deterministic frame-local fixed-resolution
+  baseline (bounded dense XY grid, uniform cell size, binary occupancy, per-cell
+  point count and min/max/mean height, null height for unobserved cells, full
+  point accounting, POST /api/v1/lidar/map; ADR-028/029/030/031). ADAPTIVE
+  RESOLUTION IS NOT IMPLEMENTED: the mapper applies a resolution it is given and
+  never chooses one. Nothing accumulates between frames - not SLAM, no
+  localisation, no loop closure, no sensor fusion, no semantic labelling.
+  Occupancy is binary, not probabilistic or temporally fused. Map correctness is
+  unmeasured: no labelled reference map exists.
+- Phase 7: Risk and uncertainty - TODO
+- Phase 8: Adaptive resolution - TODO
 - Phase 9: CARLA - TODO
 - Phase 10: Scenario generation and replay - TODO
 - Phase 11: Benchmarking - TODO
@@ -112,10 +137,10 @@ New session? Read `docs/PROJECT_STATE.md` first — it is the current snapshot o
 implemented, verified and off-limits. Then `docs/PHASE_HISTORY.md` for how the project got
 here, and `docs/NEXT_PHASE.md` for the agreed next work item.
 
-Note: the phase numbering in this file and in `docs/ROADMAP.md` places trajectory prediction
-at Phase 8 and 2.5D mapping at Phase 5. A later instruction referred to trajectory
-prediction as "Phase 5". This is unresolved — confirm the intended numbering before editing
-any status text.
+Note: the earlier phase-numbering discrepancy is resolved. Trajectory prediction is
+**Phase 5**; 2.5D mapping, risk and adaptive resolution are Phases 6, 7 and 8. This file,
+`docs/ROADMAP.md` and `services/system_service.py` all use those numbers. The phase
+headings in `docs/PHASE_HISTORY.md` are a historical record and were left as written.
 
 ## Knowledge Base
 

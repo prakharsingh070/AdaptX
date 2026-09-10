@@ -10,9 +10,13 @@ from adaptx.api.schemas import (
     LiDARDetectionResponse,
     LiDARFrameRequest,
     LiDARFrameResponse,
+    LiDARMapRequest,
+    LiDARMapResponse,
+    LiDARPredictionResponse,
     LiDARTrackingResponse,
 )
 from adaptx.core.exceptions import InvalidPointCloudError
+from adaptx.models.resolution import ResolutionDecision
 
 router = APIRouter(prefix="/lidar", tags=["lidar"])
 
@@ -187,4 +191,152 @@ def track_frame(
         processing=processed.metrics,
         summary=processed.output_summary,
         ground_summary=processed.ground_summary,
+    )
+
+
+@router.post(
+    "/predict",
+    response_model=LiDARPredictionResponse,
+    status_code=status.HTTP_200_OK,
+    responses={422: {"model": ErrorResponse, "description": "Malformed point cloud"}},
+    summary="Process, detect, track, and predict future trajectories",
+)
+def predict_frame(
+    payload: LiDARFrameRequest, service: LiDARServiceDep, context: ContextDep
+) -> LiDARPredictionResponse:
+    """Run processing, detection, tracking and trajectory prediction for one frame.
+
+    **Stateful**, for the same reason ``/track`` is: prediction consumes tracks,
+    and a track exists only because of the frames that came before. Every
+    caveat on ``POST /api/v1/lidar/track`` applies here unchanged - post frames
+    in temporal order, send explicit timestamps, and call
+    ``POST /api/v1/tracking/reset`` between unrelated sequences.
+
+    Prediction itself carries no state between frames: the same tracks and
+    timestamp always produce the same trajectories.
+
+    The predictor is a **deterministic constant-velocity baseline**. It
+    extrapolates each track's measured velocity and models nothing else - no
+    acceleration, no turning, no lane geometry, no interaction between objects.
+    Its accuracy is **unmeasured**, because no labelled trajectories exist.
+
+    A track's first frame has no measured velocity, so no trajectory is
+    produced for it; it appears in ``prediction.skipped`` with
+    ``insufficient_velocity``. A *measured* standstill is different and yields
+    a stationary trajectory. Predicted positions appear only in
+    ``prediction``; nothing in ``tracking`` is overwritten with a forecast.
+
+    Returns 422 for the same malformed input as the other LiDAR endpoints.
+    """
+    try:
+        raw_frame = payload.to_raw_frame()
+    except ValueError as exc:
+        raise InvalidPointCloudError(str(exc)) from exc
+
+    processed = context.preprocessor.run(raw_frame)
+    detection = context.detector.detect(processed.frame)
+    tracking = context.tracking.update(
+        detection.objects,
+        processed.frame.timestamp,
+        frame_id=processed.frame.frame_id,
+        sensor_id=processed.frame.sensor_id,
+    )
+    prediction = context.prediction.predict_from_tracking(tracking)
+
+    service.ingest(
+        processed.frame,
+        pre_validated=True,
+        upstream_duration_s=(
+            processed.metrics.duration_ms
+            + detection.duration_ms
+            + tracking.duration_ms
+            + prediction.duration_ms
+        )
+        / 1000.0,
+    )
+
+    return LiDARPredictionResponse(
+        accepted=True,
+        prediction=prediction,
+        tracking=tracking,
+        detection=detection,
+        processing=processed.metrics,
+        summary=processed.output_summary,
+        ground_summary=processed.ground_summary,
+    )
+
+
+@router.post(
+    "/map",
+    response_model=LiDARMapResponse,
+    status_code=status.HTTP_200_OK,
+    responses={422: {"model": ErrorResponse, "description": "Malformed point cloud or resolution"}},
+    summary="Process a frame and build a 2.5D spatial map from it",
+)
+def map_frame(
+    payload: LiDARMapRequest, service: LiDARServiceDep, context: ContextDep
+) -> LiDARMapResponse:
+    """Run the LiDAR pipeline, then bin the processed points into a 2.5D grid.
+
+    **Stateless and frame-local.** Each call builds a complete map from the
+    frame it is given; nothing accumulates and nothing carries over from an
+    earlier request. This is not a persistent world map, and there is no
+    reset to call.
+
+    The mapper is a **deterministic fixed-resolution baseline**: one cell size
+    applies across the whole map. Adaptive, risk-aware resolution is not
+    implemented - the mapper is handed a resolution and never chooses one.
+
+    Occupancy is binary: a cell is occupied when it contains at least one
+    point. A cell with no points reports **null** height rather than zero,
+    because zero is a real height in this frame.
+
+    Every input point is accounted for: ``input_point_count`` always equals
+    ``mapped_point_count + out_of_bounds_point_count``. A point outside the
+    configured bounds is counted, not silently dropped.
+
+    The dense grid is never returned. ``map`` carries dimensions, bounds,
+    resolution and accounting; set ``include_cells`` to receive occupied cells
+    only, capped by ``max_cells`` with any truncation reported.
+
+    Returns 422 when the point array is malformed, or when the requested
+    resolution is outside the configured limits or would exceed the cell
+    budget.
+    """
+    try:
+        raw_frame = payload.to_raw_frame()
+    except ValueError as exc:
+        raise InvalidPointCloudError(str(exc)) from exc
+
+    processed = context.preprocessor.run(raw_frame)
+    resolution = (
+        ResolutionDecision.override(
+            payload.resolution_m,
+            reason="requested per API call",
+            requested_by="api",
+        )
+        if payload.resolution_m is not None
+        else None
+    )
+    spatial_map = context.mapping.build(processed.frame, resolution)
+
+    service.ingest(
+        processed.frame,
+        pre_validated=True,
+        upstream_duration_s=(processed.metrics.duration_ms + spatial_map.duration_ms) / 1000.0,
+    )
+
+    cells = None
+    truncated = False
+    if payload.include_cells:
+        cells, truncated = spatial_map.to_adaptive_map(max_cells=payload.max_cells)
+
+    return LiDARMapResponse(
+        accepted=True,
+        map=spatial_map.summary(),
+        processing=processed.metrics,
+        summary=processed.output_summary,
+        ground_summary=processed.ground_summary,
+        cells=cells,
+        cells_truncated=truncated,
     )

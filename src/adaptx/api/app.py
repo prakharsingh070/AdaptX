@@ -10,7 +10,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from adaptx import __version__
-from adaptx.api.routes import carla, health, lidar, risk, system, tracking
+from adaptx.api.routes import (
+    carla,
+    health,
+    lidar,
+    prediction,
+    risk,
+    system,
+    tracking,
+)
 from adaptx.api.routes import map as map_routes
 from adaptx.api.websocket import telemetry
 from adaptx.api.websocket.manager import ConnectionManager
@@ -106,6 +114,7 @@ def create_app(
     api.include_router(map_routes.router)
     api.include_router(risk.router)
     api.include_router(tracking.router)
+    api.include_router(prediction.router)
     app.include_router(api)
 
     app.include_router(telemetry.router)

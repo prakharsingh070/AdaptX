@@ -15,6 +15,7 @@ from adaptx.core.lifecycle import ApplicationContext
 from adaptx.services.carla_service import CarlaService
 from adaptx.services.lidar_service import LiDARIngestService
 from adaptx.services.metrics_service import MetricsService
+from adaptx.services.prediction_service import PredictionService
 from adaptx.services.system_service import SystemService
 
 
@@ -44,6 +45,11 @@ def get_lidar_service(request: Request) -> LiDARIngestService:
     return get_context(request).lidar
 
 
+def get_prediction_service(request: Request) -> PredictionService:
+    """Return the trajectory prediction service."""
+    return get_context(request).prediction
+
+
 def get_carla_service(request: Request) -> CarlaService:
     """Return the CARLA service."""
     return get_context(request).carla
@@ -55,3 +61,4 @@ SystemServiceDep = Annotated[SystemService, Depends(get_system_service)]
 MetricsServiceDep = Annotated[MetricsService, Depends(get_metrics_service)]
 LiDARServiceDep = Annotated[LiDARIngestService, Depends(get_lidar_service)]
 CarlaServiceDep = Annotated[CarlaService, Depends(get_carla_service)]
+PredictionServiceDep = Annotated[PredictionService, Depends(get_prediction_service)]

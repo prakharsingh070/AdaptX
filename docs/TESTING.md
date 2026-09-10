@@ -39,6 +39,8 @@ self-contained and deterministic.
 tests/
   conftest.py               settings / context / app / client fixtures
   fixtures/point_clouds.py  seeded synthetic frame builders
+  fixtures/scenes.py        ground planes and object geometry for whole-chain tests
+  fixtures/sequences.py     deterministic detections, tracked objects and motion
   unit/
     test_config.py          settings defaults, env overrides, validation, no secrets
     test_logging.py         JSON and text formatters, context, idempotent setup
@@ -52,6 +54,12 @@ tests/
     test_benchmark.py       dataset reproducibility, baseline profile, runner, rates
     test_detection.py       clustering, geometry, filtering, classification, determinism
     test_tracking.py        association, velocity, lifecycle, class stability, determinism
+    test_mapping.py         grid indexing, occupancy, height statistics, bounds,
+                            resolution, memory limits, determinism, accounting,
+                            frame-local lifecycle, AdaptiveMap projection
+    test_prediction.py      constant-velocity arithmetic, velocity semantics, track
+                            lifecycle, horizon/interval, uncertainty growth, limits,
+                            accounting, determinism, configuration validation
     test_risk_baseline.py   proximity baseline behaviour and thresholds
     test_services.py        metrics, LiDAR ingest, system status aggregation
     test_carla_mock.py      CARLA boundary: real client without CARLA, mock, service
@@ -67,6 +75,12 @@ tests/
                             raw frame -> processing -> detection, and the detect API
     test_tracking_pipeline.py
                             multi-frame chain end to end, plus the track/reset API
+    test_mapping_pipeline.py
+                            processed frame -> mapper with no parallel preprocessing
+                            path, plus the map/status APIs and telemetry
+    test_prediction_pipeline.py
+                            raw frame -> processing -> detection -> tracking ->
+                            prediction, plus the predict/status APIs and telemetry
 ```
 
 ---
@@ -140,6 +154,23 @@ enforced by CI rather than by review:
 | `test_empty_dataset_reports_null_rates_rather_than_zero` | A rate over no points being invented |
 | `test_memory_absence_is_declared_not_faked` | An unmeasured metric being filled in |
 | `test_output_contains_no_invalid_numbers` | A stage emitting NaN or infinity |
+| `test_an_empty_cell_reports_nan_not_zero` | An unobserved map cell claiming a measured height of zero |
+| `test_a_point_on_the_upper_bound_is_out_of_bounds` | A boundary point being recorded in a cell it does not belong to |
+| `test_consecutive_frames_do_not_contaminate_each_other` | Frame-local mapping quietly becoming an accumulating one |
+| `test_the_adaptive_map_stream_remains_unavailable` | A fixed-resolution map making the adaptive one look present |
+| `test_mapping_is_partial_because_it_is_a_fixed_resolution_baseline` | A baseline mapper reporting as IMPLEMENTED |
+| `test_the_payload_stays_small` | A dense grid being pushed down the status channel |
+| `test_unknown_velocity_produces_no_trajectory` | Extrapolating a track whose motion was never measured |
+| `test_a_measured_standstill_produces_a_stationary_trajectory` | Conflating a measured zero with an unknown velocity |
+| `test_excessive_speed_is_rejected_not_clipped` | Substituting a corrected velocity no sensor produced |
+| `test_the_result_labels_its_uncertainty_model_as_heuristic` | Heuristic uncertainty passing as a calibrated one |
+| `test_uncertainty_grows_strictly_with_time_offset` | A three-second extrapolation looking as trustworthy as a fresh measurement |
+| `test_the_predictor_never_writes_a_prediction_onto_the_track` | A forecast being stored where a measurement belongs |
+| `test_a_scene_where_nothing_is_eligible_is_not_an_empty_scene` | "Predicted nothing" reading as "saw nothing" |
+| `test_it_reports_no_accuracy_figure` | The status endpoint claiming an accuracy that was never measured |
+| `test_prediction_is_reported_as_partial_not_finished` | A prediction baseline reporting as IMPLEMENTED |
+| `test_the_summary_carries_counts_not_trajectory_points` | Frame geometry being pushed down the status channel |
+| `test_provenance_survives_the_whole_chain` | Synthetic points becoming live-sensor trajectories |
 | `test_no_secret_fields_are_declared` | Credentials creeping into the settings surface |
 
 ---

@@ -39,7 +39,17 @@ from adaptx.models.point_cloud import (
     PointCloudSummary,
     RawPointCloudFrame,
 )
-from adaptx.models.prediction import PredictedTrajectory, TrajectoryPoint
+from adaptx.models.prediction import (
+    PRODUCED_STATUSES,
+    PredictedTrajectory,
+    PredictionStatus,
+    TrajectoryPoint,
+)
+from adaptx.models.prediction_result import (
+    PredictionConfiguration,
+    PredictionResult,
+    SkippedTrack,
+)
 from adaptx.models.processing import (
     PipelineConfiguration,
     PointCloudProcessingResult,
@@ -47,7 +57,21 @@ from adaptx.models.processing import (
     ProcessingStage,
     StageMetrics,
 )
+from adaptx.models.resolution import (
+    FIXED_BASELINE_REASON,
+    ResolutionDecision,
+    ResolutionSource,
+)
 from adaptx.models.risk import ObjectRisk, RiskCell, RiskFactors, RiskField, RiskLevel
+from adaptx.models.spatial_map import (
+    DEFAULT_MAX_PROJECTED_CELLS,
+    MapAccounting,
+    MapBounds,
+    MappingConfiguration,
+    SpatialMap,
+    SpatialMapCellField,
+    SpatialMapSummary,
+)
 from adaptx.models.system import (
     CarlaConnectionStatus,
     CarlaStatus,
@@ -65,6 +89,9 @@ from adaptx.models.tracking_result import TrackingConfiguration, TrackingResult
 from adaptx.models.vehicle import VehicleState
 
 __all__ = [
+    "DEFAULT_MAX_PROJECTED_CELLS",
+    "FIXED_BASELINE_REASON",
+    "PRODUCED_STATUSES",
     "SCHEMA_VERSION",
     "XYZI_FIELDS",
     "XYZ_FIELDS",
@@ -87,6 +114,9 @@ __all__ = [
     "ImplementationStatus",
     "LiDARSourceStatus",
     "LiDARStatus",
+    "MapAccounting",
+    "MapBounds",
+    "MappingConfiguration",
     "ObjectClass",
     "ObjectRisk",
     "OccupancyState",
@@ -96,16 +126,25 @@ __all__ = [
     "PointCloudProcessingResult",
     "PointCloudSummary",
     "PredictedTrajectory",
+    "PredictionConfiguration",
+    "PredictionResult",
+    "PredictionStatus",
     "ProcessingMetrics",
     "ProcessingStage",
     "RawPointCloudFrame",
     "RejectedCluster",
     "ResolutionContext",
+    "ResolutionDecision",
     "ResolutionLevel",
+    "ResolutionSource",
     "RiskCell",
     "RiskFactors",
     "RiskField",
     "RiskLevel",
+    "SkippedTrack",
+    "SpatialMap",
+    "SpatialMapCellField",
+    "SpatialMapSummary",
     "StageMetrics",
     "SystemMetrics",
     "SystemState",

@@ -10,6 +10,7 @@ No secrets are declared or defaulted in this module.
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
@@ -331,18 +332,145 @@ class TrackingSettings(BaseModel):
         return self
 
 
-class MapSettings(BaseModel):
-    """2.5D map geometry and the cell size bound to each resolution level.
+class PredictionSettings(BaseModel):
+    """Trajectory prediction (Phase 5).
 
-    The adaptive resolution algorithm itself is not implemented in Phase 1;
-    these values define the configured meaning of each level.
+    Coordinate convention as everywhere else (ADR-009): +x forward, +y left,
+    +z up, metres, origin at the sensor.
+
+    These are **engineering defaults** for a deterministic constant-velocity
+    baseline, not measured real-world limits. None has been tuned or validated
+    against labelled trajectories, because no labelled trajectories exist.
     """
 
-    range_m: float = Field(default=60.0, gt=0)
+    horizon_s: float = Field(
+        default=3.0,
+        gt=0.0,
+        description="How far ahead a trajectory extends, in seconds.",
+    )
+    interval_s: float = Field(
+        default=0.25,
+        gt=0.0,
+        description=(
+            "Spacing between trajectory points. Points run from t+0 to the "
+            "horizon inclusive, so the count is horizon/interval + 1."
+        ),
+    )
+    max_tracks: int = Field(
+        default=256,
+        ge=1,
+        description=(
+            "Upper bound on tracks predicted in one call. Tracks beyond it are "
+            "recorded as skipped rather than silently dropped."
+        ),
+    )
+    max_speed_mps: float = Field(
+        default=80.0,
+        gt=0.0,
+        description=(
+            "Sanity bound on measured track speed. A faster track is reported "
+            "as invalid and skipped; the velocity is never clipped, because a "
+            "clipped value would be a number no sensor produced."
+        ),
+    )
+
+    base_uncertainty_m: float = Field(
+        default=0.5,
+        gt=0.0,
+        description=(
+            "Heuristic uncertainty radius at t+0, standing in for detection "
+            "and tracking positional error. Not a calibrated sigma. Strictly "
+            "positive: a zero floor would claim a perfectly known position."
+        ),
+    )
+    uncertainty_growth_mps: float = Field(
+        default=0.5,
+        ge=0.0,
+        description=(
+            "Metres of additional heuristic uncertainty per second of "
+            "extrapolation. Not a calibrated growth rate."
+        ),
+    )
+    confidence_hits_full: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Associated detections at which a track contributes full evidence "
+            "to the trajectory confidence score. Fewer hits scale it down."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> PredictionSettings:
+        if self.interval_s > self.horizon_s:
+            raise ValueError("prediction.interval_s must be <= prediction.horizon_s")
+        return self
+
+
+class MapSettings(BaseModel):
+    """2.5D map geometry, resolution vocabulary and Phase 6 mapping bounds.
+
+    The ``resolution_*_m`` values define what each *level* would mean to a
+    resolution controller. No controller is implemented, so they are a
+    vocabulary rather than a decision.
+
+    ``resolution_m`` and the ``*_x_m`` / ``*_y_m`` bounds are what the Phase 6
+    fixed-resolution mapper actually uses. Coordinate convention as everywhere
+    else (ADR-009): +x forward, +y left, +z up, metres, origin at the sensor.
+
+    These are **baseline** values chosen as plausible starting points for an
+    automotive scene. None has been tuned or validated against labelled data,
+    because no labelled data exists.
+    """
+
+    range_m: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Advertised mapping range, reported by the status endpoint. The "
+            "extent actually mapped is set by the bounds below."
+        ),
+    )
     resolution_low_m: float = Field(default=1.0, gt=0)
     resolution_medium_m: float = Field(default=0.5, gt=0)
     resolution_high_m: float = Field(default=0.2, gt=0)
     resolution_critical_m: float = Field(default=0.1, gt=0)
+
+    # -- Phase 6 fixed-resolution mapping ---------------------------------
+    resolution_m: float = Field(
+        default=0.5,
+        gt=0.0,
+        description=(
+            "Cell edge length applied uniformly by the fixed-resolution "
+            "mapper. One value everywhere; adaptive allocation is not "
+            "implemented (ADR-029)."
+        ),
+    )
+    min_resolution_m: float = Field(
+        default=0.05,
+        gt=0.0,
+        description="Finest cell size a mapping request may ask for.",
+    )
+    max_resolution_m: float = Field(
+        default=5.0,
+        gt=0.0,
+        description="Coarsest cell size a mapping request may ask for.",
+    )
+
+    min_x_m: float = Field(default=-60.0, description="Behind the sensor is negative x.")
+    max_x_m: float = Field(default=60.0, description="Ahead of the sensor is positive x.")
+    min_y_m: float = Field(default=-60.0, description="Right of the sensor is negative y.")
+    max_y_m: float = Field(default=60.0, description="Left of the sensor is positive y.")
+
+    max_cells: int = Field(
+        default=4_000_000,
+        ge=1,
+        description=(
+            "Hard ceiling on cells in one grid, checked before any array is "
+            "allocated. Stops a fine resolution over wide bounds from "
+            "requesting an absurd amount of memory (ADR-028)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_monotonic(self) -> MapSettings:
@@ -355,6 +483,28 @@ class MapSettings(BaseModel):
         if sizes != sorted(sizes, reverse=True):
             raise ValueError(
                 "map resolution cell sizes must decrease from LOW to CRITICAL (coarse -> fine)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_mapping_bounds(self) -> MapSettings:
+        if self.min_x_m >= self.max_x_m:
+            raise ValueError("map.min_x_m must be < map.max_x_m")
+        if self.min_y_m >= self.max_y_m:
+            raise ValueError("map.min_y_m must be < map.max_y_m")
+        if self.min_resolution_m > self.max_resolution_m:
+            raise ValueError("map.min_resolution_m must be <= map.max_resolution_m")
+        if not (self.min_resolution_m <= self.resolution_m <= self.max_resolution_m):
+            raise ValueError(
+                f"map.resolution_m ({self.resolution_m}) must lie within "
+                f"[{self.min_resolution_m}, {self.max_resolution_m}]"
+            )
+        width = math.ceil((self.max_x_m - self.min_x_m) / self.resolution_m)
+        height = math.ceil((self.max_y_m - self.min_y_m) / self.resolution_m)
+        if width * height > self.max_cells:
+            raise ValueError(
+                f"map bounds at resolution_m={self.resolution_m} would need "
+                f"{width * height} cells, above map.max_cells ({self.max_cells})"
             )
         return self
 
@@ -403,6 +553,7 @@ class Settings(BaseSettings):
     lidar: LiDARSettings = Field(default_factory=LiDARSettings)
     detection: DetectionSettings = Field(default_factory=DetectionSettings)
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
+    prediction: PredictionSettings = Field(default_factory=PredictionSettings)
     map: MapSettings = Field(default_factory=MapSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     websocket: WebSocketSettings = Field(default_factory=WebSocketSettings)

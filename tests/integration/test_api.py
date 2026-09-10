@@ -76,14 +76,23 @@ class TestSystemStatus:
         }
         assert expected <= set(components)
 
-    def test_planned_modules_are_not_presented_as_working(self, client: TestClient) -> None:
+    def test_no_component_claims_to_be_finished_while_it_is_a_baseline(
+        self, client: TestClient
+    ) -> None:
+        """Retargeted in Phase 6: mapping was the last PLANNED entry here.
+
+        Phases 5 and 6 implemented prediction and mapping, so no component is
+        PLANNED any more. The guarantee this test carries forward is the one
+        that mattered all along: a subsystem shipped as a deterministic
+        baseline must never report IMPLEMENTED.
+        """
         components = {
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
 
-        for name in ("mapping", "prediction"):
-            assert components[name]["implementation"] == "PLANNED"
-            assert components[name]["readiness"] == "NOT_READY"
+        for name in ("mapping", "prediction", "tracking", "perception", "risk"):
+            assert components[name]["implementation"] == "PARTIAL"
+            assert components[name]["implementation"] != "IMPLEMENTED"
 
     def test_tracking_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
         """Phase 4 shipped a geometric baseline, which is not a finished tracker."""
@@ -96,13 +105,23 @@ class TestSystemStatus:
         assert "baseline" in tracking["detail"]
         assert "no re-identification" in tracking["detail"]
 
-    def test_prediction_remains_unimplemented(self, client: TestClient) -> None:
-        """Tracking existing must not make trajectory prediction look real."""
+    def test_prediction_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
+        """Phase 5 shipped a constant-velocity baseline, not a finished predictor.
+
+        Retargeted in Phase 5: this test previously asserted PLANNED, because
+        nothing implemented the predictor. A predictor now exists, so the
+        property worth guarding is that shipping a *baseline* must never make
+        prediction look finished or its numbers look validated.
+        """
         components = {
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
-        assert components["prediction"]["implementation"] == "PLANNED"
-        assert components["prediction"]["readiness"] == "NOT_READY"
+        prediction = components["prediction"]
+
+        assert prediction["implementation"] == "PARTIAL"
+        assert prediction["implementation"] != "IMPLEMENTED"
+        assert "baseline" in prediction["detail"]
+        assert "unmeasured" in prediction["detail"]
 
     def test_detection_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
         """Phase 3 shipped a geometric baseline, which is not a finished detector."""
@@ -217,14 +236,23 @@ class TestLiDARFrame:
 
 
 class TestMapStatus:
-    def test_reports_configuration_and_no_implementation(self, client: TestClient) -> None:
+    def test_reports_configuration_and_no_adaptive_implementation(self, client: TestClient) -> None:
+        """Retargeted in Phase 6: a mapper exists, an adaptive one does not.
+
+        Previously asserted the component was PLANNED. The property preserved
+        is the one that protects the project's central claim - shipping a
+        fixed-resolution mapper must not make ADAPT-X look like it allocates
+        resolution by risk.
+        """
         response = client.get("/api/v1/map/status")
         assert response.status_code == 200
 
         body = response.json()
-        assert body["component"]["implementation"] == "PLANNED"
+        assert body["component"]["implementation"] == "PARTIAL"
         assert body["active_cells"] == 0
         assert body["configuration"]["is_adaptive_algorithm_implemented"] is False
+        assert body["adaptive_resolution_implemented"] is False
+        assert body["is_adaptive"] is False
         assert set(body["resolution_levels"]) == {"low", "medium", "high", "critical"}
         assert body["resolution_levels"]["low"] > body["resolution_levels"]["critical"]
 

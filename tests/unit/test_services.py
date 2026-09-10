@@ -176,15 +176,50 @@ class TestSystemService:
         assert status.state is SystemState.RUNNING
         assert status.uptime_s >= 0.0
 
-    def test_unimplemented_modules_are_reported_as_planned(
+    def test_no_component_claims_to_be_finished_while_it_is_a_baseline(
         self, context: ApplicationContext
     ) -> None:
         components = {c.name: c for c in context.system.status().components}
 
-        for name in ("mapping", "prediction"):
-            assert components[name].implementation is ImplementationStatus.PLANNED
-            assert components[name].readiness is ComponentReadiness.NOT_READY
+        for name in ("mapping", "prediction", "tracking", "perception", "risk"):
+            assert components[name].implementation is ImplementationStatus.PARTIAL
+            assert components[name].implementation is not ImplementationStatus.IMPLEMENTED
             assert components[name].required is False
+
+    def test_mapping_is_partial_because_it_is_a_fixed_resolution_baseline(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 6 implemented a fixed-resolution mapper, not an adaptive one.
+
+        Retargeted in Phase 6: mapping was previously asserted PLANNED here.
+        The guarantee that matters now is that a fixed-resolution baseline
+        never reports IMPLEMENTED and never implies adaptive behaviour.
+        """
+        components = {c.name: c for c in context.system.status().components}
+        mapping = components["mapping"]
+
+        assert mapping.implementation is ImplementationStatus.PARTIAL
+        assert "fixed-resolution" in mapping.detail
+        assert "ADAPTIVE RESOLUTION IS NOT IMPLEMENTED" in mapping.detail
+        assert "frame-local" in mapping.detail
+
+    def test_prediction_is_partial_because_it_is_a_baseline(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 5 implemented a constant-velocity predictor, not a finished one.
+
+        Retargeted in Phase 5: prediction was previously asserted PLANNED here.
+        It is now implemented as a baseline, so the guarantee that matters is
+        that it never reports IMPLEMENTED and never hides what it cannot do.
+        """
+        components = {c.name: c for c in context.system.status().components}
+        prediction = components["prediction"]
+
+        assert prediction.implementation is ImplementationStatus.PARTIAL
+        assert prediction.required is False
+        assert "constant-velocity baseline" in prediction.detail
+        assert "heuristic" in prediction.detail
+        assert "unmeasured" in prediction.detail
 
     def test_tracking_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext
