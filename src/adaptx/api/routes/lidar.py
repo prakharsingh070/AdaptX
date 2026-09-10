@@ -10,10 +10,13 @@ from adaptx.api.schemas import (
     LiDARDetectionResponse,
     LiDARFrameRequest,
     LiDARFrameResponse,
+    LiDARMapRequest,
+    LiDARMapResponse,
     LiDARPredictionResponse,
     LiDARTrackingResponse,
 )
 from adaptx.core.exceptions import InvalidPointCloudError
+from adaptx.models.resolution import ResolutionDecision
 
 router = APIRouter(prefix="/lidar", tags=["lidar"])
 
@@ -260,4 +263,80 @@ def predict_frame(
         processing=processed.metrics,
         summary=processed.output_summary,
         ground_summary=processed.ground_summary,
+    )
+
+
+@router.post(
+    "/map",
+    response_model=LiDARMapResponse,
+    status_code=status.HTTP_200_OK,
+    responses={422: {"model": ErrorResponse, "description": "Malformed point cloud or resolution"}},
+    summary="Process a frame and build a 2.5D spatial map from it",
+)
+def map_frame(
+    payload: LiDARMapRequest, service: LiDARServiceDep, context: ContextDep
+) -> LiDARMapResponse:
+    """Run the LiDAR pipeline, then bin the processed points into a 2.5D grid.
+
+    **Stateless and frame-local.** Each call builds a complete map from the
+    frame it is given; nothing accumulates and nothing carries over from an
+    earlier request. This is not a persistent world map, and there is no
+    reset to call.
+
+    The mapper is a **deterministic fixed-resolution baseline**: one cell size
+    applies across the whole map. Adaptive, risk-aware resolution is not
+    implemented - the mapper is handed a resolution and never chooses one.
+
+    Occupancy is binary: a cell is occupied when it contains at least one
+    point. A cell with no points reports **null** height rather than zero,
+    because zero is a real height in this frame.
+
+    Every input point is accounted for: ``input_point_count`` always equals
+    ``mapped_point_count + out_of_bounds_point_count``. A point outside the
+    configured bounds is counted, not silently dropped.
+
+    The dense grid is never returned. ``map`` carries dimensions, bounds,
+    resolution and accounting; set ``include_cells`` to receive occupied cells
+    only, capped by ``max_cells`` with any truncation reported.
+
+    Returns 422 when the point array is malformed, or when the requested
+    resolution is outside the configured limits or would exceed the cell
+    budget.
+    """
+    try:
+        raw_frame = payload.to_raw_frame()
+    except ValueError as exc:
+        raise InvalidPointCloudError(str(exc)) from exc
+
+    processed = context.preprocessor.run(raw_frame)
+    resolution = (
+        ResolutionDecision.override(
+            payload.resolution_m,
+            reason="requested per API call",
+            requested_by="api",
+        )
+        if payload.resolution_m is not None
+        else None
+    )
+    spatial_map = context.mapping.build(processed.frame, resolution)
+
+    service.ingest(
+        processed.frame,
+        pre_validated=True,
+        upstream_duration_s=(processed.metrics.duration_ms + spatial_map.duration_ms) / 1000.0,
+    )
+
+    cells = None
+    truncated = False
+    if payload.include_cells:
+        cells, truncated = spatial_map.to_adaptive_map(max_cells=payload.max_cells)
+
+    return LiDARMapResponse(
+        accepted=True,
+        map=spatial_map.summary(),
+        processing=processed.metrics,
+        summary=processed.output_summary,
+        ground_summary=processed.ground_summary,
+        cells=cells,
+        cells_truncated=truncated,
     )

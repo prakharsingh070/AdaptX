@@ -252,8 +252,94 @@ explicit `insufficient_velocity` skip rather than a trajectory.
 
 ---
 
+## Phase 6 — 2.5D spatial mapping · verified
+
+**Purpose:** give ADAPT-X its first spatial representation - a structured grid the risk
+engine and, later, the adaptive resolution controller can reason over - without prejudging
+what "adaptive" will mean.
+
+**Algorithm:** bin a processed Phase 2 frame into a bounded, uniform XY grid (ADR-028)::
+
+    column = floor((x - min_x) / resolution)
+    row    = floor((y - min_y) / resolution)
+
+Cells are half-open, so a point on `min_x` is the first cell and a point on `max_x` is out
+of bounds rather than clamped into a cell it does not belong to. Per cell: point count, and
+min / max / mean height. Quantisation reuses `perception.grid.cell_indices`, so the int64
+overflow guard found necessary in Phase 2B is not reimplemented and cannot drift.
+
+**The decision that shapes everything else (ADR-029).** A mapper never chooses its own
+resolution. It is handed a `ResolutionDecision` and applies it. The naming needed care: a
+`ResolutionContext` already existed carrying risk, uncertainty, object density and speed -
+the *inputs* to a decision. Reusing that name for the decision itself would have destroyed
+the contract Phase 8 needs and put risk fields inside the mapper's argument. Two contracts
+now sit either side of the boundary::
+
+    ResolutionContext -> [ResolutionController] -> ResolutionDecision -> AdaptiveMapper
+       (inputs)              (not implemented)         (output)            (Phase 6)
+
+The mapper is never *given* tracks, trajectories, risk or uncertainty, so a risk-aware
+choice is structurally impossible rather than merely discouraged.
+
+**Frame-local, deliberately (ADR-030).** Every call builds a whole map from one frame.
+Accumulation was declined because it needs ego-motion compensation, a decay policy and a way
+to tell a moving object's trail from a wall - none of which exist, and without them an
+accumulating map would smear every moving vehicle into a barrier while looking plausible.
+`reset()` is a documented no-op, asserted by a test: being unable to contaminate the next
+frame is the guarantee.
+
+**Binary occupancy and null height (ADR-031).** A cell is occupied iff `point_count > 0` -
+derived, not stored, so the two can never disagree. A probability would need a sensor model
+that would be invented rather than measured. An unobserved cell reports **NaN / null**
+height, never zero: `z = 0` is a real height about 1.8 m above the road here, so zero would
+be indistinguishable from a measured flat surface at sensor height. Same reasoning as
+ADR-023 applied to a different quantity.
+
+**Dense arrays, not cell objects.** The pre-existing `AdaptiveMap` holds
+`list[AdaptiveMapCell]`; a 0.25 m map is 230,400 cells, and one validated Pydantic object
+each would cost more than the mapping. `SpatialMap` holds NumPy arrays instead - the
+precedent `BasePointCloudFrame.points` already set - and `to_adaptive_map()` projects
+*occupied cells only* into the old contract, so nothing was lost and nothing duplicated.
+
+**Interface change:** `AdaptiveMapper.update(frame, *, ego_state, tracks, risk_field)` became
+`build(frame, resolution)`. The old signature handed the mapper exactly the material ADR-029
+forbids it to use. Zero implementations and zero importers existed outside the module - the
+same situation, and the same precedent, as widening `TrajectoryPredictor.predict` in Phase 5.
+
+**Three Phase 1–5 tests were retargeted, none weakened.** All asserted mapping was `PLANNED`,
+which Phase 6 makes false. Each now guards the property that mattered underneath: that a
+subsystem shipped as a baseline never reports `IMPLEMENTED`, and that a fixed-resolution map
+never makes ADAPT-X look like it allocates resolution by risk.
+
+**Defect found by profiling.** The first implementation allocated four full-grid arrays up
+front and seven more inside the accumulation branch - eleven where six suffice, which at
+640,000 cells is real waste. The rewrite builds flat arrays once and reshapes, using
+`np.fmin`/`np.fmax`, which ignore NaN so untouched cells keep their unobserved state without
+a second pass. All 114 Phase 6 tests were unchanged by it, so it is semantics-preserving.
+
+**Measured (Experiment 005):** mapping cost has **two independent drivers**, and separating
+them is the point. At 9,800 points, going 1.00 m → 0.25 m multiplies cells by 16 and time by
+7.0x while the point count never changes; at 1,000,000 points the same change costs only
+1.3x. Occupancy falls from 11.30% to 1.17% on the small dataset as resolution rises: a fine
+uniform map spends a growing majority of its cells recording that nothing was observed.
+**That gap is the first quantitative statement of the problem ADAPT-X exists to solve** - and
+it is not evidence that an adaptive mapper would do better, because none exists to measure.
+The remaining `.at` calls are 14% of the pass and were left alone rather than optimised
+speculatively.
+
+**Limitations:** one uniform cell size everywhere; unobserved and free space are
+indistinguishable, so an occluded cell reads like empty space; no temporal fusion, no
+localisation, no SLAM; correctness unmeasured and unmeasurable without a labelled reference
+map.
+
+**Status:** 848 tests, ruff and mypy clean, live verification passed - 14 endpoints
+responding, a real scene mapped to a 160x160 grid, accounting balancing exactly, and
+consecutive requests confirmed independent.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
-visible. No phase has added a dependency beyond the Phase 1 set - five phases, zero new dependencies.
+visible. No phase has added a dependency beyond the Phase 1 set - six phases, zero new dependencies.

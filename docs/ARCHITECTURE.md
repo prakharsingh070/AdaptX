@@ -16,7 +16,7 @@ an abstract interface.
 | Configuration | **Implemented** | Typed, environment-driven settings with validation (`config/settings.py`) |
 | Logging | **Implemented** | Structured text/JSON logging with contextual fields (`core/logging.py`) |
 | Data contracts | **Implemented** | Point cloud, vehicle, object, track, trajectory, map, risk, system models (`models/`) |
-| API | **Implemented** | 13 HTTP endpoints + OpenAPI (`api/`) |
+| API | **Implemented** | 14 HTTP endpoints + OpenAPI (`api/`) |
 | Telemetry (WebSocket) | **Implemented** | `/ws/telemetry`, carrying system status, measured metrics and detection/tracking/prediction **summaries**. No per-frame geometry, no trajectory points |
 | Metrics | **Implemented** | Measured ingest FPS/latency and process CPU/memory; unmeasured values are `null` |
 | LiDAR ingest | **Partial** | Structural validation, point count, bounds, provenance |
@@ -26,11 +26,11 @@ an abstract interface.
 | CARLA | **Boundary only** | Interface, real client (connect + world info), deterministic mock, status service. Sensor and actor operations raise explicitly |
 | Object detection | **Partial** | Phase 3: grid clustering, size filtering and baseline classification by dimension bands (`perception/{clustering,classification,detector}.py`). **No** trained model, no oriented boxes, no velocity, no camera fusion, no semantic segmentation |
 | Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle, stateful service (`tracking/`). **No** learned motion model, no appearance features, no re-identification |
-| 2.5D mapping | *Planned* | `AdaptiveMapper` contract + cell/map models only |
+| 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution mapper - bounded dense grid, binary occupancy, per-cell height statistics (`mapping/grid_mapper.py`). **No** adaptive resolution, no temporal fusion, no probabilistic occupancy, no SLAM, no localisation. Correctness unmeasured - no labelled reference map exists |
 | Adaptive resolution | *Planned* | `ResolutionController` contract + `ResolutionContext` model only |
 | Trajectory prediction | **Partial** | Phase 5: deterministic constant-velocity baseline with heuristic uncertainty (`prediction/constant_velocity.py`). **No** acceleration model, no Kalman filter, no learned model, no map or lane conditioning, no interaction between objects. Accuracy unmeasured - no labelled trajectories exist |
 | Uncertainty engine | *Planned* | `uncertainty` fields exist on the models; nothing computes them |
-| Fixed-resolution baseline | *Planned* | `AdaptiveMap.is_adaptive` distinguishes the two variants; neither mapper exists |
+| Fixed-resolution baseline | **Implemented** | Phase 6 shipped the baseline half of ADR-003 (`FixedResolutionMapper`, `is_adaptive: false`). The **adaptive** variant it is meant to be compared against does not exist yet, so no comparison has been made |
 | Scenario generation, event replay, benchmarking | *Planned* | Not started |
 | Dashboard | *Planned* | Not started (`dashboard/README.md`) |
 
@@ -79,12 +79,12 @@ dashboard or API code (knowledge-base boundary rule).
 | `adaptx.models` | All data contracts. State and validation only — no business logic |
 | `adaptx.perception` | `LiDARProcessor` / `ObjectDetector` contracts; `FrameValidationProcessor` (Phase 1); `LiDARProcessingPipeline` orchestrator plus `VoxelDownsampler`, `GroundSegmenter`, `NoiseFilter` and the shared `grid` quantiser |
 | `adaptx.benchmark` | Synthetic datasets, the fixed-resolution baseline profile, pipeline, detection, tracking and prediction runners, and their record contracts |
-| `adaptx.mapping` | `AdaptiveMapper` and `ResolutionController` contracts |
+| `adaptx.mapping` | `AdaptiveMapper` / `ResolutionController` contracts; `FixedResolutionMapper` |
 | `adaptx.risk` | `RiskEngine` contract; `BaselineProximityRiskEngine` |
 | `adaptx.tracking` | `ObjectTracker` contract; `GeometricObjectTracker` and the association algorithm |
 | `adaptx.prediction` | `TrajectoryPredictor` contract; `ConstantVelocityPredictor` |
 | `adaptx.carla` | `CarlaSimulatorClient` contract, real client, mock, simulator-local models |
-| `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking and prediction services |
+| `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking, prediction and mapping services |
 | `adaptx.api` | Routes, HTTP schemas, WebSocket telemetry, dependency wiring |
 
 ---
@@ -109,7 +109,9 @@ Defined in `adaptx/models/`, re-exported from `adaptx.models`.
 | `TrackingResult` / `TrackingConfiguration` | What one update matched, created and retired, with measured timings |
 | `PredictedTrajectory` / `TrajectoryPoint` | Predicted future path, ordered and horizon-bounded. Positions are extrapolations, never measurements |
 | `PredictionResult` / `SkippedTrack` / `PredictionConfiguration` | What one prediction pass produced, which tracks it declined and why, with measured timings |
-| `AdaptiveMapCell` / `AdaptiveMap` | 2.5D cell (occupancy, height, resolution, risk, uncertainty) and snapshot |
+| `AdaptiveMapCell` / `AdaptiveMap` | 2.5D cell (occupancy, height, resolution, risk, uncertainty) and snapshot. Populated by projecting occupied cells out of a `SpatialMap` |
+| `SpatialMap` / `MapBounds` / `MapAccounting` / `MappingConfiguration` | The Phase 6 grid itself: NumPy arrays of point count and min/max/mean height, plus bounds and full point accounting |
+| `ResolutionDecision` / `ResolutionSource` | The resolution in force and where it came from. The **output** of a resolution decision; `ResolutionContext` holds its inputs |
 | `ResolutionContext` | Inputs to the future resolution decision |
 | `RiskCell` / `ObjectRisk` / `RiskField` / `RiskFactors` | Normalised risk, attribution and spatial field |
 | `SystemStatus` / `ComponentStatus` / `SystemMetrics` | Backend state and measured metrics |
@@ -238,18 +240,25 @@ range"), not malformed input, so it is accepted and reported with its metrics.
 **Implemented:** LiDAR input validation and filtering, voxel downsampling, baseline ground
 segmentation, baseline noise filtering, pipeline orchestration with per-stage measurement,
 the fixed-resolution benchmark, geometric object detection with baseline classification,
-baseline temporal tracking with persistent ids and measured velocity, and deterministic
-constant-velocity trajectory prediction with heuristic uncertainty.
+baseline temporal tracking with persistent ids and measured velocity, deterministic
+constant-velocity trajectory prediction with heuristic uncertainty, and deterministic
+frame-local fixed-resolution 2.5D mapping.
 
 **Not implemented:** ML object detection, learned tracking, appearance-based
 re-identification, camera fusion, semantic segmentation, production-grade classification,
-learned or map-aware trajectory prediction, collision prediction, adaptive resolution,
-risk-aware refinement, predictive perception, the 2.5D map, and the dashboard. Their
-contracts exist; nothing computes them.
+learned or map-aware trajectory prediction, collision prediction, the ADAPT-X risk engine,
+**adaptive resolution**, risk-aware refinement, predictive perception, temporal occupancy
+fusion, SLAM or localisation, and the dashboard. Their contracts exist; nothing computes
+them.
 
-**Measured for speed only.** Detection, tracking and prediction accuracy are all unmeasured
-and currently unmeasurable: no labelled data exists. Every benchmark figure in
-[`experiments/experiment-log.md`](experiments/experiment-log.md) is a timing.
+**A 2.5D map exists; an *adaptive* one does not.** Phase 6 applies one uniform cell size
+everywhere. Deciding how much detail a region deserves is Phase 8, and the mapper is never
+given the risk or motion data such a decision would need (ADR-029).
+
+**Measured for speed only.** Detection, tracking, prediction and map correctness are all
+unmeasured and currently unmeasurable: no labelled data exists. Every benchmark figure in
+[`experiments/experiment-log.md`](experiments/experiment-log.md) is a timing or a workload
+count.
 
 ### Object detection (Phase 3)
 
@@ -428,7 +437,7 @@ services or models:
 | ML object detection | `perception.interfaces.ObjectDetector` | replace `GeometricObjectDetector` in `build_context()`; the API and services are unchanged (ADR-022) |
 | A learned tracker | `tracking.interfaces.ObjectTracker` | replace `GeometricObjectTracker` in `build_context()`; the API and services are unchanged |
 | A better predictor | `prediction.interfaces.TrajectoryPredictor` | replace `ConstantVelocityPredictor` in `build_context()`; the API and services are unchanged (ADR-027) |
-| 2.5D mapping (Phase 6) | `mapping.interfaces.AdaptiveMapper` | map service; set `AdaptiveMap.is_adaptive` per variant |
+| An adaptive mapper | `mapping.interfaces.AdaptiveMapper` | replace `FixedResolutionMapper` in `build_context()`; the API and services are unchanged. Set `is_adaptive` so the two variants stay distinguishable (ADR-003) |
 | Risk (Phase 7) | `risk.interfaces.RiskEngine` | replace `BaselineProximityRiskEngine` in `ApplicationContext`; keep the baseline for comparison. Consumes Phase 5 trajectories, including their uncertainty and confidence |
 | Adaptive resolution (Phase 8) | `mapping.interfaces.ResolutionController` | consumed by the adaptive mapper |
 

@@ -21,7 +21,7 @@ Rules that govern all work are in [`../CLAUDE.md`](../CLAUDE.md) and
 
 ## 2. Current phase
 
-**Phase 5 COMPLETE.** Phases 1, 2 (A/B/C), 3, 4 and 5 are implemented and verified.
+**Phase 6 COMPLETE.** Phases 1, 2 (A/B/C), 3, 4, 5 and 6 are implemented and verified.
 
 **Phase numbering was resolved and changed in Phase 5.** Trajectory prediction moved from
 Phase 8 to **Phase 5**, because it is what the risk engine needs next; 2.5D mapping, risk
@@ -32,9 +32,10 @@ were deliberately left as originally written.
 
 ## 3. Branch and status
 
-- Branch: `main`, in sync with `origin/main`
+- Branch: `phase-6-spatial-mapping`
 - Phases 1 through 4 are committed and merged (PR #1 and PR #2)
-- Phase 5 is in the working tree
+- Phase 5 is committed on `phase-5-trajectory-prediction` (commit `8fb844d`), not pushed
+- Phase 6 is in the working tree
 
 > A previous version of this file claimed Phases 2B–4 were uncommitted and unpushed. That
 > was stale: they are commit `e3677dd`, merged as PR #2.
@@ -55,7 +56,14 @@ RawPointCloudFrame
         ↓ TrackedObject[]
   → eligibility → constant-velocity extrapolation → heuristic uncertainty   (Phase 5)
   → PredictionResult { trajectories, skipped+reasons, counts, timing, configuration }
+
+PointCloudFrame (Phase 2 output) + ResolutionDecision
+  → bounds check → cell indices → accumulate counts and height stats        (Phase 6)
+  → SpatialMap { occupancy, point_count, min/max/mean height, accounting, configuration }
 ```
+
+Mapping is a **parallel consumer** of the Phase 2 frame, not a stage after prediction. It
+does not read detections, tracks or trajectories, and stays independently usable.
 
 Every stage measures its own duration with `time.perf_counter`. Every result carries a
 configuration snapshot so a record is self-describing.
@@ -70,12 +78,12 @@ configuration snapshot so a record is self-describing.
 | `adaptx.perception` | `pipeline` (orchestrator), `voxel`, `ground`, `noise`, `grid`, `clustering`, `classification`, `detector`, `lidar`, `interfaces` |
 | `adaptx.tracking` | `tracker`, `association`, `interfaces` |
 | `adaptx.prediction` | `constant_velocity`, `interfaces` |
-| `adaptx.mapping` | **Interfaces only — nothing implemented** |
+| `adaptx.mapping` | `grid_mapper` (fixed-resolution baseline), `interfaces` |
 | `adaptx.risk` | Contract + `baseline.py` (proximity-only, not the ADAPT-X engine) |
 | `adaptx.carla` | Boundary: interface, real client, mock. Optional dependency |
-| `adaptx.services` | `lidar_service`, `metrics_service`, `carla_service`, `system_service`, `tracking_service`, `prediction_service` |
+| `adaptx.services` | `lidar_service`, `metrics_service`, `carla_service`, `system_service`, `tracking_service`, `prediction_service`, `mapping_service` |
 | `adaptx.api` | `app`, `schemas`, `dependencies`, `routes/`, `websocket/` |
-| `adaptx.benchmark` | `datasets`, `baseline`, `runner`, `detection`, `tracking`, `prediction`, `models` |
+| `adaptx.benchmark` | `datasets`, `baseline`, `runner`, `detection`, `tracking`, `prediction`, `mapping`, `models` |
 
 ## 6. Key contracts (`adaptx.models`)
 
@@ -90,14 +98,18 @@ configuration snapshot so a record is self-describing.
 | `PredictedTrajectory`, `TrajectoryPoint` | Extrapolated positions, **never measurements**. `timestamp` is the *source* time; `horizon_s`/`predictor_name` are what other projects call `prediction_horizon_s`/`model_name`. Carries `status` and measured `observation_age_s` |
 | `PredictionResult`, `SkippedTrack`, `PredictionConfiguration` | `considered_track_count == len(trajectories) + len(skipped)`, model-enforced |
 | `PredictionStatus` | `predicted`, `extrapolated`, `insufficient_velocity`, `invalid_velocity`, `stale_observation`, `track_lost`, `limit_exceeded` |
-| `AdaptiveMap`, `AdaptiveMapCell`, `ResolutionContext` | **Contracts only** |
+| `SpatialMap` | The Phase 6 grid: NumPy arrays `[row, column]` of `point_count` and min/max/mean height. **NaN where unobserved** (ADR-031). Occupancy is derived, `point_count > 0` |
+| `MapBounds`, `MapAccounting`, `MappingConfiguration`, `SpatialMapSummary` | Half-open extent; `input == mapped + out_of_bounds` model-enforced; summary carries no grid |
+| `ResolutionDecision`, `ResolutionSource` | The **output** of a resolution decision (`resolution_m`, `source`, `reason`). `FIXED` only in Phase 6 |
+| `AdaptiveMap`, `AdaptiveMapCell` | Pre-existing contract, now populated by projecting **occupied cells only** out of a `SpatialMap` |
+| `ResolutionContext` | The **inputs** to a resolution decision. Still contract-only — consumed by a controller that does not exist (ADR-029) |
 | `RiskField`, `RiskCell`, `ObjectRisk` | Contract + baseline only |
 | `SystemStatus`, `ComponentStatus`, `SystemMetrics` | Readiness **and** implementation status (ADR-005) |
 
 Shared rules: `schema_version`, tz-aware UTC timestamps, `coordinate_frame`, `source`
 (`live_sensor`/`simulation`/`replay`/`synthetic_test`/`unavailable`), `extra="forbid"`.
 
-## 7. API endpoints (13)
+## 7. API endpoints (14)
 
 | Method | Path |
 |---|---|
@@ -109,6 +121,7 @@ Shared rules: `schema_version`, tz-aware UTC timestamps, `coordinate_frame`, `so
 | POST | `/api/v1/lidar/detect` — process + detect |
 | POST | `/api/v1/lidar/track` — process + detect + track (**stateful**) |
 | POST | `/api/v1/lidar/predict` — process + detect + track + predict (**stateful**) |
+| POST | `/api/v1/lidar/map` — process + map (**stateless, frame-local**) |
 | POST | `/api/v1/tracking/reset` |
 | GET | `/api/v1/tracking/status` |
 | WS | `/ws/telemetry` |
@@ -116,8 +129,8 @@ Shared rules: `schema_version`, tz-aware UTC timestamps, `coordinate_frame`, `so
 ## 8. Configuration sections
 
 `ADAPTX_` prefix, `__` nesting. Sections: `APP`, `API`, `LOGGING`, `CARLA`, `LIDAR`
-(2A bounds + opt-in 2B stages), `DETECTION`, `TRACKING`, `PREDICTION`, `MAP`, `RISK`,
-`WEBSOCKET`.
+(2A bounds + opt-in 2B stages), `DETECTION`, `TRACKING`, `PREDICTION`, `MAP` (levels
+vocabulary **and** Phase 6 mapping geometry), `RISK`, `WEBSOCKET`.
 
 `LIDAR`, `PREDICTION`, `MAP`, `RISK` and `WEBSOCKET` are documented in `.env.example`.
 **`DETECTION` and `TRACKING` are not** — a gap left by Phases 3 and 4, still open.
@@ -127,28 +140,29 @@ tracking `max_association_distance_m=2.5`, `min_hits_to_confirm=3`, `max_missed_
 `velocity_smoothing=0.5`, `max_timestep_s=2.0`, `min_speed_for_heading_mps=0.3`;
 prediction `horizon_s=3.0`, `interval_s=0.25` (13 points, t+0 inclusive), `max_tracks=256`,
 `max_speed_mps=80.0`, `base_uncertainty_m=0.5`, `uncertainty_growth_mps=0.5`,
-`confidence_hits_full=3`.
+`confidence_hits_full=3`; mapping `resolution_m=0.5`, bounds ±60 m (240x240 = 57,600 cells), `min/max_resolution_m=0.05/5.0`, `max_cells=4,000,000`.
 
 ## 9. Telemetry (`/ws/telemetry`)
 
 `hello` then periodic `telemetry`. Payload provides `system`, `metrics`, `detection`,
-`tracking`, `prediction` — the last three are **summaries** (configuration and counts),
-never per-frame geometry, trajectory points or point arrays. `not_yet_available` currently
-lists `risk_field` and `adaptive_map`. A stream leaves that list only once something
-genuinely produces it.
+`tracking`, `prediction`, `mapping` — the last four are **summaries** (configuration and
+counts), never per-frame geometry, trajectory points, map cells or point arrays.
+`not_yet_available` currently lists `risk_field` and `adaptive_map`. `adaptive_map` stays
+listed deliberately: a fixed-resolution map exists, an adaptive one does not.
 
 ## 10. Lifecycle
 
 `ApplicationContext` (`core/lifecycle.py`) holds: `settings`, `metrics`, `lidar`, `carla`,
-`system`, `risk_engine`, `preprocessor`, `detector`, `tracking`, `prediction`. Built by
+`system`, `risk_engine`, `preprocessor`, `detector`, `tracking`, `prediction`, `mapping`. Built by
 `build_context()`, attached to `app.state`, reached through FastAPI dependencies.
 
 **Tracking is the only stateful perception component** (ADR-025). One tracker per process,
 lock-guarded, cleared on shutdown. Concurrent clients share one track set.
 
-`PredictionService` is **stateless with respect to perception**: it holds counters for
-status and telemetry only, and resetting it changes what the status endpoint reports, never
-what the predictor produces.
+`PredictionService` and `MappingService` are **stateless with respect to perception**:
+each holds counters for status and telemetry only, and resetting one changes what the status
+endpoint reports, never what it produces. Mapping is frame-local by construction (ADR-030) —
+map `N` cannot contaminate map `N+1` because nothing is retained.
 
 ## 11. Dependencies
 
@@ -156,25 +170,26 @@ Runtime: `fastapi`, `uvicorn[standard]`, `pydantic>=2`, `pydantic-settings`, `nu
 Dev: `pytest`, `pytest-asyncio`, `httpx`, `ruff`, `mypy`.
 Optional extras declared but **not installed**: `open3d` (`[pointcloud]`), `carla` (`[carla]`).
 
-**No SciPy, no ML framework, no database.** Declined four times on record (ADR-014, 020,
-024, 026). Phase 5 added no dependency.
+**No SciPy, no ML framework, no database.** Declined on record in ADR-014, 020, 024 and
+026. Phases 5 and 6 each added no dependency — six phases, zero beyond the Phase 1 set.
 
 ## 12–14. Verification status
 
-- **733 tests pass** (`pytest`)
+- **848 tests pass** (`pytest`)
 - `ruff check .` — All checks passed
-- `ruff format --check .` — 148 files formatted
-- `mypy src` — no issues in 82 source files
-- Backend starts; all 13 endpoints respond; no tracebacks
+- `ruff format --check .` — 155 files formatted
+- `mypy src` — no issues in 87 source files
+- Backend starts; all 14 endpoints respond; no tracebacks
 - Live temporal check: a vehicle advancing 1 m per 0.5 s measured 2.000 m/s, and its
   trajectory advanced +1 m at t+0.5, +2 m at t+1, +4 m at t+2 and +6 m at t+3; uncertainty
   rose 0.5 → 2.0 m; the track's first frame produced **no trajectory** and an explicit
   `insufficient_velocity` skip
 
-Benchmarks (`python -m adaptx.benchmark [--detect|--track|--predict]`) — all synthetic,
-**speed only**: pipeline ~213 ms/100k points; detection ~3.4 ms at that size; tracking
-~10.6 ms at 100 objects; prediction ~27 ms at 100 tracks (13 points each). Measured results
-in [`experiments/experiment-log.md`](experiments/experiment-log.md).
+Benchmarks (`python -m adaptx.benchmark [--detect|--track|--predict|--map]`) — all
+synthetic, **speed only**: pipeline ~213 ms/100k points; detection ~3.4 ms at that size;
+tracking ~10.6 ms at 100 objects; prediction ~27 ms at 100 tracks (13 points each); mapping
+~17 ms at 98k points and 1.0 m cells, rising to ~52 ms at 0.25 m. Measured results in
+[`experiments/experiment-log.md`](experiments/experiment-log.md).
 
 ## 15. Known limitations — do not hide these
 
@@ -200,11 +215,21 @@ in [`experiments/experiment-log.md`](experiments/experiment-log.md).
   or confidence interval. It cannot be calibrated without labelled trajectories.
 - Prediction cost is linear in trajectory points and dominated by **contract validation**,
   not arithmetic: ~27 ms at 100 tracks. The lever is `interval_s`, not the motion model.
+- **Mapping is one uniform cell size everywhere.** Adaptive resolution is not
+  implemented, so no region receives more detail than another. Measured occupancy falls to
+  1-16% at 0.25 m (Experiment 005): a fine uniform map spends most of its cells recording
+  that nothing was observed.
+- **Mapping cannot distinguish unobserved from free.** A cell occluded behind a vehicle
+  reads exactly like empty space. This matters for safety and is the first thing a future
+  occupancy model should fix.
+- Mapping is frame-local, so occlusion is never remembered; there is no temporal fusion, no
+  ego-motion compensation, no SLAM and no localisation.
+- Map correctness is **unmeasured and unmeasurable**: no labelled reference map exists.
 - CARLA is a boundary only; sensor/actor operations raise explicitly.
 
 ## 16. Architecture decisions
 
-ADR-001 … ADR-027 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
+ADR-001 … ADR-031 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
 Most load-bearing for future work:
 
 - **ADR-009** — coordinate convention: **+x forward, +y left, +z up**, metres, right-handed
@@ -216,11 +241,15 @@ Most load-bearing for future work:
 - **ADR-019** — benchmark data is synthetic and labelled as such
 - **ADR-026** — constant-velocity prediction with heuristic, explicitly uncalibrated
   uncertainty
+- **ADR-029** — resolution *policy* is separated from the mapper: `ResolutionContext`
+  (inputs) → controller → `ResolutionDecision` (output) → mapper
+- **ADR-030** — mapping is frame-local; nothing accumulates
+- **ADR-031** — binary occupancy, and null height for unobserved cells
 
 ## 17. What MUST NOT change
 
 1. The coordinate convention (ADR-009).
-2. Phase 1–5 algorithms, unless a measured defect justifies it.
+2. Phase 1–6 algorithms, unless a measured defect justifies it.
 3. Existing endpoint behaviour and response shapes — extend additively.
 4. The honesty rules: no fabricated metrics; unmeasured values are `null` with a reason;
    `source` provenance is mandatory; baselines are labelled `is_baseline`; prediction
@@ -231,18 +260,21 @@ Most load-bearing for future work:
 7. No new dependencies without an ADR.
 8. Predicted positions live only in `PredictedTrajectory` and are never written back onto
    `TrackedObject.position`.
+9. The mapper never chooses its own resolution, and is never handed tracks, trajectories,
+   risk or uncertainty (ADR-029). Keep that interface narrow.
+10. An unobserved map cell reports null height, never zero (ADR-031).
 
-## 18–19. Next step — 2.5D mapping (Phase 6)
+## 18–19. Next step — risk and uncertainty (Phase 7)
 
-The agreed next work item is the **2.5D map**: implement
-`mapping.interfaces.AdaptiveMapper` in two variants — the fixed-resolution baseline
-(ADR-003) and the adaptive mapper — distinguished by `AdaptiveMap.is_adaptive`. Objective
-and full handoff: [`NEXT_PHASE.md`](NEXT_PHASE.md).
+The agreed next work item is the **risk engine**: implement `risk.interfaces.RiskEngine` as
+the real ADAPT-X engine, consuming tracks, Phase 5 trajectories and the Phase 6 map, and
+keep `BaselineProximityRiskEngine` for comparison. Objective and full handoff:
+[`NEXT_PHASE.md`](NEXT_PHASE.md).
 
 ## 20. Not yet
 
-Do **not** start the risk engine (Phase 7), adaptive resolution (Phase 8), CARLA scenarios
-or the dashboard. In particular, **collision reasoning, time-to-collision and trajectory
-overlap belong to Phase 7**, not to prediction — Phase 5 deliberately stops at trajectories.
+Do **not** start adaptive resolution (Phase 8), CARLA scenarios or the dashboard. In
+particular, **deciding how much detail a region deserves is Phase 8**, not Phase 7 — the
+`ResolutionController` contract exists and stays unimplemented until risk can feed it.
 The dashboard design target is captured in [`UI_UX.md`](UI_UX.md) with a panel-by-panel
 audit of what can actually be fed today.

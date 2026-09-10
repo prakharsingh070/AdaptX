@@ -1,19 +1,26 @@
 """Mapping-layer contracts.
 
 See ``docs/knowledge-base/05_2.5d-mapping.md`` and
-``docs/knowledge-base/10_adaptive-resolution.md``. No implementation exists in
-Phase 1.
+``docs/knowledge-base/10_adaptive-resolution.md``.
+
+The two contracts here sit either side of the resolution decision, and the
+split is deliberate (ADR-029)::
+
+    ResolutionContext -> [ResolutionController] -> ResolutionDecision -> AdaptiveMapper
+
+A controller decides *how much detail a region deserves* from risk and
+uncertainty. A mapper *applies* a decision it is given. Phase 6 implements the
+mapper against a fixed decision; no controller exists.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from adaptx.models.map import AdaptiveMap, ResolutionContext, ResolutionLevel
+from adaptx.models.map import ResolutionContext, ResolutionLevel
 from adaptx.models.point_cloud import PointCloudFrame
-from adaptx.models.risk import RiskField
-from adaptx.models.tracking import TrackedObject
-from adaptx.models.vehicle import VehicleState
+from adaptx.models.resolution import ResolutionDecision
+from adaptx.models.spatial_map import SpatialMap
 
 
 class ResolutionController(ABC):
@@ -26,6 +33,9 @@ class ResolutionController(ABC):
     ``docs/knowledge-base/10_adaptive-resolution.md``: resolution must not
     oscillate between frames, so ``ResolutionContext.current_level`` is
     provided for hysteresis, smoothing or a minimum dwell time.
+
+    **Not implemented.** Phase 6 supplies mappers with a fixed
+    :class:`~adaptx.models.resolution.ResolutionDecision` instead.
     """
 
     name: str = "resolution_controller"
@@ -40,26 +50,45 @@ class ResolutionController(ABC):
 
 
 class AdaptiveMapper(ABC):
-    """Builds a 2.5D occupancy map from perception output.
+    """Builds a 2.5D map from a processed point cloud.
 
     Implementations exist in two comparable variants (ADR-003): a
-    fixed-resolution baseline and the ADAPT-X adaptive mapper. The variant is
-    recorded on the produced map as ``AdaptiveMap.is_adaptive``.
+    fixed-resolution baseline and, later, the ADAPT-X adaptive mapper. The
+    variant is recorded on every map as ``is_adaptive`` so a measurement of one
+    can never be presented as the other.
+
+    A mapper is handed a resolution; it never chooses one. It is deliberately
+    not given tracks, predicted trajectories, risk or uncertainty, so a
+    risk-aware choice is structurally impossible here rather than merely
+    discouraged (ADR-029).
+
+    Mapping is **frame-local** (ADR-030): a call builds a whole map from one
+    frame and nothing accumulates between calls. ``reset`` exists for a future
+    accumulating implementation and is a documented no-op for one that holds no
+    state.
     """
 
     name: str = "adaptive_mapper"
+    #: True for a risk-aware mapper, false for the fixed-resolution baseline.
+    is_adaptive: bool = False
 
     @abstractmethod
-    def update(
-        self,
-        frame: PointCloudFrame,
-        *,
-        ego_state: VehicleState | None = None,
-        tracks: list[TrackedObject] | None = None,
-        risk_field: RiskField | None = None,
-    ) -> AdaptiveMap:
-        """Fold ``frame`` into the map and return the resulting snapshot."""
+    def build(
+        self, frame: PointCloudFrame, resolution: ResolutionDecision | None = None
+    ) -> SpatialMap:
+        """Build a complete map from ``frame`` at ``resolution``.
+
+        Args:
+            frame: A processed frame from the Phase 2 pipeline. A mapper never
+                repeats preprocessing.
+            resolution: The resolution to apply. Implementations fall back to
+                their configured default when this is ``None``.
+
+        Returns:
+            A map of the configured bounds, with per-cell occupancy, point
+            counts and height statistics, plus accounting for every input point.
+        """
 
     @abstractmethod
     def reset(self) -> None:
-        """Discard all accumulated map state."""
+        """Discard any accumulated map state."""

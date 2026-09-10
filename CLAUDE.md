@@ -115,7 +115,15 @@ every component in `services/system_service.py` agree with the list below.
   no Kalman filter, no learned model, no map or lane conditioning, no interaction
   between objects. Prediction accuracy is unmeasured and unmeasurable without
   labelled trajectories.
-- Phase 6: 2.5D mapping - TODO
+- Phase 6: 2.5D mapping - DONE as a deterministic frame-local fixed-resolution
+  baseline (bounded dense XY grid, uniform cell size, binary occupancy, per-cell
+  point count and min/max/mean height, null height for unobserved cells, full
+  point accounting, POST /api/v1/lidar/map; ADR-028/029/030/031). ADAPTIVE
+  RESOLUTION IS NOT IMPLEMENTED: the mapper applies a resolution it is given and
+  never chooses one. Nothing accumulates between frames - not SLAM, no
+  localisation, no loop closure, no sensor fusion, no semantic labelling.
+  Occupancy is binary, not probabilistic or temporally fused. Map correctness is
+  unmeasured: no labelled reference map exists.
 - Phase 7: Risk and uncertainty - TODO
 - Phase 8: Adaptive resolution - TODO
 - Phase 9: CARLA - TODO

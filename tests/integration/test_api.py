@@ -76,15 +76,23 @@ class TestSystemStatus:
         }
         assert expected <= set(components)
 
-    def test_planned_modules_are_not_presented_as_working(self, client: TestClient) -> None:
-        """Phase 5 moved prediction out of this list; mapping is still planned."""
+    def test_no_component_claims_to_be_finished_while_it_is_a_baseline(
+        self, client: TestClient
+    ) -> None:
+        """Retargeted in Phase 6: mapping was the last PLANNED entry here.
+
+        Phases 5 and 6 implemented prediction and mapping, so no component is
+        PLANNED any more. The guarantee this test carries forward is the one
+        that mattered all along: a subsystem shipped as a deterministic
+        baseline must never report IMPLEMENTED.
+        """
         components = {
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
 
-        for name in ("mapping",):
-            assert components[name]["implementation"] == "PLANNED"
-            assert components[name]["readiness"] == "NOT_READY"
+        for name in ("mapping", "prediction", "tracking", "perception", "risk"):
+            assert components[name]["implementation"] == "PARTIAL"
+            assert components[name]["implementation"] != "IMPLEMENTED"
 
     def test_tracking_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
         """Phase 4 shipped a geometric baseline, which is not a finished tracker."""
@@ -228,14 +236,23 @@ class TestLiDARFrame:
 
 
 class TestMapStatus:
-    def test_reports_configuration_and_no_implementation(self, client: TestClient) -> None:
+    def test_reports_configuration_and_no_adaptive_implementation(self, client: TestClient) -> None:
+        """Retargeted in Phase 6: a mapper exists, an adaptive one does not.
+
+        Previously asserted the component was PLANNED. The property preserved
+        is the one that protects the project's central claim - shipping a
+        fixed-resolution mapper must not make ADAPT-X look like it allocates
+        resolution by risk.
+        """
         response = client.get("/api/v1/map/status")
         assert response.status_code == 200
 
         body = response.json()
-        assert body["component"]["implementation"] == "PLANNED"
+        assert body["component"]["implementation"] == "PARTIAL"
         assert body["active_cells"] == 0
         assert body["configuration"]["is_adaptive_algorithm_implemented"] is False
+        assert body["adaptive_resolution_implemented"] is False
+        assert body["is_adaptive"] is False
         assert set(body["resolution_levels"]) == {"low", "medium", "high", "critical"}
         assert body["resolution_levels"]["low"] > body["resolution_levels"]["critical"]
 

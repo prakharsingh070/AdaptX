@@ -115,11 +115,21 @@ def _declared_components() -> list[ComponentStatus]:
         ),
         ComponentStatus(
             name="mapping",
-            readiness=ComponentReadiness.NOT_READY,
-            implementation=ImplementationStatus.PLANNED,
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
             detail=(
-                "2.5D map and resolution contracts only; no mapper and no "
-                "adaptive resolution algorithm implemented"
+                "deterministic frame-local 2.5D fixed-resolution mapping "
+                "baseline. One uniform cell size over configured bounds, with "
+                "binary occupancy, point counts and min/max/mean height per "
+                "cell; an unobserved cell reports null height, never zero. "
+                "Every input point is accounted for as mapped or out of "
+                "bounds. ADAPTIVE RESOLUTION IS NOT IMPLEMENTED: the mapper "
+                "applies a resolution it is given and never chooses one, so no "
+                "region receives more detail than another. Nothing accumulates "
+                "between frames - this is not a persistent world map, not "
+                "SLAM, and there is no localisation, loop closure, sensor "
+                "fusion or semantic labelling. Occupancy is binary rather than "
+                "probabilistic or temporally fused"
             ),
             phase=6,
         ),

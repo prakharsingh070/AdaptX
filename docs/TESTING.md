@@ -54,6 +54,9 @@ tests/
     test_benchmark.py       dataset reproducibility, baseline profile, runner, rates
     test_detection.py       clustering, geometry, filtering, classification, determinism
     test_tracking.py        association, velocity, lifecycle, class stability, determinism
+    test_mapping.py         grid indexing, occupancy, height statistics, bounds,
+                            resolution, memory limits, determinism, accounting,
+                            frame-local lifecycle, AdaptiveMap projection
     test_prediction.py      constant-velocity arithmetic, velocity semantics, track
                             lifecycle, horizon/interval, uncertainty growth, limits,
                             accounting, determinism, configuration validation
@@ -72,6 +75,9 @@ tests/
                             raw frame -> processing -> detection, and the detect API
     test_tracking_pipeline.py
                             multi-frame chain end to end, plus the track/reset API
+    test_mapping_pipeline.py
+                            processed frame -> mapper with no parallel preprocessing
+                            path, plus the map/status APIs and telemetry
     test_prediction_pipeline.py
                             raw frame -> processing -> detection -> tracking ->
                             prediction, plus the predict/status APIs and telemetry
@@ -148,6 +154,12 @@ enforced by CI rather than by review:
 | `test_empty_dataset_reports_null_rates_rather_than_zero` | A rate over no points being invented |
 | `test_memory_absence_is_declared_not_faked` | An unmeasured metric being filled in |
 | `test_output_contains_no_invalid_numbers` | A stage emitting NaN or infinity |
+| `test_an_empty_cell_reports_nan_not_zero` | An unobserved map cell claiming a measured height of zero |
+| `test_a_point_on_the_upper_bound_is_out_of_bounds` | A boundary point being recorded in a cell it does not belong to |
+| `test_consecutive_frames_do_not_contaminate_each_other` | Frame-local mapping quietly becoming an accumulating one |
+| `test_the_adaptive_map_stream_remains_unavailable` | A fixed-resolution map making the adaptive one look present |
+| `test_mapping_is_partial_because_it_is_a_fixed_resolution_baseline` | A baseline mapper reporting as IMPLEMENTED |
+| `test_the_payload_stays_small` | A dense grid being pushed down the status channel |
 | `test_unknown_velocity_produces_no_trajectory` | Extrapolating a track whose motion was never measured |
 | `test_a_measured_standstill_produces_a_stationary_trajectory` | Conflating a measured zero with an unknown velocity |
 | `test_excessive_speed_is_rejected_not_clipped` | Substituting a corrected velocity no sensor produced |

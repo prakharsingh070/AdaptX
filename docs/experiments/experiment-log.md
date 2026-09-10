@@ -310,6 +310,106 @@ possible.
 **Artifacts:** Reproduce with
 `python -m adaptx.benchmark --predict --repeats 15 --warmup 4 --json <path>`.
 
+## Experiment 005 - Phase 6 2.5D mapping throughput and the cost of resolution
+
+**Date:** 2026-09-10
+
+**Scenario:** The three size-ladder datasets, run through the **filter-only** pipeline
+profile and then mapped at three fixed resolutions. The filter-only profile is used
+deliberately: the full baseline profile voxelises at 0.2 m, which collapses the 400k dataset
+to about 7k points - a real and useful reduction, but it would leave this benchmark
+measuring mapping at point counts nothing like the ones under study. Phase 2A validation,
+ROI and range filtering still run, so the mapper receives a genuine processed frame.
+
+Only the mapping call is timed; pipeline time is excluded.
+
+**Random seed:** The dataset generator's default seed. The same (scenario, seed) always
+yields the same array, and mapping is deterministic, so a repeat run reproduces the cell
+counts exactly.
+
+**Hardware and software:** Windows 11, 16 logical CPUs, Python 3.13.7, NumPy 2.5.3,
+adaptx 0.1.0. Single-threaded.
+
+**Configuration:** Bounds x [-100, 100] m, y [-100, 100] m. Resolutions 1.00 / 0.50 /
+0.25 m, giving 200x200, 400x400 and 800x800 grids.
+
+**Measurement window:** 3 warm-up runs discarded, 11 timed repeats, median reported. Peak
+memory measured in a separate dedicated `tracemalloc` run, never during the timed repeats.
+
+**Results:**
+
+| Scenario | Res (m) | Points | Grid | Cells | Occupied | Occ % | Median ms | Points/s | Grid MB |
+|---|---|---|---|---|---|---|---|---|---|
+| small | 1.00 | 9,800 | 200x200 | 40,000 | 4,519 | 11.30 | 3.303 | 2,967,359 | 1.2 |
+| small | 0.50 | 9,800 | 400x400 | 160,000 | 6,650 | 4.16 | 7.474 | 1,311,300 | 4.9 |
+| small | 0.25 | 9,800 | 800x800 | 640,000 | 7,518 | 1.17 | 23.147 | 423,381 | 19.5 |
+| medium | 1.00 | 97,999 | 200x200 | 40,000 | 6,600 | 16.50 | 17.412 | 5,628,277 | 1.2 |
+| medium | 0.50 | 97,999 | 400x400 | 160,000 | 24,937 | 15.59 | 25.101 | 3,904,203 | 4.9 |
+| medium | 0.25 | 97,999 | 800x800 | 640,000 | 54,182 | 8.47 | 52.184 | 1,877,944 | 19.5 |
+| large | 1.00 | 391,999 | 200x200 | 40,000 | 6,600 | 16.50 | 70.813 | 5,535,677 | 1.2 |
+
+Peak tracked memory ranged from 2.3 MB (small, 1.00 m) to 51.7 MB (large, 0.25 m).
+
+**Supplementary 1M-point measurement**, run separately from the standard benchmark because
+no 1M dataset exists and adding one would mean editing a Phase 2C module. Points are drawn
+from a synthetic road-like distribution (70% ground plane, 30% raised structure) over the
+same bounds, seed 20260910, 2 warm-up runs and 7 timed repeats:
+
+| Res (m) | Points | Grid | Cells | Occupied | Median ms | Points/s |
+|---|---|---|---|---|---|---|
+| 1.00 | 1,000,000 | 200x200 | 40,000 | 36,100 | 214.43 | 4,663,607 |
+| 0.50 | 1,000,000 | 400x400 | 160,000 | 144,236 | 246.92 | 4,049,882 |
+| 0.25 | 1,000,000 | 800x800 | 640,000 | 475,332 | 283.39 | 3,528,738 |
+
+- Map correctness: **not measured, and not measurable.** No labelled reference map exists.
+  Nothing here says a map is right, and nothing says a resolution is *appropriate* - that
+  second question is what adaptive resolution will exist to answer.
+- Out-of-bounds points were zero throughout: the generated scenes fit inside the benchmark
+  bounds. The out-of-bounds path is covered by unit tests instead.
+- CPU / GPU: not measured for this experiment.
+
+**Observations:**
+
+1. **Cost has two independent drivers, and the benchmark separates them.** At 9,800 points
+   the time is almost entirely the grid: going from 1.00 m to 0.25 m multiplies cells by 16
+   and time by 7.0x, while the point count never changes. At 1,000,000 points the same
+   resolution change costs only 1.3x, because points now dominate. This is the central
+   measurement of Phase 6: **a uniform fine map pays for detail everywhere, including where
+   nothing is happening.**
+2. **Occupancy falls as resolution rises** - 11.30% to 1.17% on the small dataset. A finer
+   uniform map spends a rapidly growing majority of its cells recording that nothing was
+   observed. That gap is the headroom an adaptive mapper would be trying to reclaim, and it
+   is now a measured number rather than an assumption.
+3. **Grid memory is fixed by geometry, not by data**: 1.2 / 4.9 / 19.5 MB for the three
+   resolutions regardless of point count, being `width * height * 32` bytes across one
+   int64 and three float64 arrays. Peak tracked allocation adds the per-point temporaries on
+   top.
+4. **A defect was found and fixed by profiling.** The first implementation allocated four
+   full-grid arrays up front and then seven more inside the accumulation branch - eleven
+   full-grid allocations where six suffice, which at 640,000 cells is substantial waste. The
+   rewrite builds the flat arrays once and reshapes them, and uses `np.fmin`/`np.fmax`,
+   which ignore NaN, so untouched cells keep their unobserved state without a second masking
+   pass. All 114 Phase 6 tests were unchanged by the rewrite, so it is semantics-preserving.
+5. **Remaining profile at 392k points, 1.0 m** (cProfile, 5 passes): 37 ms in the `build`
+   body (boolean masking and `bincount`), 19 ms in `cell_indices` quantisation, 11 ms in the
+   `fmin`/`fmax` `.at` calls, 5 ms in `clip`, 4 ms in `astype`. The `.at` calls are the
+   classic NumPy slow path and could be replaced with a sort-and-`reduceat` grouping, but at
+   14% of the pass that was judged **not worth the added complexity**, and was left alone
+   rather than optimised speculatively.
+6. In the real pipeline the mapper sees the *voxelised* frame, not the raw one. An earlier
+   run through the full baseline profile reduced the 400k dataset to 7,328 points, where
+   mapping cost 5.9 / 12.5 / 35.8 ms at the three resolutions - grid-dominated, as
+   observation 1 predicts.
+
+**Conclusion:** Mapping is linear in points and linear in cells, with the cell term
+dominating at realistic post-voxelisation point counts. The measured occupancy collapse at
+fine resolution is the first quantitative evidence for the problem ADAPT-X exists to solve;
+it is **not** evidence that an adaptive mapper would do better, because no adaptive mapper
+exists to measure. **No real-time claim is made.** No correctness claim is made or possible.
+
+**Artifacts:** Reproduce with
+`python -m adaptx.benchmark --map --repeats 11 --warmup 3 --json <path>`.
+
 ## Experiment Template
 
 ### Experiment XXX

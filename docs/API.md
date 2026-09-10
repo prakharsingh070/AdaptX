@@ -4,9 +4,9 @@ Base URL (development): `http://localhost:8000`
 Versioned prefix: `/api/v1`
 Interactive documentation: `/docs` (Swagger UI), `/redoc`, `/openapi.json`
 
-**This document describes only what is implemented.** Detection, tracking and trajectory
-prediction exist as deterministic baselines. Endpoints for the adaptive map, the risk map,
-events, scenarios and benchmarking are sketched in
+**This document describes only what is implemented.** Detection, tracking, trajectory
+prediction and 2.5D mapping exist as deterministic baselines. Endpoints for the **adaptive**
+map, the risk map, events, scenarios and benchmarking are sketched in
 [`knowledge-base/16_api-contract.md`](knowledge-base/16_api-contract.md) and do not exist
 yet.
 
@@ -561,6 +561,24 @@ because no labelled trajectories exist.
 ```json
 {
   "accepted": true,
+  "mapping": {
+    "mapper": "fixed_resolution_mapper_v1",
+    "is_adaptive": false,
+    "adaptive_resolution_implemented": false,
+    "lifecycle": "frame_local",
+    "frames_mapped": 3,
+    "resolution_m": 0.5,
+    "width": 240,
+    "height": 240,
+    "total_cells": 57600,
+    "occupied_cells": 6650,
+    "occupancy_ratio": 0.1155,
+    "input_points": 9800,
+    "mapped_points": 9720,
+    "out_of_bounds_points": 80,
+    "duration_ms": 7.47,
+    "configuration": { }
+  },
   "prediction": {
     "timestamp": "2026-01-01T12:00:01Z",
     "frame_id": 2,
@@ -643,6 +661,95 @@ Points run from `t+0` to the horizon **inclusive**, so the default 3.0 s horizon
 | `limit_exceeded` | `ADAPTX_PREDICTION__MAX_TRACKS` was reached. Tracks are **not** prioritised — Phase 5 has no risk signal to prioritise by |
 
 **422** — same conditions as the other LiDAR endpoints.
+
+---
+
+## `POST /api/v1/lidar/map`
+
+Process a frame and bin the resulting points into a 2.5D spatial grid.
+
+**Stateless and frame-local**, unlike `/track` and `/predict`. Each call builds a complete
+map from the frame it is given; nothing accumulates and nothing carries over from an earlier
+request. There is no reset endpoint because there is no state to reset.
+
+**The mapper is a deterministic fixed-resolution baseline** (ADR-028). One cell size applies
+across the whole map. **Adaptive, risk-aware resolution is not implemented** — the mapper is
+handed a resolution and never chooses one (ADR-029).
+
+| Rule | Why |
+|---|---|
+| Cells are half-open, `[lo, hi)` | A point at exactly `max_x` would index one cell past the last column |
+| A point on `min_x`/`min_y` is the first cell | The lower edge is inclusive |
+| A point on `max_x`/`max_y` is **out of bounds** | Counted, never clamped inward into a cell it does not belong to |
+| Occupancy is binary | A cell holds at least one point, or it does not. No probability, no Bayesian update, no temporal fusion (ADR-031) |
+| An unobserved cell reports `null` height | `z = 0` is a real height here; zero would be indistinguishable from a measured flat surface at sensor height |
+
+**Request:** as `POST /api/v1/lidar/frame`, plus three optional fields.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `resolution_m` | configured value | Cell edge length for this request only. Recorded with `source: "override"` so a one-off is never mistaken for the configured baseline |
+| `include_cells` | `false` | Return occupied cells. Off by default: a 0.5 m map over the default bounds is 57,600 cells |
+| `max_cells` | 20000 | Upper bound on returned cells. Truncation is reported, never silent |
+
+**200 OK** (abridged)
+
+```json
+{
+  "accepted": true,
+  "map": {
+    "timestamp": "2026-01-01T12:00:00Z",
+    "frame_id": 0,
+    "sensor_id": "roof_lidar",
+    "mapper": "fixed_resolution_mapper_v1",
+    "is_adaptive": false,
+    "resolution": {
+      "resolution_m": 0.5,
+      "source": "fixed",
+      "reason": "phase6_fixed_baseline",
+      "requested_by": "configuration"
+    },
+    "bounds": { "min_x": -60.0, "max_x": 60.0, "min_y": -60.0, "max_y": 60.0 },
+    "width": 240,
+    "height": 240,
+    "accounting": {
+      "input_point_count": 9800,
+      "mapped_point_count": 9720,
+      "out_of_bounds_point_count": 80,
+      "occupied_cell_count": 6650,
+      "total_cell_count": 57600
+    },
+    "duration_ms": 7.47,
+    "configuration": { }
+  },
+  "processing": { },
+  "summary": { },
+  "ground_summary": { },
+  "cells": null,
+  "cells_truncated": false
+}
+```
+
+The **dense grid is never returned.** `map` carries dimensions, bounds, resolution and
+accounting. With `include_cells: true`, `cells` holds an `AdaptiveMap` containing **occupied
+cells only** — empty cells are omitted rather than emitted as unknown, because a fine map is
+overwhelmingly empty and serialising it would say nothing at great length.
+
+### What the map fields mean
+
+| Field | Meaning |
+|---|---|
+| `is_adaptive` | Always `false` in Phase 6. Distinguishes a fixed-resolution measurement from an adaptive one so the two can never be confused in a benchmark (ADR-003) |
+| `resolution.source` | `fixed` (configured), `override` (this request only), or `adaptive` — **reserved, never produced today** |
+| `accounting` | `input_point_count == mapped_point_count + out_of_bounds_point_count`, enforced by the contract. A point outside the bounds is counted, not silently dropped |
+| `occupied_cell_count` | Cells holding at least one point. `occupied / total` is the occupancy ratio |
+| `duration_ms` | Measured with `perf_counter`, not estimated |
+| `cells[].height_m` / `height_min_m` / `height_max_m` | Mean / min / max measured height in that cell. `null` never appears here because only occupied cells are projected |
+| `cells[].risk_score` / `uncertainty` | Left at `0.0`. **Nothing computes them yet**; filling them would be an invention |
+
+**422** — malformed points, as the other LiDAR endpoints; also when `resolution_m` is
+outside the configured `[min_resolution_m, max_resolution_m]` range, or when the resulting
+grid would exceed the configured cell budget.
 
 ---
 
@@ -747,35 +854,61 @@ geometry — use `POST /api/v1/lidar/track` for that.
 
 ## `GET /api/v1/map/status`
 
-Mapping readiness and the configured resolution vocabulary. No mapper exists, so
-`active_cells` is always 0.
+Report mapping readiness, the applied resolution and the mapped extent.
 
-**200 OK**
+**200 OK** (abridged)
 
 ```json
 {
-  "schema_version": "1.0",
-  "timestamp": "2026-09-09T18:04:53.171749Z",
   "component": {
     "name": "mapping",
-    "readiness": "NOT_READY",
-    "implementation": "PLANNED",
-    "detail": "2.5D map and resolution contracts only; no mapper and no adaptive resolution algorithm implemented",
-    "phase": 5,
-    "required": false
+    "readiness": "READY",
+    "implementation": "PARTIAL",
+    "phase": 6,
+    "detail": "deterministic frame-local 2.5D fixed-resolution mapping baseline ..."
   },
+  "mapper": "fixed_resolution_mapper_v1",
+  "is_adaptive": false,
+  "adaptive_resolution_implemented": false,
+  "lifecycle": "frame_local",
+  "resolution_m": 0.5,
+  "resolution_source": "fixed",
+  "bounds": { "min_x": -60.0, "max_x": 60.0, "min_y": -60.0, "max_y": 60.0 },
+  "width": 240,
+  "height": 240,
+  "total_cells": 57600,
+  "active_cells": 0,
+  "last_map_timestamp": null,
+  "range_m": 60.0,
+  "resolution_levels": { "low": 1.0, "medium": 0.5, "high": 0.2, "critical": 0.1 },
   "configuration": {
     "is_adaptive_algorithm_implemented": false,
-    "fixed_resolution_baseline_available": false
+    "fixed_resolution_baseline_available": true,
+    "occupancy": "binary: a cell is occupied iff it holds at least one point",
+    "unobserved_height": "null, never zero",
+    "modelled": ["occupancy", "point_count", "min/max/mean height"],
+    "not_modelled": [
+      "probabilistic_occupancy", "temporal_fusion", "adaptive_resolution",
+      "risk", "uncertainty", "semantic_labels"
+    ]
   },
-  "resolution_levels": { "low": 1.0, "medium": 0.5, "high": 0.2, "critical": 0.1 },
-  "range_m": 60.0,
-  "active_cells": 0
+  "summary": { }
 }
 ```
 
-`resolution_levels` gives the configured cell edge length in metres for each level. It
-states what each level *would* mean; no resolution decision has been made.
+| Field | Meaning |
+|---|---|
+| `is_adaptive` / `adaptive_resolution_implemented` | Both **false**. A fixed-resolution mapper exists; nothing allocates resolution by risk |
+| `lifecycle` | `frame_local` — each map covers one frame and nothing accumulates. Not a persistent world map (ADR-030) |
+| `resolution_m` / `resolution_source` | The cell size the mapper applies, and where it came from |
+| `bounds` / `width` / `height` / `total_cells` | The extent actually mapped. Distinct from `range_m`, which is the advertised sensing range retained from the Phase 1 response |
+| `active_cells` | Occupied cells in the **most recent** map; `0` before the first frame |
+| `last_map_timestamp` | Source time of that map; `null` before the first frame |
+| `resolution_levels` | Configuration only: what each level *would* mean to a controller, not a decision that has been made |
+
+`summary` carries counts from the most recent map, or a note saying no frame has been mapped
+yet. **No accuracy figure is reported** — no labelled reference map exists to measure one
+against.
 
 ---
 
@@ -880,10 +1013,13 @@ produces it.
     "duration_ms": 0.27,
     "configuration": { }
   },
-  "provides": ["system", "metrics", "detection", "tracking", "prediction"],
+  "provides": ["system", "metrics", "detection", "tracking", "prediction", "mapping"],
   "not_yet_available": ["risk_field", "adaptive_map"]
 }
 ```
+
+The `mapping` summary never carries the grid itself — a 0.5 m map over the default bounds is
+57,600 cells. Cells come from `POST /api/v1/lidar/map` instead.
 
 `system` is the `GET /api/v1/system/status` payload; `metrics` is the
 `GET /api/v1/system/metrics` payload. Before the first predicted frame the `prediction`

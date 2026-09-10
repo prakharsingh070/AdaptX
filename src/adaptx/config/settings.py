@@ -10,6 +10,7 @@ No secrets are declared or defaulted in this module.
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
@@ -407,17 +408,69 @@ class PredictionSettings(BaseModel):
 
 
 class MapSettings(BaseModel):
-    """2.5D map geometry and the cell size bound to each resolution level.
+    """2.5D map geometry, resolution vocabulary and Phase 6 mapping bounds.
 
-    The adaptive resolution algorithm itself is not implemented in Phase 1;
-    these values define the configured meaning of each level.
+    The ``resolution_*_m`` values define what each *level* would mean to a
+    resolution controller. No controller is implemented, so they are a
+    vocabulary rather than a decision.
+
+    ``resolution_m`` and the ``*_x_m`` / ``*_y_m`` bounds are what the Phase 6
+    fixed-resolution mapper actually uses. Coordinate convention as everywhere
+    else (ADR-009): +x forward, +y left, +z up, metres, origin at the sensor.
+
+    These are **baseline** values chosen as plausible starting points for an
+    automotive scene. None has been tuned or validated against labelled data,
+    because no labelled data exists.
     """
 
-    range_m: float = Field(default=60.0, gt=0)
+    range_m: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Advertised mapping range, reported by the status endpoint. The "
+            "extent actually mapped is set by the bounds below."
+        ),
+    )
     resolution_low_m: float = Field(default=1.0, gt=0)
     resolution_medium_m: float = Field(default=0.5, gt=0)
     resolution_high_m: float = Field(default=0.2, gt=0)
     resolution_critical_m: float = Field(default=0.1, gt=0)
+
+    # -- Phase 6 fixed-resolution mapping ---------------------------------
+    resolution_m: float = Field(
+        default=0.5,
+        gt=0.0,
+        description=(
+            "Cell edge length applied uniformly by the fixed-resolution "
+            "mapper. One value everywhere; adaptive allocation is not "
+            "implemented (ADR-029)."
+        ),
+    )
+    min_resolution_m: float = Field(
+        default=0.05,
+        gt=0.0,
+        description="Finest cell size a mapping request may ask for.",
+    )
+    max_resolution_m: float = Field(
+        default=5.0,
+        gt=0.0,
+        description="Coarsest cell size a mapping request may ask for.",
+    )
+
+    min_x_m: float = Field(default=-60.0, description="Behind the sensor is negative x.")
+    max_x_m: float = Field(default=60.0, description="Ahead of the sensor is positive x.")
+    min_y_m: float = Field(default=-60.0, description="Right of the sensor is negative y.")
+    max_y_m: float = Field(default=60.0, description="Left of the sensor is positive y.")
+
+    max_cells: int = Field(
+        default=4_000_000,
+        ge=1,
+        description=(
+            "Hard ceiling on cells in one grid, checked before any array is "
+            "allocated. Stops a fine resolution over wide bounds from "
+            "requesting an absurd amount of memory (ADR-028)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_monotonic(self) -> MapSettings:
@@ -430,6 +483,28 @@ class MapSettings(BaseModel):
         if sizes != sorted(sizes, reverse=True):
             raise ValueError(
                 "map resolution cell sizes must decrease from LOW to CRITICAL (coarse -> fine)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_mapping_bounds(self) -> MapSettings:
+        if self.min_x_m >= self.max_x_m:
+            raise ValueError("map.min_x_m must be < map.max_x_m")
+        if self.min_y_m >= self.max_y_m:
+            raise ValueError("map.min_y_m must be < map.max_y_m")
+        if self.min_resolution_m > self.max_resolution_m:
+            raise ValueError("map.min_resolution_m must be <= map.max_resolution_m")
+        if not (self.min_resolution_m <= self.resolution_m <= self.max_resolution_m):
+            raise ValueError(
+                f"map.resolution_m ({self.resolution_m}) must lie within "
+                f"[{self.min_resolution_m}, {self.max_resolution_m}]"
+            )
+        width = math.ceil((self.max_x_m - self.min_x_m) / self.resolution_m)
+        height = math.ceil((self.max_y_m - self.min_y_m) / self.resolution_m)
+        if width * height > self.max_cells:
+            raise ValueError(
+                f"map bounds at resolution_m={self.resolution_m} would need "
+                f"{width * height} cells, above map.max_cells ({self.max_cells})"
             )
         return self
 

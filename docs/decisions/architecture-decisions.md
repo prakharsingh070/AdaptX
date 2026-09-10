@@ -779,6 +779,202 @@ safety feature.
 
 **Status:** Accepted
 
+## ADR-028: A Bounded Dense 2.5D Grid, With Half-Open Cells
+
+**Decision:** The Phase 6 map is a **bounded, dense XY grid** held as NumPy arrays. Cells
+are anchored at the map's lower corner and are half-open::
+
+    column = floor((x - min_x) / resolution)
+    row    = floor((y - min_y) / resolution)
+
+A point exactly on `min_x`/`min_y` belongs to the first cell; a point exactly on
+`max_x`/`max_y` is **out of bounds**. Arrays are indexed `[row, column]` with `row`
+stepping along y, so `shape == (height, width)`. Grid dimensions are computed and validated
+**before** any array is allocated, against a configured `max_cells` ceiling.
+
+**Reason:** Every part of this has a specific failure it prevents.
+
+*Bounded, not unbounded.* An unbounded grid sized from the data would change dimensions
+frame to frame, so two maps of the same scene could not be compared or differenced - which
+is precisely what the eventual fixed-versus-adaptive comparison needs to do.
+
+*Dense arrays, not a list of cell objects.* The pre-existing `AdaptiveMap` contract holds
+`list[AdaptiveMapCell]`. A 0.25 m map over a 120 m square is 230,400 cells; one validated
+Pydantic object each would cost far more than the mapping itself, every frame. Holding a
+NumPy array inside a contract is already the project's precedent -
+`BasePointCloudFrame.points` does exactly that. `SpatialMap.to_adaptive_map()` projects
+**occupied cells only** into the existing contract for consumers that want individual cells,
+so nothing is lost.
+
+*Half-open cells.* Without the rule, a point at exactly `max_x` indexes one cell past the
+last column. The alternatives are worse: clamping it inward records a measurement in a cell
+it does not belong to, and growing the grid by one cell makes dimensions depend on whether a
+point happened to land on the edge.
+
+*Dimensions before allocation.* A fine resolution over wide bounds can request an absurd
+array. 0.05 m over the default 120 m square is 5.76 million cells and roughly 184 MB across
+the four arrays. Checking `width * height` first turns that into an explicit, explained
+rejection rather than a memory event.
+
+*Reusing the Phase 2B quantiser.* `perception.grid.cell_indices` carries the int64 overflow
+guard added in Phase 2B, where `astype(int64)` was found to wrap silently and place
+far-apart points in one cell. Mapping calls it on translated coordinates rather than writing
+a second `floor(...).astype(int64)` that would reintroduce the same defect.
+
+**Alternatives considered:** A sparse dict keyed by cell (cheaper for empty maps, but
+unpredictable cost, worse cache behaviour, and no natural array to hand a future risk
+engine); a full 3D voxel grid (the project is explicitly 2.5D - `05_2.5d-mapping.md`); a
+quadtree or other multi-resolution structure (this is what adaptive resolution may
+eventually need, and building it now would prejudge Phase 8 with no measurement behind it);
+an unbounded grid sized per frame (see above).
+
+**Impact:** Map memory is fixed by bounds and resolution, not by point count, and is
+predictable: `width * height * 32` bytes. The grid is directly consumable by a future risk
+engine as an array rather than needing conversion. `range_m` in `MapSettings` is retained
+for the pre-existing status response but is **not** what bounds the map; the explicit
+`min_x_m`/`max_x_m`/`min_y_m`/`max_y_m` fields are.
+
+**Risks:** Dense storage wastes space on a sparse scene - at 0.25 m the measured occupancy
+was 1-16% (Experiment 005), so most cells hold nothing. That is a real cost of uniform
+resolution, and measuring it is part of the point: it is the number adaptive resolution
+exists to improve.
+
+**Status:** Accepted
+
+## ADR-029: Resolution Policy Is Separated From The Mapper
+
+**Decision:** A mapper never chooses its own resolution. It is handed a
+`ResolutionDecision` - `resolution_m`, `source`, `reason`, `requested_by` - and applies it.
+Two distinct contracts sit either side of the decision::
+
+    ResolutionContext -> [ResolutionController] -> ResolutionDecision -> AdaptiveMapper
+       (inputs)              (not implemented)         (output)            (Phase 6)
+
+`ResolutionContext` already existed and is **unchanged**: it carries risk, uncertainty,
+object density, object speed and ego-path membership - the *inputs* a controller reasons
+over. `ResolutionDecision` is new and carries the *outcome*. Phase 6 produces decisions with
+`source = FIXED` only.
+
+**Reason:** The central ADAPT-X claim is that risk-aware resolution beats uniform
+resolution. That claim is only testable if the two halves - deciding and applying - can be
+varied independently. Fusing them would make "the map" and "the policy" one thing, so a
+change in either could not be attributed.
+
+More concretely: the mapper is never *given* tracks, trajectories, risk or uncertainty. A
+risk-aware choice is therefore structurally impossible here rather than merely discouraged
+by a comment. When a controller exists, it produces a different `ResolutionDecision` through
+the same contract and `FixedResolutionMapper` does not change.
+
+The two contracts deliberately keep separate names. Reusing `ResolutionContext` for the
+decision would have destroyed the input contract Phase 8 needs, and would have put risk
+fields inside the mapper's argument - the exact coupling this decision exists to prevent.
+
+**Alternatives considered:** Repurposing `ResolutionContext` as the decision (breaks the
+Phase 8 contract, and reintroduces the coupling); passing a bare `float` (loses provenance,
+so a benchmark could not tell a configured baseline from a one-off override); letting the
+mapper read settings directly and choose (fuses policy into the mapper); implementing a
+trivial distance-banded "adaptive" policy now (it would be an unmeasured heuristic wearing
+the name of the thing the project has yet to justify).
+
+**Impact:** `AdaptiveMapper.update(frame, *, ego_state, tracks, risk_field)` became
+`AdaptiveMapper.build(frame, resolution)`. The old signature handed the mapper exactly the
+material it must not use. It had **no implementations and no importers** outside its own
+module, so this is safe - the same situation, and the same precedent, as widening
+`TrajectoryPredictor.predict` in Phase 5 (ADR-027).
+
+`ResolutionSource` reserves `ADAPTIVE` and `OVERRIDE` alongside `FIXED`, so the contract
+does not change when a controller arrives, and a benchmark sweeping cell sizes is
+distinguishable from the configured baseline.
+
+**Risks:** The split is only as good as its enforcement. If a later mapper starts accepting
+tracks "just for logging", the boundary is gone. The interface is the guard, and it should
+stay narrow.
+
+**Status:** Accepted
+
+## ADR-030: Mapping Is Frame-Local, Not A Persistent World Map
+
+**Decision:** Every mapping call builds a **complete map from one frame**. Nothing
+accumulates between frames. `MappingService` holds no map state - only a counter and the
+last map's *summary*, for status and telemetry. `AdaptiveMapper.reset()` is retained by the
+contract and is a documented **no-op** for the Phase 6 mapper.
+
+**Reason:** Accumulation is a much larger commitment than it looks. A persistent map needs
+ego-motion compensation to know where the vehicle has moved between frames, a decay or
+eviction policy so stale observations do not linger as phantom obstacles, and a way to
+distinguish a moving object's trail from a static structure. ADAPT-X has none of those:
+there is no localisation, and `VehicleState` is a contract nothing populates. A map that
+accumulated without them would smear every moving vehicle into a wall - and would look
+plausible while doing it.
+
+Frame-local mapping is also what makes the map *comparable*. Two mappers run over the same
+frame produce two maps that differ only by mapper, which is exactly the measurement ADR-003
+requires. With accumulation, each map would also depend on its own history.
+
+The no-op `reset` is deliberate and is asserted by a test. Being unable to contaminate the
+next frame is the guarantee; keeping the method means a future accumulating mapper can
+implement it without changing any caller.
+
+**Alternatives considered:** A rolling multi-frame buffer (needs ego-motion compensation
+that does not exist); temporal occupancy fusion (needs a sensor model and a decay policy,
+both of which would be invented rather than measured); full SLAM (out of scope by several
+phases, and not what ADAPT-X is about).
+
+**Impact:** Map cost is bounded and predictable per frame. `POST /api/v1/lidar/map` is
+stateless, unlike `/track` and `/predict`, so frames may be posted in any order and no reset
+endpoint is needed. Documented plainly everywhere it appears: this is not SLAM, not a
+persistent world map, and there is no localisation or loop closure.
+
+**Risks:** Occlusion is not remembered. A cell hidden behind a vehicle this frame is
+reported unobserved even if it was seen clearly a moment ago, and nothing carries that
+knowledge forward. Temporal fusion is the natural future improvement, and it needs the
+machinery listed above first.
+
+**Status:** Accepted
+
+## ADR-031: Binary Occupancy, And Null Height For Unobserved Cells
+
+**Decision:** Occupancy is **binary and derived**, not stored: a cell is occupied exactly
+when `point_count > 0`. Height statistics for a cell with no points are **NaN** in the
+arrays and `null` in the serialised contracts - never `0.0`.
+
+**Reason:** *Binary occupancy* is what the evidence supports. A probability would need a
+sensor model - detection likelihood, false-return rate, incidence angle - and a Bayesian
+update needs multiple observations of the same cell, which frame-local mapping (ADR-030)
+does not have. A single scan can honestly say "at least one return landed here" and no more.
+Deriving occupancy from the count rather than storing it separately means the two can never
+disagree.
+
+*Null height* follows the same reasoning as ADR-023 did for velocity. In this coordinate
+frame `z = 0` is a real height roughly 1.8 m above the road - the sensor's own plane. An
+unobserved cell reporting `0.0` would be indistinguishable from a measured flat surface at
+sensor height, which is both wrong and dangerous-looking to any consumer that later reasons
+about clearance. NaN in the array, `None` in `AdaptiveMapCell.height_m`, and the existing
+contract already types those fields as optional.
+
+`min`/`max` use `np.fmin`/`np.fmax`, which ignore NaN, so an untouched cell simply keeps its
+initial NaN - the unobserved state is the default rather than something that has to be
+restored afterwards.
+
+**Alternatives considered:** Probabilistic occupancy (needs a sensor model that would be
+invented); log-odds Bayesian updates (needs temporal fusion, which ADR-030 declines);
+sentinel heights such as `-9999` (a magic number that arithmetic will silently consume);
+`0.0` for empty cells (indistinguishable from a real measurement - the specific error this
+decision exists to prevent).
+
+**Impact:** `AdaptiveMapCell.occupancy` is a float documented as a probability, and it
+predates Phase 6. The baseline populates it with `1.0` only, never an intermediate value,
+and sets `occupancy_state = OCCUPIED`; the discrete field is authoritative. Consumers must
+handle NaN - `np.nanmin`, `np.isnan` - rather than assuming every cell has a height. The
+projection converts NaN to `None` at the contract boundary so JSON consumers see `null`.
+
+**Risks:** "No return" and "empty space" are conflated. A cell may be unobserved because
+nothing is there, or because something occluded it, and Phase 6 cannot tell the difference.
+That distinction matters for safety and is the first thing a future occupancy model should
+add; until then, an unobserved cell must never be read as free space.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title
