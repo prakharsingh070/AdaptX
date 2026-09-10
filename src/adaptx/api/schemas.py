@@ -19,6 +19,7 @@ from adaptx.models.common import (
     TimestampedModel,
     utc_now,
 )
+from adaptx.models.detection import DetectionResult
 from adaptx.models.map import ResolutionLevel
 from adaptx.models.point_cloud import (
     PointCloudFrame,
@@ -28,6 +29,7 @@ from adaptx.models.point_cloud import (
 from adaptx.models.processing import ProcessingMetrics
 from adaptx.models.risk import RiskLevel
 from adaptx.models.system import ComponentStatus
+from adaptx.models.tracking_result import TrackingResult
 
 #: Hard ceiling on the number of points accepted in a single JSON request,
 #: independent of the configurable ``ADAPTX_LIDAR__MAX_POINTS`` limit. It bounds
@@ -141,6 +143,83 @@ class LiDARFrameResponse(AdaptXModel):
         default=None,
         description="Metadata of the frame as submitted; null when not preprocessed.",
     )
+    ground_summary: PointCloudSummary | None = Field(
+        default=None,
+        description=(
+            "Metadata of the points classified as ground; null unless ground "
+            "segmentation ran. `summary` then describes the non-ground points."
+        ),
+    )
+
+
+class LiDARDetectionResponse(AdaptXModel):
+    """Result of running the processing pipeline and then object detection.
+
+    ``processing`` describes what the pipeline did to the frame; ``detection``
+    describes what the detector found in the non-ground points that survived.
+    Raw point arrays are deliberately absent: the payload carries summaries and
+    object geometry, not the cloud itself.
+    """
+
+    accepted: bool
+    detection: DetectionResult
+    processing: ProcessingMetrics
+    summary: PointCloudSummary = Field(
+        description="Metadata of the non-ground frame the detector consumed."
+    )
+    ground_summary: PointCloudSummary | None = Field(
+        default=None, description="Metadata of the separated ground points, if any."
+    )
+    detail: str = Field(
+        default=(
+            "Objects are geometric clusters classified by size alone. This is a "
+            "baseline, not trained recognition, and no tracking or prediction is "
+            "performed."
+        )
+    )
+
+
+class LiDARTrackingResponse(AdaptXModel):
+    """Result of processing a frame, detecting objects and tracking them.
+
+    Carries all three stages so a caller can see what each contributed. Raw
+    point arrays are absent throughout: summaries and object geometry only.
+    """
+
+    accepted: bool
+    tracking: TrackingResult
+    detection: DetectionResult
+    processing: ProcessingMetrics
+    summary: PointCloudSummary = Field(
+        description="Metadata of the non-ground frame the detector consumed."
+    )
+    ground_summary: PointCloudSummary | None = Field(
+        default=None, description="Metadata of the separated ground points, if any."
+    )
+    detail: str = Field(
+        default=(
+            "Tracking is stateful: post frames in temporal order and reset "
+            "between unrelated sequences. Velocity is measured from frame "
+            "timestamps and is null until a track has two observations. No "
+            "trajectory prediction is performed."
+        )
+    )
+
+
+class TrackingResetResponse(AdaptXModel):
+    """Confirmation that tracking state was cleared."""
+
+    reset: bool = True
+    cleared_track_count: int = Field(
+        ge=0, description="Tracks that were alive immediately before the reset."
+    )
+    detail: str = Field(default="All tracks dropped and identifier allocation restarted from zero.")
+
+
+class TrackingStatusResponse(TimestampedModel):
+    """Current tracking state, without per-track geometry."""
+
+    summary: dict[str, Any] = Field(description="Counts, identifiers and effective configuration.")
 
 
 class ModuleStatusResponse(TimestampedModel):

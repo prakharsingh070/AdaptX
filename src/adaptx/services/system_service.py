@@ -69,8 +69,8 @@ def _declared_components() -> list[ComponentStatus]:
             readiness=ComponentReadiness.READY,
             implementation=ImplementationStatus.PARTIAL,
             detail=(
-                "frame validation, bounds and metadata only; no filtering, "
-                "ground segmentation, voxelisation or clustering"
+                "frame acceptance, validation, bounds and metadata only; the "
+                "processing stages are reported separately as lidar_preprocessing"
             ),
             phase=1,
             required=True,
@@ -80,26 +80,37 @@ def _declared_components() -> list[ComponentStatus]:
             readiness=ComponentReadiness.READY,
             implementation=ImplementationStatus.PARTIAL,
             detail=(
-                "input validation, NaN/Inf removal, ROI and range filtering; "
-                "no downsampling, ground segmentation or clustering"
+                "input validation, NaN/Inf removal, ROI and range filtering, plus "
+                "opt-in voxel downsampling, baseline ground segmentation and "
+                "baseline noise filtering; no clustering, no coordinate transforms"
             ),
             phase=2,
         ),
         ComponentStatus(
             name="perception",
-            readiness=ComponentReadiness.NOT_READY,
-            implementation=ImplementationStatus.PLANNED,
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
             detail=(
-                "object detection contract only; no detector implemented "
-                "(LiDAR preprocessing is reported separately)"
+                "geometric object detection: grid clustering, size filtering and "
+                "baseline classification by dimension bands. No trained model, no "
+                "oriented boxes, no velocity, no camera fusion, no semantic "
+                "segmentation. Classification is a heuristic and its confidence is "
+                "a geometric fit score, not a calibrated probability"
             ),
             phase=3,
         ),
         ComponentStatus(
             name="tracking",
-            readiness=ComponentReadiness.NOT_READY,
-            implementation=ImplementationStatus.PLANNED,
-            detail="tracker contract only; no tracker implemented",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "geometric baseline: gated nearest-neighbour association, "
+                "velocity measured from frame timestamps, and a track lifecycle. "
+                "No learned motion model, no appearance features, no "
+                "re-identification - a track retired for missing too many frames "
+                "does not come back. Tracking quality is bounded by detection "
+                "quality, and no trajectory prediction is performed"
+            ),
             phase=4,
         ),
         ComponentStatus(

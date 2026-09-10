@@ -183,7 +183,7 @@ class RawPointCloudFrame(BasePointCloudFrame):
     Structurally valid but **may contain NaN or infinite coordinates**: a
     scanner reports a non-return that way, and dropping those points is the
     job of the preprocessing pipeline
-    (:class:`adaptx.perception.preprocessing.PointCloudPreprocessor`), which
+    (:class:`adaptx.perception.pipeline.LiDARProcessingPipeline`), which
     counts them rather than hiding them.
     """
 

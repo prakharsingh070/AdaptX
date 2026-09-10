@@ -108,7 +108,7 @@ subsystem's readiness **and** implementation status.
       "name": "lidar_ingest",
       "readiness": "READY",
       "implementation": "PARTIAL",
-      "detail": "frame validation, bounds and metadata only; no filtering, ground segmentation, voxelisation or clustering",
+      "detail": "frame acceptance, validation, bounds and metadata only; the processing stages are reported separately as lidar_preprocessing",
       "phase": 1,
       "required": true
     },
@@ -171,7 +171,7 @@ Metrics measured by the running process.
 | `latency_ms` | Mean **ingest processing** time over the window. Not sensor-to-output latency — there is no pipeline to measure yet |
 | `processing_time_ms` | Ingest processing time of the most recent frame |
 | `cpu_percent` / `memory_mb` | This process, measured with `psutil` |
-| `gpu_percent` | Always `null` in Phase 1 |
+| `gpu_percent` | Always `null`: no GPU monitoring dependency is installed |
 | `point_count` | Points in the most recent frame |
 | `sample_count` | Frames currently in the measurement window |
 | `unavailable` | Every metric that could not be measured, and why |
@@ -206,8 +206,9 @@ describing `DISCONNECTED`, not an error.
 
 ## `POST /api/v1/lidar/frame`
 
-Submit a point-cloud frame. The frame is validated, counted and summarised. It is **not**
-filtered, detected on, tracked or mapped — those modules do not exist.
+Submit a point-cloud frame. By default the frame is validated, counted and summarised and
+nothing else. With `preprocess: true` it also runs the preprocessing pipeline described
+below. It is **never** detected on, tracked or mapped — those modules do not exist.
 
 **Request**
 
@@ -230,7 +231,7 @@ filtered, detected on, tracked or mapped — those modules do not exist.
 | `points` | yes | Rows of `[x, y, z]` or `[x, y, z, intensity]`, in metres. Hard request cap 1,000,000 rows; the effective limit is `ADAPTX_LIDAR__MAX_POINTS` |
 | `timestamp` | no | Timezone-aware UTC; defaults to now. Naive datetimes are rejected |
 | `coordinate_frame` | no | Defaults to `lidar` |
-| `preprocess` | no | Defaults to `false`. When `true`, runs the Phase 2A pipeline before ingest |
+| `preprocess` | no | Defaults to `false`. When `true`, runs the preprocessing pipeline before ingest |
 
 Coordinates are in the ADAPT-X convention (ADR-009): right-handed, origin at the sensor,
 **+x forward, +y left, +z up**, metres.
@@ -315,9 +316,43 @@ Semantics:
 `duration_ms` is also folded into the `latency_ms` reported by
 `GET /api/v1/system/metrics`, so that figure covers the real work done per frame.
 
-**Compatibility:** `preprocess` is optional and defaults to `false`; `processing` and
-`input_summary` are optional response fields that are `null` on the default path. A Phase 1
-client is unaffected.
+#### Phase 2B stages
+
+Voxel downsampling, ground segmentation and noise filtering are **opt-in** (ADR-012) and
+configured on the server, not per request:
+
+```
+ADAPTX_LIDAR__VOXEL_ENABLED=true
+ADAPTX_LIDAR__GROUND_ENABLED=true
+ADAPTX_LIDAR__NOISE_ENABLED=true
+```
+
+With none enabled the response is exactly as above: four stages, and the 2B counters are
+`0`. With all three enabled, `stages` reports seven entries in pipeline order and three
+further counters are populated:
+
+| Field | Meaning |
+|---|---|
+| `voxel_reduced_count` | Points merged away by downsampling |
+| `ground_point_count` | Points classified as ground — **separated, not discarded** |
+| `noise_removed_count` | Points dropped as outliers |
+| `ground_summary` | Metadata of the ground points, or `null` if segmentation did not run |
+
+When segmentation runs, `summary` describes the **non-ground** points and `ground_summary`
+the ground ones. A stage that did not run is absent from `stages` rather than reported with
+zero counts, so the list always says what actually happened.
+
+The counters partition the input exactly:
+
+```
+input_point_count = invalid + roi_rejected + range_rejected
+                  + voxel_reduced + ground + noise_removed + output
+```
+
+**Compatibility:** `preprocess` is optional and defaults to `false`; `processing`,
+`input_summary` and `ground_summary` are optional response fields that are `null` on the
+default path, and the 2B counters default to `0`. A Phase 1 or Phase 2A client is
+unaffected.
 
 Example:
 
@@ -325,6 +360,222 @@ Example:
 curl -X POST http://localhost:8000/api/v1/lidar/frame \
   -H "Content-Type: application/json" \
   -d '{"frame_id":1,"sensor_id":"lidar_0","source":"synthetic_test","points":[[0,0,0],[1,2,3]]}'
+```
+
+---
+
+## `POST /api/v1/lidar/detect`
+
+Run the processing pipeline on a frame, then detect objects in the non-ground
+points that survive.
+
+The frame is **always** preprocessed here, whatever the request's `preprocess` flag says,
+because detection consumes the pipeline's non-ground output. Ground segmentation must
+therefore be enabled in configuration for this endpoint to be useful; with it off, the road
+surface reaches the detector as one enormous cluster and is rejected by the footprint filter.
+
+**Request:** identical to `POST /api/v1/lidar/frame`.
+
+**200 OK** (abridged)
+
+```json
+{
+  "accepted": true,
+  "detection": {
+    "frame_id": 3,
+    "sensor_id": "roof_lidar",
+    "detector": "geometric_detector_v1",
+    "is_baseline": true,
+    "objects": [
+      {
+        "object_id": 0,
+        "frame_id": 3,
+        "object_class": "vehicle",
+        "position": { "x": 12.0, "y": -3.0, "z": -1.0 },
+        "velocity": null,
+        "bounding_box": {
+          "center": { "x": 12.0, "y": -3.0, "z": -1.0 },
+          "dimensions": { "length": 4.5, "width": 1.9, "height": 1.6 },
+          "yaw_rad": 0.0
+        },
+        "confidence": 0.71,
+        "point_count": 1948,
+        "distance_m": 12.4,
+        "classifier": "geometric_bands_v1",
+        "is_baseline_classification": true
+      }
+    ],
+    "rejected": [
+      {
+        "cluster_id": 4,
+        "reason": "too_few_points",
+        "point_count": 3,
+        "measured_value": 3.0,
+        "threshold": 10.0
+      }
+    ],
+    "input_point_count": 2497,
+    "non_ground_point_count": 2497,
+    "cluster_count": 24,
+    "duration_ms": 3.42,
+    "clustering_duration_ms": 2.61,
+    "classification_duration_ms": 0.68,
+    "configuration": { }
+  },
+  "processing": { },
+  "summary": { },
+  "ground_summary": { }
+}
+```
+
+### What the fields mean
+
+| Field | Meaning |
+|---|---|
+| `object_class` | `vehicle`, `pedestrian`, `cyclist`, `obstacle` or `unknown` |
+| `confidence` | A **geometric fit score** in [0, 1] — how centrally the cluster sits in its dimension band. **Not** a probability that the class is right; no labelled data exists to calibrate one. `0.0` when the class is `unknown` |
+| `velocity` | Always `null`. A single frame cannot show motion |
+| `bounding_box.yaw_rad` | Always `0.0`. Boxes are axis-aligned; no orientation is estimated |
+| `distance_m` | Euclidean distance from the sensor origin to the centroid |
+| `rejected` | Candidate clusters that were filtered out, each with the reason, the measured value and the threshold it missed |
+| `cluster_count` | Candidates before filtering. Always equals `len(objects) + len(rejected)` |
+
+Rejection reasons: `too_few_points`, `too_many_points`, `too_short`, `too_tall`,
+`footprint_too_small`, `footprint_too_large`.
+
+**Detections are geometric clusters classified by size.** There is no trained model, no
+tracking and no semantic recognition. Classification is a documented heuristic (ADR-021),
+and a cluster matching no dimension band — or more than one — is reported `unknown` rather
+than guessed at.
+
+The response carries summaries and object geometry only; raw point arrays are never echoed.
+
+**422** — same conditions as `POST /api/v1/lidar/frame`.
+
+---
+
+## `POST /api/v1/lidar/track`
+
+Process a frame, detect objects in it, and track them across frames.
+
+**This endpoint is stateful**, unlike every other one here. Each call advances the
+tracker by one frame.
+
+| Rule | Why |
+|---|---|
+| Post frames in **temporal order** | Association compares each frame against the state left by the previous one |
+| Send an explicit `timestamp` | Velocity is measured from the interval between successive frames. Omit it and every frame is "now", so the measured interval becomes the wall-clock gap between HTTP requests rather than between scans |
+| Call `/api/v1/tracking/reset` between unrelated sequences | Otherwise the first frame of a new scene is associated against tracks from the old one |
+| One track set per backend | The tracker is process-wide (ADR-025). Concurrent clients share it |
+
+**Request:** identical to `POST /api/v1/lidar/frame`.
+
+**200 OK** (abridged)
+
+```json
+{
+  "accepted": true,
+  "tracking": {
+    "frame_id": 2,
+    "tracker": "geometric_tracker_v1",
+    "is_baseline": true,
+    "tracks": [
+      {
+        "track_id": 0,
+        "object_class": "vehicle",
+        "status": "confirmed",
+        "position": { "x": 12.0, "y": -3.0, "z": -1.0 },
+        "previous_position": { "x": 11.0, "y": -3.0, "z": -1.0 },
+        "velocity": { "x": 2.0, "y": 0.0, "z": 0.0 },
+        "observed_velocity": { "x": 2.0, "y": 0.0, "z": 0.0 },
+        "acceleration": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "heading_rad": 0.0,
+        "predicted_position": { "x": 12.0, "y": -3.0, "z": -1.0 },
+        "hits": 3,
+        "age_frames": 3,
+        "missed_frames": 0,
+        "first_seen": "2026-01-01T12:00:00Z",
+        "last_seen": "2026-01-01T12:00:01Z",
+        "confidence": 0.6
+      }
+    ],
+    "new_track_ids": [],
+    "deleted_track_ids": [],
+    "unmatched_detection_ids": [],
+    "unmatched_track_ids": [],
+    "detection_count": 1,
+    "association_count": 1,
+    "duration_ms": 0.21,
+    "association_duration_ms": 0.06,
+    "configuration": { }
+  },
+  "detection": { },
+  "processing": { },
+  "summary": { },
+  "ground_summary": { }
+}
+```
+
+### What the track fields mean
+
+| Field | Meaning |
+|---|---|
+| `track_id` | Stable for the track's lifetime, **never reused** once retired. Not a global identity |
+| `status` | `tentative` (not yet trusted), `confirmed` (matched this frame), `coasting` (alive but unmatched), `lost` (retired — appears only in `deleted_track_ids`) |
+| `velocity` | **Null until two observations.** One frame cannot show motion, and zero would claim a measured standstill (ADR-023). Also null for a non-positive or over-long frame interval |
+| `observed_velocity` | The raw frame-to-frame value before smoothing, so smoothing can never hide a jump |
+| `acceleration` | Null until two consecutive velocities exist |
+| `heading_rad` | Null below the configured speed floor, where direction would describe noise rather than travel |
+| `predicted_position` | Where the tracker expected this track, used for **association gating only**. Not an observation, and **not a trajectory prediction** — that is a later phase |
+| `confidence` | The detector's geometric fit score, carried through. Still not a probability |
+
+**Velocity is measured, never assumed.** Nothing here is extrapolated into the future.
+
+**422** — same conditions as the other LiDAR endpoints.
+
+---
+
+## `POST /api/v1/tracking/reset`
+
+Drop every track and restart identifier allocation from zero.
+
+**200 OK**
+
+```json
+{
+  "reset": true,
+  "cleared_track_count": 3,
+  "detail": "All tracks dropped and identifier allocation restarted from zero."
+}
+```
+
+---
+
+## `GET /api/v1/tracking/status`
+
+Current tracking state: counts, identifiers and effective configuration. No per-track
+geometry — use `POST /api/v1/lidar/track` for that.
+
+**200 OK**
+
+```json
+{
+  "summary": {
+    "tracker": "geometric_tracker_v1",
+    "is_baseline": true,
+    "frames_tracked": 12,
+    "active_tracks": 3,
+    "confirmed": 2,
+    "tentative": 1,
+    "coasting": 0,
+    "moving": 2,
+    "new_last_frame": 0,
+    "deleted_last_frame": 0,
+    "track_ids": [0, 1, 2],
+    "counts_by_class": { "vehicle": 2, "pedestrian": 1 },
+    "configuration": { }
+  }
+}
 ```
 
 ---

@@ -19,7 +19,7 @@ from adaptx.core.exceptions import InvalidPointCloudError
 from adaptx.models.common import CoordinateFrame, DataSource
 from adaptx.models.point_cloud import PointCloudFrame, RawPointCloudFrame
 from adaptx.models.processing import ProcessingStage
-from adaptx.perception.preprocessing import PointCloudPreprocessor
+from adaptx.perception.pipeline import LiDARProcessingPipeline
 
 # A permissive configuration: only the filter under test constrains anything.
 OPEN_SETTINGS = LiDARSettings(
@@ -48,9 +48,9 @@ def make_raw(points: list[list[float]], **kwargs: object) -> RawPointCloudFrame:
     return RawPointCloudFrame.from_sequence(points, **defaults)
 
 
-def preprocessor(**overrides: float | int) -> PointCloudPreprocessor:
+def preprocessor(**overrides: float | int) -> LiDARProcessingPipeline:
     """A preprocessor whose configuration starts permissive."""
-    return PointCloudPreprocessor(OPEN_SETTINGS.model_copy(update=dict(overrides)))
+    return LiDARProcessingPipeline(OPEN_SETTINGS.model_copy(update=dict(overrides)))
 
 
 class TestValidInput:

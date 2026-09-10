@@ -192,7 +192,7 @@ frame cannot propagate into a bound and serialise as a null.
 
 **Risks:** A future contributor could accept `BasePointCloudFrame` where a
 validated frame is required, losing the guarantee. Mitigated by the narrow
-signatures: only `PointCloudPreprocessor.run` accepts the base type.
+signatures: only `LiDARProcessingPipeline.run` accepts the base type.
 
 **Status:** Accepted
 
@@ -219,6 +219,426 @@ limit).
 is attributed to the ROI. Squaring a coordinate above roughly 1e154 would
 overflow in float64; real LiDAR coordinates are many orders of magnitude below
 that.
+
+**Status:** Accepted
+
+## ADR-012: Phase 2B Stages Are Opt-In
+
+**Decision:** Voxel downsampling, ground segmentation and noise filtering are
+disabled by default and enabled individually through configuration
+(`ADAPTX_LIDAR__VOXEL_ENABLED`, `__GROUND_ENABLED`, `__NOISE_ENABLED`).
+
+**Reason:** All three change what every downstream consumer sees, and none is
+neutral. Voxelisation is lossy by construction; ground segmentation and noise
+filtering are baselines with documented failure modes. Turning them on by
+default would silently alter the meaning of a processed frame, and ADAPT-X
+depends on a stable, comparable baseline (ADR-003). Opt-in also means the whole
+existing test suite continues to describe real behaviour rather than being
+rewritten around a new default.
+
+**Alternatives considered:** Enabled by default (matches the "full pipeline"
+picture but silently changes existing behaviour and forces test rewrites); a
+single `preprocessing_level` dial (couples three independent choices together).
+
+**Impact:** With stock configuration the pipeline reports the same four stages
+as Phase 2A and `ground_frame` is null. A stage that did not run is absent from
+the `stages` list rather than reported with zero counts, so the list always
+describes what actually happened.
+
+**Risks:** The stages could sit unused because nobody enables them. Mitigated by
+documenting them in `.env.example`, `API.md` and the roadmap.
+
+**Status:** Accepted
+
+## ADR-013: No LiDAR-to-Ego Transform in Phase 2B
+
+**Decision:** Phase 2B does not implement a coordinate transformation stage.
+All three stages operate in the frame the points arrive in.
+
+**Reason:** Determined per stage rather than assumed. Voxelisation is grid
+quantisation, a function of coordinates in whatever frame they arrive in. Noise
+filtering measures distances between points, which any rigid transform
+preserves exactly. Ground segmentation needs to know which axis is up - already
+fixed by ADR-009 - and where the ground is, which the per-cell lowest-point
+method *discovers* locally rather than being told. None of the three needs a
+transform, so building one would be speculative work with no consumer.
+
+**Alternatives considered:** Adding a transform stage pre-emptively (no
+consumer, and the calibration source it would need does not exist yet);
+a global height threshold for ground, which *would* have required the sensor
+mount height and therefore at least the translation part of a transform.
+
+**Impact:** The only frame assumption is that the sensor is mounted roughly
+level, so +z is up. A real transform becomes necessary at the first of: a
+tilted or multi-sensor mount, sensor fusion, or CARLA ingestion (Phase 9, which
+also carries the left-handed to right-handed flip). At that point it belongs in
+its own stage with an explicit calibration source, not folded into these.
+
+**Risks:** Ground segmentation degrades on a significantly rolled or pitched
+mount. Documented in the module and asserted by its limitation tests.
+
+**Status:** Accepted
+
+## ADR-014: Grid-Approximated Noise Filtering, Without SciPy
+
+**Decision:** The baseline noise filter counts a point's neighbours over the
+3x3x3 block of grid cells around it and drops points below a configured count.
+It is named for what it does rather than being called a radius filter, and no
+spatial-index dependency is added.
+
+**Reason:** Exact radius outlier removal or statistical (k-nearest-neighbour)
+outlier removal needs a spatial index, in practice `scipy.spatial.cKDTree`. The
+grid approximation needs only NumPy and is adequate for removing isolated
+returns, which is what a baseline is for. Adding a dependency before the cheaper
+approach has been shown insufficient would violate the "no unnecessary
+frameworks" constraint.
+
+**Alternatives considered:** SciPy cKDTree (exact, but a new dependency not yet
+justified); counting only the point's own cell (much cheaper, but a cluster
+split across a cell boundary would be wrongly deleted).
+
+**Impact:** The region tested is a cube of side 3x the cell size, not a sphere,
+so the effective neighbourhood depends slightly on where a point sits within its
+cell. The module says so plainly rather than implying exact radius semantics.
+Revisit if the approximation proves inadequate against real data, and record
+that decision.
+
+**Status:** Accepted
+
+## ADR-015: Voxel Representative Is a Real Measured Point
+
+**Decision:** The point kept for each occupied voxel is the real input point
+nearest that voxel's centroid, with ties broken by the lower input index. The
+centroid itself is never emitted.
+
+**Reason:** A centroid is a coordinate no sensor returned. Emitting one would
+manufacture a sensor value, which `20-constraints.md` forbids, and it would also
+require inventing an intensity for the synthetic point. Keeping a real return
+preserves both the measurement and its intensity. Choosing the point nearest the
+centroid rather than an arbitrary one keeps the downsampled cloud faithful to
+the original spatial structure.
+
+**Alternatives considered:** Centroid averaging, which is the conventional
+choice in most libraries and gives smoother output, but synthesises data; first
+point per voxel, which is cheapest but arbitrary and biased by input ordering.
+
+**Impact:** Slightly more work per frame than either alternative: a centroid
+pass followed by a nearest-point selection. Deterministic given the tie-break
+rule.
+
+**Status:** Accepted
+
+## ADR-016: Baseline Ground Segmentation by Per-Cell Lowest Point
+
+**Decision:** Ground is classified per xy cell: the lowest point in a cell
+defines the local ground level, and points within a configured tolerance above
+it are ground. An absolute height ceiling is available but disabled by default.
+
+**Reason:** A single global height threshold assumes a flat world *and* a known
+sensor mount height; on any incline it either keeps a wall of ground points or
+erases the road. Working per cell discovers the ground level locally, handles
+slope, and needs no mount height (ADR-013). RANSAC plane fitting handles tilt
+too but needs a fixed seed to stay deterministic and can latch onto a large
+wall, which is a worse failure than the one below.
+
+**Alternatives considered:** Global height threshold (simpler, fails on slope);
+seeded RANSAC plane fit (handles tilt, but non-deterministic by nature and can
+select the wrong plane).
+
+**Impact:** The known weakness is a cell containing only object returns - a car
+roof with no road visible beneath it - whose lowest points become "ground". The
+optional ceiling limits this when the mount height is known; it is off by
+default because it reintroduces the mount assumption. The limitation is asserted
+by a test so it stays visible rather than being forgotten.
+
+**Status:** Accepted
+
+## ADR-017: One Pipeline Orchestrator, Named for What It Does
+
+**Decision:** The orchestrating class is `LiDARProcessingPipeline`, in
+`adaptx/perception/pipeline.py`. It sequences stages and accounts for what each
+one did; it implements no algorithm itself. It was previously called
+`PointCloudPreprocessor`.
+
+**Reason:** With ground segmentation and noise filtering in place the class no
+longer does only "pre" processing, and the old name understated it. Keeping an
+inaccurate name is a small cost paid on every reading of the code. The rename is
+mechanical, has no external consumers, and is covered by the whole test suite.
+
+**Alternatives considered:** Keeping the old name and documenting the mismatch
+(free, but leaves every future reader to discover it); introducing a second
+class as a facade (two names for one thing, and the orchestration already
+existed).
+
+**Impact:** Each algorithm lives in its own module - `voxel`, `ground`, `noise`,
+with `grid` shared between them - and is independently constructible and
+testable. The orchestrator holds sequencing, accounting and timing only. Adding
+a stage means adding a module and one block in `run`.
+
+**Status:** Accepted
+
+## ADR-018: A Fixed-Resolution *Processing* Baseline, Distinct from ADR-003
+
+**Decision:** Phase 2C defines `fixed_resolution_baseline`: the whole pipeline
+at one fixed voxel size everywhere, as a pinned named configuration. It is
+explicitly **not** the fixed-resolution map baseline of ADR-003.
+
+**Reason:** ADAPT-X's claim is that risk-aware resolution beats uniform
+resolution, and that needs a stated reference to be measured against. Fixing the
+parameters and writing down the assumptions turns "whatever settings were in the
+environment" into something reproducible.
+
+The distinction from ADR-003 is not pedantry. ADR-003 concerns cell size in the
+2.5D occupancy map, which does not exist. If the two were conflated, the project
+would appear to already possess a mapping baseline it has not built, and a later
+comparison could be presented as more complete than it is.
+
+**Alternatives considered:** Waiting until Phase 5 so there is only one baseline
+(leaves Phase 2 work unmeasurable against anything); reusing the ADR-003 name
+(the conflation this decision exists to prevent).
+
+**Impact:** Two profiles ship: the baseline, and a `filter_only` profile that
+runs the Phase 2A stages alone. Running both attributes the cost of the Phase 2B
+stages by measurement rather than by guess. The default 0.20 m voxel size is a
+plausible starting point, not a tuned or validated optimum, and is documented as
+such.
+
+**Risks:** A reader could still take a processing baseline for a perception
+baseline. Mitigated by saying so in the module, in `docs/BENCHMARKING.md` and
+here.
+
+**Status:** Accepted
+
+## ADR-019: Benchmark on Deterministic Synthetic Data, Clearly Labelled
+
+**Decision:** Benchmarks run on generated point clouds from a fixed seed. Every
+frame is labelled `SYNTHETIC_TEST`, every dataset record carries
+`synthetic: true` and `ground_truth_available: false`, and every report repeats
+that the figures say nothing about real-world performance.
+
+**Reason:** No recorded LiDAR dataset is available to this project yet, and
+benchmarking against a live sensor would be neither repeatable nor controlled -
+`knowledge-base/12_scenario-generation.md` requires reproducibility. Generated
+data gives byte-identical inputs across machines and days, which is what makes
+two measurements comparable at all.
+
+The labelling is not decoration. `20-constraints.md` forbids presenting
+simulated data as real, and a speed number measured on synthetic geometry is
+exactly the kind of figure that gets quoted later without its caveat.
+
+**Alternatives considered:** A live sensor (not repeatable, and none is
+attached); a public recorded dataset (none vendored, and licence and size
+questions are unresolved); no benchmark at all (leaves Phase 2 unmeasured).
+
+**Impact:** The generator is a crude geometric stand-in - no beam divergence, no
+occlusion, no incidence-angle falloff, no intensity physics. It is adequate for
+measuring throughput and exercising edge cases, and inadequate for anything
+about accuracy. Replacing it with a recorded dataset means changing one module.
+
+**Risks:** Timings on synthetic geometry may not predict timings on real scans,
+whose density distribution differs. Stated in the report output itself, not only
+in documentation.
+
+**Status:** Accepted
+
+## ADR-020: Grid Connected Components for Clustering, Not DBSCAN
+
+**Decision:** Clustering groups points by connectivity on a regular grid whose
+cell size is the cluster tolerance. Touching occupied cells join; each connected
+group is a cluster. The module is named `GridConnectedComponentClusterer` rather
+than borrowing the name of an algorithm it is not.
+
+**Reason:** Exact Euclidean clustering compares pairwise distances between
+candidate neighbours, which needs a spatial index - in practice
+`scipy.spatial.cKDTree`. ADR-014 already declined that dependency for noise
+filtering on the same grounds, and the approximation is adequate for a baseline
+whose purpose is to be replaceable. Grid connectivity is fully vectorisable,
+deterministic, and reuses the quantiser the Phase 2B stages already share.
+
+DBSCAN was considered and rejected as the wrong shape for this stage: its
+core-point rule is a density filter, and ADAPT-X already filters sparse clusters
+explicitly by point count, where the threshold is visible and configurable
+rather than buried in the clustering step.
+
+**Alternatives considered:** SciPy cKDTree with true Euclidean clustering
+(exact, but a dependency not yet earned); pairwise distances in NumPy
+(O(N^2), unusable at 100k points); DBSCAN (density rule duplicates the existing
+filter).
+
+**Impact:** Two objects whose points land in touching cells merge into one
+cluster even when no pair of points is within the tolerance - two pedestrians
+half a metre apart may come back as one. Points sharing a cell can never be
+split. Both are stated in the module and asserted by tests, so the behaviour is
+visible rather than surprising. Connected components are found by vectorised
+label propagation with pointer jumping, so no Python-level union-find loop runs
+over millions of edges.
+
+**Status:** Accepted
+
+## ADR-021: Classification by Dimension Bands, and What Its Confidence Means
+
+**Decision:** Objects are classified by comparing measured cluster dimensions
+against explicit bands for pedestrian, cyclist, vehicle and obstacle. A cluster
+matching no band, **or more than one**, is `UNKNOWN`. The reported confidence is
+a geometric fit score, documented as such, not a probability.
+
+**Reason:** Geometry is the only signal available: there is no trained model, no
+appearance data and no labelled dataset. Stating the rules as bands makes the
+output predictable and reviewable, which a learned model would not be at this
+stage.
+
+Returning `UNKNOWN` on ambiguity is the substantive part. Bands for a narrow
+pedestrian and a bicycle genuinely overlap, and picking the "best" match would
+manufacture a distinction the measurement does not support. The system reports
+that it cannot tell.
+
+Calling the score a confidence without qualification would be the more damaging
+error. `20-constraints.md` forbids fabricating accuracy figures, and a number in
+[0, 1] beside a class label reads as "probability this is correct". It is not:
+it is how centrally the cluster sits in its band. No labelled data exists to
+calibrate a real probability, so none is offered. `UNKNOWN` scores 0.0.
+
+**Alternatives considered:** Nearest-band matching with a distance score
+(always returns a class, hiding genuine ambiguity); a trained classifier (needs
+labelled data the project does not have, and Phase 3 is scoped as the
+deterministic baseline an ML detector is later measured against).
+
+**Impact:** Ambiguous geometry - and there is a lot of it in a real scene -
+comes back `UNKNOWN` rather than confidently wrong. Bands are module constants
+with a documented table rather than configuration, because they are the rule
+itself; cluster *filtering* thresholds are configurable, as those are policy.
+Classification is rotation-tolerant only at 90 degrees: axis-aligned boxes make
+a diagonal object measure larger than it is.
+
+**Status:** Accepted
+
+## ADR-022: The Detector Contract Returns a Result, Not a List
+
+**Decision:** `ObjectDetector.detect` returns a full `DetectionResult` -
+objects, rejected candidates, counts, measured timings and the configuration
+snapshot - rather than `list[DetectedObject]`.
+
+**Reason:** A detector is the only component that knows its own timing, how many
+candidates it considered and why it turned each one down. Returning only the
+accepted objects would leave every caller unable to distinguish "the scene was
+empty" from "twelve candidates were found and all were rejected as noise" - and
+that distinction is exactly what makes a detection failure diagnosable.
+
+**Alternatives considered:** Returning a list and exposing metrics on the
+detector object (metrics would then belong to the detector rather than the
+frame, and would race under any concurrent use); a second `run()` method
+alongside `detect()` (two ways to do one thing, and an ML detector would have to
+implement both).
+
+**Impact:** The abstract signature changed while it had no implementations, so
+nothing was broken. A future `MLObjectDetector` implements the same single
+method and drops into the API and service layer unchanged.
+
+**Status:** Accepted
+
+## ADR-023: Motion Is Null Until Measured
+
+**Decision:** `TrackedObject.velocity`, `acceleration` and `heading_rad` are
+optional and default to `None`. A track that has been seen once reports no
+motion at all, rather than a zero vector and a heading of zero.
+
+**Reason:** The previous defaults were `Vector3(0, 0, 0)` and `0.0`, which are
+indistinguishable from *measured* results - a stationary object pointing
+straight ahead. Phase 4 requires that first-frame velocity be unknown, and the
+contract could not express that. Every consumer reading a fresh track would
+have seen a confident claim of a standstill that nothing had observed.
+
+This is the same rule already applied to metrics, where an unmeasured value is
+`None` with a stated reason rather than a plausible-looking zero. It also makes
+`DetectedObject` and `TrackedObject` consistent: detection velocity was already
+`Vector3 | None`.
+
+The distinction is not academic. A stationary vehicle and a vehicle seen for the
+first time are different situations, and a risk engine consuming tracks must be
+able to tell them apart. Under the old contract it could not.
+
+**Alternatives considered:** Keeping zero defaults and adding a
+`has_velocity: bool` flag (two fields that can disagree, and every consumer must
+remember to check the flag); leaving the contract alone and having the tracker
+emit zeros (exactly the fabricated measurement the project's rules forbid).
+
+**Impact:** `speed_mps` now returns `float | None`, and a new `is_moving`
+property returns `None` when motion is unknown. One Phase 1 test asserted
+`speed_mps == 0.0` on a default track; it was replaced with stronger assertions
+that unknown motion is `None` and that a *measured* standstill is still
+expressible and distinguishable. This is the only Phase 1-3 contract Phase 4
+changed.
+
+**Status:** Accepted
+
+## ADR-024: Gated Greedy Nearest-Neighbour Association
+
+**Decision:** Detections are matched to tracks by distance within a configurable
+gate, considered in ascending distance and claimed greedily, with optional class
+and size compatibility checks. Ties break on `(distance, track_id, detection
+index)`.
+
+**Reason:** The detector is geometric and produces no appearance features, so
+position is the only signal available. Hungarian assignment would minimise total
+distance and occasionally do better where two tracks compete for two detections,
+but it needs `scipy.optimize` - a dependency the project has declined three
+times now for the same reason (ADR-014, ADR-020) - and greedy matching is
+explainable line by line. When tracking fails during a close crossing, being
+able to read why matters more here than optimality.
+
+The gate is the substantive part. Without it, an object appearing anywhere in
+the scene could inherit the identity of an object that vanished on the far side,
+which is worse than starting a new track.
+
+**Alternatives considered:** Hungarian assignment (optimal, new dependency,
+harder to explain); ungated nearest neighbour (silently teleports identities);
+IoU-based matching (needs oriented boxes, which Phase 3 does not produce).
+
+**Impact:** Association is `O(T x D)`. Per-detection work is hoisted out of the
+inner loop and gating tests squared distance, measured at 0.06 ms for 5 objects
+and 206 ms for 500. That is comfortable at the object counts this pipeline
+produces - under a hundred in the large benchmark scene - and the wrong shape
+for thousands, where spatial bucketing would be the fix.
+
+Two objects passing close together can swap identities: centroid distance alone
+cannot distinguish them at the crossing frame. The behaviour is deterministic
+and tested, but it is a real failure mode, not a solved problem.
+
+**Status:** Accepted
+
+## ADR-025: Tracker State Lives in the Application Context
+
+**Decision:** Tracking state is owned by a `TrackingService` held on the
+`ApplicationContext`, reached through FastAPI dependencies. It is created at
+startup, cleared at shutdown, resettable through
+`POST /api/v1/tracking/reset`, and guarded by a lock.
+
+**Reason:** Tracking is the first stateful part of ADAPT-X. Every earlier stage
+is a pure function of one frame; a track exists only because of frames that came
+before. That state needs an owner with a defined lifetime.
+
+A module-level global was the obvious shortcut and the wrong answer: tests would
+leak tracks into one another, two application instances in one process would
+share tracks silently, and there would be no way to clear state without reaching
+into a module. The context already owns every other long-lived service, so
+tracking belongs there too.
+
+**Alternatives considered:** A module-level tracker (leaks between tests and
+between app instances); per-request trackers (defeats the point - tracking needs
+memory across requests); per-session trackers (needs a session concept the API
+does not have).
+
+**Impact:** One tracker serves the whole process. Two clients posting frames to
+the same backend therefore feed **one** track set - correct for a single vehicle
+with one sensor stream, wrong for anything else. That limitation is documented
+in the service and in the API rather than disguised. Shutdown resets tracking
+explicitly, so a restarted context cannot inherit tracks from frames it never
+saw.
+
+The endpoint is also order-dependent in a way no other endpoint is: frames must
+arrive in temporal order, and the request `timestamp` determines measured
+velocity. Omitting it makes the measured interval the wall-clock gap between
+HTTP requests rather than between scans.
 
 **Status:** Accepted
 

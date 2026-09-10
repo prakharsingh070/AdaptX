@@ -111,6 +111,52 @@ class LiDARSettings(BaseModel):
     roi_z_min_m: float = Field(default=-3.0, description="Below the sensor is negative z.")
     roi_z_max_m: float = Field(default=5.0, description="Above the sensor is positive z.")
 
+    # --- Phase 2B stages ----------------------------------------------------
+    # All three are opt-in (ADR-012). Voxelisation is lossy and the ground and
+    # noise stages are baselines with documented failure modes, so enabling
+    # them silently would change what every downstream consumer sees.
+    voxel_enabled: bool = Field(
+        default=False, description="Enable voxel downsampling after range filtering."
+    )
+    voxel_size_m: float = Field(
+        default=0.10, gt=0.0, description="Cube edge length of one voxel, in metres."
+    )
+
+    ground_enabled: bool = Field(default=False, description="Enable baseline ground segmentation.")
+    ground_cell_size_m: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Edge length of the square xy cell used to find the local ground level.",
+    )
+    ground_height_tolerance_m: float = Field(
+        default=0.20,
+        ge=0.0,
+        description="A point within this height of its cell's lowest point counts as ground.",
+    )
+    ground_max_height_m: float | None = Field(
+        default=None,
+        description=(
+            "Optional ceiling on where ground may be, in sensor-frame z. A cell whose "
+            "lowest point sits above it is treated as containing no ground. Disabled by "
+            "default because it assumes a known, level sensor mount."
+        ),
+    )
+
+    noise_enabled: bool = Field(default=False, description="Enable baseline noise filtering.")
+    noise_cell_size_m: float = Field(
+        default=0.5,
+        gt=0.0,
+        description="Edge length of the cell used to count a point's neighbours.",
+    )
+    noise_min_neighbors: int = Field(
+        default=4,
+        ge=0,
+        description=(
+            "A point with fewer neighbours than this in the 3x3x3 block of cells around "
+            "it is dropped as an outlier."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_bounds(self) -> LiDARSettings:
         if self.min_points > self.max_points:
@@ -122,6 +168,166 @@ class LiDARSettings(BaseModel):
             high = getattr(self, f"roi_{axis}_max_m")
             if low >= high:
                 raise ValueError(f"lidar.roi_{axis}_min_m must be < lidar.roi_{axis}_max_m")
+        return self
+
+
+class DetectionSettings(BaseModel):
+    """Geometric object detection (Phase 3).
+
+    Coordinate convention as everywhere else (ADR-009): +x forward, +y left,
+    +z up, metres, origin at the sensor.
+
+    These are **baseline** parameters for a clustering detector, chosen as
+    plausible starting points for an automotive scene. None has been tuned or
+    validated against labelled data, because no labelled data exists.
+    """
+
+    cluster_tolerance_m: float = Field(
+        default=0.5,
+        gt=0.0,
+        description=(
+            "Grid cell size for clustering. Points in connected occupied cells "
+            "join the same cluster, so this is the effective separation distance."
+        ),
+    )
+    min_cluster_points: int = Field(
+        default=10, ge=1, description="Clusters with fewer points are rejected as noise."
+    )
+    max_cluster_points: int = Field(
+        default=50_000,
+        ge=1,
+        description="Clusters larger than this are rejected as structure, not objects.",
+    )
+
+    min_height_m: float = Field(
+        default=0.15, ge=0.0, description="Clusters flatter than this are rejected."
+    )
+    max_height_m: float = Field(
+        default=4.5, gt=0.0, description="Clusters taller than this are rejected."
+    )
+    min_footprint_m: float = Field(
+        default=0.10,
+        ge=0.0,
+        description="Largest horizontal extent must reach this to be an object.",
+    )
+    max_footprint_m: float = Field(
+        default=15.0,
+        gt=0.0,
+        description="Largest horizontal extent above this is a wall or building, not an object.",
+    )
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> DetectionSettings:
+        if self.min_cluster_points > self.max_cluster_points:
+            raise ValueError("detection.min_cluster_points must be <= max_cluster_points")
+        if self.min_height_m >= self.max_height_m:
+            raise ValueError("detection.min_height_m must be < max_height_m")
+        if self.min_footprint_m >= self.max_footprint_m:
+            raise ValueError("detection.min_footprint_m must be < max_footprint_m")
+        return self
+
+
+class TrackingSettings(BaseModel):
+    """Temporal object tracking (Phase 4).
+
+    Coordinate convention as everywhere else (ADR-009): +x forward, +y left,
+    +z up, metres, origin at the sensor.
+
+    These are **baseline** parameters for a geometric nearest-neighbour tracker.
+    None has been tuned or validated against labelled sequences, because no
+    labelled sequences exist.
+    """
+
+    max_association_distance_m: float = Field(
+        default=2.5,
+        gt=0.0,
+        description=(
+            "Gate: a detection further than this from a track's expected "
+            "position can never be matched to it."
+        ),
+    )
+    require_class_match: bool = Field(
+        default=False,
+        description=(
+            "When true, a known track class and a different known detection "
+            "class cannot match. UNKNOWN matches anything either way."
+        ),
+    )
+    max_size_ratio: float | None = Field(
+        default=3.0,
+        gt=1.0,
+        description=(
+            "Gate on the ratio of largest dimensions. None disables the check. "
+            "Stops a pedestrian-sized cluster inheriting a lorry's track."
+        ),
+    )
+
+    min_hits_to_confirm: int = Field(
+        default=3,
+        ge=1,
+        description="Associated detections a tentative track needs before CONFIRMED.",
+    )
+    max_missed_frames: int = Field(
+        default=3,
+        ge=0,
+        description="Consecutive misses a confirmed track survives before it is dropped.",
+    )
+    max_missed_frames_tentative: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Misses an unconfirmed track survives. Lower than the confirmed "
+            "limit so a spurious detection does not linger as a ghost track."
+        ),
+    )
+    class_switch_hits: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Consecutive consistent observations of a different class before a "
+            "known track class changes. Stops class flicker frame to frame."
+        ),
+    )
+
+    velocity_smoothing: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Exponential moving average weight on the newest observation. "
+            "1.0 uses the raw frame-to-frame velocity unsmoothed; 0.0 freezes "
+            "the first estimate. The raw value is always reported alongside."
+        ),
+    )
+    max_timestep_s: float = Field(
+        default=2.0,
+        gt=0.0,
+        description=(
+            "Frame gaps longer than this make velocity meaningless, so it is "
+            "reported unknown rather than computed across the gap."
+        ),
+    )
+    min_speed_for_heading_mps: float = Field(
+        default=0.3,
+        ge=0.0,
+        description=(
+            "Below this speed a heading is direction of noise, not of travel, "
+            "so it is reported as unknown."
+        ),
+    )
+    use_predicted_position_for_association: bool = Field(
+        default=True,
+        description=(
+            "Gate against where a moving track is expected to be rather than "
+            "where it last was. Used for association only - the extrapolation "
+            "is never published as an observation or a trajectory."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> TrackingSettings:
+        if self.max_missed_frames_tentative > self.max_missed_frames:
+            raise ValueError("tracking.max_missed_frames_tentative must be <= max_missed_frames")
         return self
 
 
@@ -195,6 +401,8 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     carla: CarlaSettings = Field(default_factory=CarlaSettings)
     lidar: LiDARSettings = Field(default_factory=LiDARSettings)
+    detection: DetectionSettings = Field(default_factory=DetectionSettings)
+    tracking: TrackingSettings = Field(default_factory=TrackingSettings)
     map: MapSettings = Field(default_factory=MapSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     websocket: WebSocketSettings = Field(default_factory=WebSocketSettings)

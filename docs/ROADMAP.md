@@ -27,12 +27,12 @@ Not delivered, by design: any perception algorithm.
 
 ---
 
-## Phase 2 — LiDAR processing · **2A done, 2B to do**
+## Phase 2 — LiDAR processing · **Done (2A, 2B, 2C)**
 
 ### Phase 2A — input and preprocessing · **Done**
 
 Input validation, NaN/Inf removal, ROI filtering and range filtering, with per-stage
-counts and a measured duration, behind `PointCloudPreprocessor`.
+counts and a measured duration, behind `LiDARProcessingPipeline`.
 
 - Coordinate convention fixed and documented (ADR-009); range convention documented
   (ADR-011); raw vs validated frame types separated (ADR-010).
@@ -41,27 +41,95 @@ counts and a measured duration, behind `PointCloudPreprocessor`.
 - Open3D was **not** added: every operation is a NumPy boolean mask, so the dependency
   would have bought nothing.
 
-### Phase 2B — downsampling and segmentation · **To do**
+### Phase 2B — downsampling and segmentation · **Done**
 
-- Voxel grid downsampling, ground segmentation, statistical outlier removal.
-- Coordinate transforms between the `lidar`, `ego` and `world` frames.
-- Reconsider Open3D here: voxelisation and normal estimation are where it would earn its
-  place. Record the decision as an ADR either way.
+Voxel downsampling, baseline ground segmentation and baseline noise filtering, each in its
+own module behind the `LiDARProcessingPipeline` orchestrator, each opt-in (ADR-012).
+
+- Voxel keeps the real point nearest each voxel centroid rather than synthesising a
+  centroid (ADR-015).
+- Ground uses a per-cell lowest point plus tolerance, which handles slope and needs no
+  sensor mount height (ADR-016).
+- Noise counts neighbours over a 3×3×3 cell block — an honest approximation of radius
+  outlier removal that avoids a SciPy dependency (ADR-014).
+- **No coordinate transform was implemented**: it was shown per stage to be unnecessary
+  (ADR-013).
+- Open3D was reconsidered and again **not** added: voxelisation is `np.unique` over integer
+  cell keys, and the other two stages are boolean masks.
+
+### Phase 2C — integration and benchmarking · **Done**
+
+- `LiDARProcessingPipeline` orchestrates the seven stages; each algorithm stays in its own
+  independently testable module (ADR-017).
+- Per-stage measured timing, with unattributed time reported as `overhead_ms` rather than
+  inflating a stage.
+- Every result carries a `PipelineConfiguration` snapshot, so records are self-describing.
+- `adaptx.benchmark`: deterministic synthetic datasets, a fixed-resolution baseline profile
+  distinct from ADR-003 (ADR-018), and a runner recording timing, throughput and memory
+  (ADR-019).
+- Measured results in [`experiments/experiment-log.md`](experiments/experiment-log.md);
+  method in [`BENCHMARKING.md`](BENCHMARKING.md).
+
+### Phase 2D — deferred LiDAR work · **To do**
+
+Not required by Phase 2 and deliberately left undone:
+
+- Clustering of non-ground points, the natural input to Phase 3 detection.
+- Exact radius or statistical outlier removal, if the grid approximation proves insufficient
+  against real data — that is the point to weigh SciPy on evidence.
+- A coordinate transform stage once a tilted or multi-sensor mount, sensor fusion, or CARLA
+  ingestion requires one (ADR-013 names those triggers).
+- A recorded dataset to replace the synthetic generator, which would make accuracy
+  measurable for the first time.
 - Reference: [`knowledge-base/04_lidar-knowledge.md`](knowledge-base/04_lidar-knowledge.md).
-- Done when: the stages are configurable, measured on representative data, and
-  `lidar_preprocessing` moves from `PARTIAL` toward `IMPLEMENTED`.
 
-## Phase 3 — Object detection · **To do**
+## Phase 3 — Object detection · **Done (geometric baseline)**
 
-- Implement `perception.interfaces.ObjectDetector` producing `DetectedObject`.
-- Prefer a geometric/clustering approach before considering an ML framework; adding one is
-  an ADR-level decision.
-- Done when: the `perception` component reports `READY` and detections reach the API.
+A deterministic clustering detector on the pipeline's non-ground output, built to be
+replaced by an ML detector without touching the API or service layer.
 
-## Phase 4 — Tracking · **To do**
+- `GridConnectedComponentClusterer` — grid connectivity rather than DBSCAN or a KD-tree,
+  so no new dependency (ADR-020).
+- `GeometricClassifier` — dimension bands, `UNKNOWN` on ambiguity, confidence documented as
+  a geometric fit score rather than a probability (ADR-021).
+- `GeometricObjectDetector` — geometry, size filtering, and a `DetectionResult` carrying
+  rejected candidates and measured timings (ADR-022).
+- `POST /api/v1/lidar/detect`; detection benchmark via `--detect`.
+- No ML framework added; no new dependencies at all.
 
-- Implement `tracking.interfaces.ObjectTracker` producing `TrackedObject`.
-- Document association, initialisation, occlusion handling and termination rules.
+### Phase 3B — deferred detection work · **To do**
+
+- Oriented bounding boxes. Axis-aligned boxes make a diagonal vehicle measure larger than
+  it is, which is the main source of `UNKNOWN` classifications in a real scene.
+- Exact Euclidean clustering, if grid connectivity proves too coarse — that is where SciPy
+  would be weighed on evidence.
+- An ML detector, once a labelled dataset exists. Until then the geometric baseline is the
+  reference an ML detector would have to beat.
+- A labelled dataset, which is the precondition for measuring detection accuracy at all.
+
+## Phase 4 — Tracking · **Done (geometric baseline)**
+
+Deterministic multi-object tracking on the Phase 3 detections, built to be replaced.
+
+- `GeometricObjectTracker` — gated greedy nearest-neighbour association with optional class
+  and size compatibility (ADR-024).
+- Velocity measured from frame timestamps, null until two observations (ADR-023); raw and
+  smoothed values both reported.
+- Lifecycle over the existing four-state enum: TENTATIVE → CONFIRMED → COASTING → LOST.
+- State owned by `TrackingService` on the application context, resettable through the API
+  (ADR-025).
+- `POST /api/v1/lidar/track`, `POST /api/v1/tracking/reset`, `GET /api/v1/tracking/status`;
+  tracking benchmark via `--track`.
+- No ML framework, no SciPy, no new dependencies.
+
+### Phase 4B — deferred tracking work · **To do**
+
+- Re-identification, so an object returning after occlusion regains its old id. Needs
+  appearance features the geometric detector does not produce.
+- A motion model (Kalman or similar) for smoother state and better gating during crossings.
+- Spatial bucketing for association, if object counts ever reach the thousands where the
+  `O(T x D)` term dominates.
+- Labelled sequences, the precondition for measuring tracking correctness at all.
 - Reference: [`knowledge-base/08_tracking.md`](knowledge-base/08_tracking.md).
 
 ## Phase 5 — 2.5D mapping · **To do**

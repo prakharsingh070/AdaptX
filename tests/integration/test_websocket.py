@@ -32,20 +32,41 @@ class TestTelemetryChannel:
         assert "unavailable" in data["metrics"]
 
     def test_no_perception_data_is_fabricated(self, client: TestClient) -> None:
-        """Phase 1 telemetry must not invent objects, tracks, risk or map cells."""
+        """Telemetry must not invent tracks, predictions, risk or map cells."""
         with client.websocket_connect("/ws/telemetry") as websocket:
             websocket.receive_json()
             data = websocket.receive_json()["data"]
 
-        for stream in (
-            "detected_objects",
-            "tracked_objects",
-            "predicted_trajectories",
-            "risk_field",
-            "adaptive_map",
-        ):
+        for stream in ("predicted_trajectories", "risk_field", "adaptive_map"):
             assert stream not in data
             assert stream in data["not_yet_available"]
+
+    def test_tracking_telemetry_is_a_summary_without_future_paths(self, client: TestClient) -> None:
+        """Counts and ids only - no per-track history, no forecast trajectories."""
+        with client.websocket_connect("/ws/telemetry") as websocket:
+            websocket.receive_json()
+            tracking = websocket.receive_json()["data"]["tracking"]
+
+        assert tracking["is_baseline"] is True
+        assert "active_tracks" in tracking
+        assert "trajectory" not in tracking
+        assert "predicted_trajectories" not in tracking
+        assert "history" not in tracking
+
+    def test_detection_telemetry_is_a_summary_not_frame_data(self, client: TestClient) -> None:
+        """Detection runs per request; the channel carries configuration only.
+
+        Streaming the last frame's objects would push per-frame geometry - and
+        eventually point arrays - down a channel meant for status.
+        """
+        with client.websocket_connect("/ws/telemetry") as websocket:
+            websocket.receive_json()
+            detection = websocket.receive_json()["data"]["detection"]
+
+        assert detection["is_baseline"] is True
+        assert "configuration" in detection
+        assert "objects" not in detection
+        assert "points" not in detection
 
     def test_messages_repeat_with_increasing_sequence(self, client: TestClient) -> None:
         with client.websocket_connect("/ws/telemetry") as websocket:

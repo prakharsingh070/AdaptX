@@ -16,6 +16,12 @@ from adaptx.models.common import (
     Vector3,
     utc_now,
 )
+from adaptx.models.detection import (
+    ClusterRejection,
+    DetectionConfiguration,
+    DetectionResult,
+    RejectedCluster,
+)
 from adaptx.models.map import (
     AdaptiveMap,
     AdaptiveMapCell,
@@ -35,6 +41,7 @@ from adaptx.models.point_cloud import (
 )
 from adaptx.models.prediction import PredictedTrajectory, TrajectoryPoint
 from adaptx.models.processing import (
+    PipelineConfiguration,
     PointCloudProcessingResult,
     ProcessingMetrics,
     ProcessingStage,
@@ -54,6 +61,7 @@ from adaptx.models.system import (
     SystemStatus,
 )
 from adaptx.models.tracking import TrackedObject, TrackStatus
+from adaptx.models.tracking_result import TrackingConfiguration, TrackingResult
 from adaptx.models.vehicle import VehicleState
 
 __all__ = [
@@ -67,11 +75,14 @@ __all__ = [
     "BoundingBox3D",
     "CarlaConnectionStatus",
     "CarlaStatus",
+    "ClusterRejection",
     "ComponentReadiness",
     "ComponentStatus",
     "CoordinateFrame",
     "DataSource",
     "DetectedObject",
+    "DetectionConfiguration",
+    "DetectionResult",
     "Dimensions",
     "ImplementationStatus",
     "LiDARSourceStatus",
@@ -79,6 +90,7 @@ __all__ = [
     "ObjectClass",
     "ObjectRisk",
     "OccupancyState",
+    "PipelineConfiguration",
     "PointCloudBounds",
     "PointCloudFrame",
     "PointCloudProcessingResult",
@@ -87,6 +99,7 @@ __all__ = [
     "ProcessingMetrics",
     "ProcessingStage",
     "RawPointCloudFrame",
+    "RejectedCluster",
     "ResolutionContext",
     "ResolutionLevel",
     "RiskCell",
@@ -100,6 +113,8 @@ __all__ = [
     "TimestampedModel",
     "TrackStatus",
     "TrackedObject",
+    "TrackingConfiguration",
+    "TrackingResult",
     "TrajectoryPoint",
     "Vector3",
     "VehicleState",

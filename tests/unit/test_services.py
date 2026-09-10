@@ -181,10 +181,32 @@ class TestSystemService:
     ) -> None:
         components = {c.name: c for c in context.system.status().components}
 
-        for name in ("perception", "tracking", "mapping", "prediction"):
+        for name in ("mapping", "prediction"):
             assert components[name].implementation is ImplementationStatus.PLANNED
             assert components[name].readiness is ComponentReadiness.NOT_READY
             assert components[name].required is False
+
+    def test_tracking_is_partial_because_it_is_a_baseline(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 4 implemented a geometric tracker, not a finished one."""
+        components = {c.name: c for c in context.system.status().components}
+        tracking = components["tracking"]
+
+        assert tracking.implementation is ImplementationStatus.PARTIAL
+        assert tracking.readiness is ComponentReadiness.READY
+        assert "baseline" in tracking.detail
+
+    def test_detection_is_partial_because_it_is_a_baseline(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 3 implemented a geometric detector, not a finished one."""
+        components = {c.name: c for c in context.system.status().components}
+        perception = components["perception"]
+
+        assert perception.implementation is ImplementationStatus.PARTIAL
+        assert perception.readiness is ComponentReadiness.READY
+        assert "baseline" in perception.detail
 
     def test_risk_is_partial_because_only_a_baseline_exists(
         self, context: ApplicationContext

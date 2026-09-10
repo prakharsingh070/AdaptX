@@ -1,4 +1,4 @@
-"""Phase 2A LiDAR preprocessing.
+"""LiDAR processing pipeline orchestration.
 
 Turns a raw scan into a validated, cleaned, spatially restricted point cloud::
 
@@ -62,17 +62,21 @@ from adaptx.core.exceptions import InvalidPointCloudError
 from adaptx.core.logging import get_logger
 from adaptx.models.point_cloud import BasePointCloudFrame, PointCloudFrame
 from adaptx.models.processing import (
+    PipelineConfiguration,
     PointCloudProcessingResult,
     ProcessingMetrics,
     ProcessingStage,
     StageMetrics,
 )
+from adaptx.perception.ground import GroundSegmenter
 from adaptx.perception.interfaces import LiDARProcessor
+from adaptx.perception.noise import NoiseFilter
+from adaptx.perception.voxel import VoxelDownsampler
 
 logger = get_logger(__name__)
 
 
-class PointCloudPreprocessor(LiDARProcessor):
+class LiDARProcessingPipeline(LiDARProcessor):
     """Validate, clean and spatially restrict a raw point cloud.
 
     Stateless and deterministic: the same input and configuration always
@@ -83,6 +87,11 @@ class PointCloudPreprocessor(LiDARProcessor):
 
     def __init__(self, settings: LiDARSettings) -> None:
         self._settings = settings
+        # Each Phase 2B stage owns its own algorithm; this class only
+        # sequences them and accounts for what each one did.
+        self._voxel = VoxelDownsampler(settings)
+        self._ground = GroundSegmenter(settings)
+        self._noise = NoiseFilter(settings)
 
     # -- LiDARProcessor contract ------------------------------------------
     def process(self, frame: PointCloudFrame) -> PointCloudFrame:
@@ -111,16 +120,29 @@ class PointCloudPreprocessor(LiDARProcessor):
         points = frame.points
         input_count = int(points.shape[0])
 
+        mark = time.perf_counter()
         self._validate(input_count)
+        validation_ms = (time.perf_counter() - mark) * 1000.0
 
         # One boolean mask per stage, all evaluated against the original array,
         # then a single compaction at the end. Masks are combined so a point
         # rejected by an earlier stage is never counted again by a later one,
         # which keeps the counts a true partition of the input while allocating
         # only one output array instead of one per stage.
+        #
+        # Each mask is timed on its own. The shared compaction belongs to no
+        # single stage, so it is reported as overhead rather than inflating one.
+        mark = time.perf_counter()
         finite_mask = self._finite_mask(points)
+        invalid_ms = (time.perf_counter() - mark) * 1000.0
+
+        mark = time.perf_counter()
         roi_mask = self._roi_mask(points)
+        roi_ms = (time.perf_counter() - mark) * 1000.0
+
+        mark = time.perf_counter()
         range_mask = self._range_mask(points)
+        range_ms = (time.perf_counter() - mark) * 1000.0
 
         surviving_invalid = finite_mask
         surviving_roi = surviving_invalid & roi_mask
@@ -136,18 +158,100 @@ class PointCloudPreprocessor(LiDARProcessor):
 
         # `points[mask]` performs the single copy of surviving rows. np.ascontiguousarray
         # is not needed: fancy indexing already returns a fresh contiguous array.
-        processed_points = points[surviving_range]
+        surviving = points[surviving_range]
 
-        processed = PointCloudFrame(
-            schema_version=frame.schema_version,
-            timestamp=frame.timestamp,
-            frame_id=frame.frame_id,
-            sensor_id=frame.sensor_id,
-            points=processed_points,
-            fields=frame.fields,
-            coordinate_frame=frame.coordinate_frame,
-            source=frame.source,
-        )
+        stages = [
+            StageMetrics(
+                stage=ProcessingStage.VALIDATION,
+                input_points=input_count,
+                output_points=input_count,
+                rejected_points=0,
+                duration_ms=validation_ms,
+            ),
+            StageMetrics(
+                stage=ProcessingStage.INVALID_REMOVAL,
+                input_points=input_count,
+                output_points=after_invalid,
+                rejected_points=invalid_rejected,
+                duration_ms=invalid_ms,
+            ),
+            StageMetrics(
+                stage=ProcessingStage.ROI_FILTER,
+                input_points=after_invalid,
+                output_points=after_roi,
+                rejected_points=roi_rejected,
+                duration_ms=roi_ms,
+            ),
+            StageMetrics(
+                stage=ProcessingStage.RANGE_FILTER,
+                input_points=after_roi,
+                output_points=after_range,
+                rejected_points=range_rejected,
+                duration_ms=range_ms,
+            ),
+        ]
+
+        # --- Phase 2B stages, each opt-in (ADR-012) ------------------------
+        voxel_reduced = 0
+        if self._settings.voxel_enabled:
+            before = int(surviving.shape[0])
+            mark = time.perf_counter()
+            surviving = surviving[self._voxel.select(surviving)]
+            voxel_ms = (time.perf_counter() - mark) * 1000.0
+            voxel_reduced = before - int(surviving.shape[0])
+            stages.append(
+                StageMetrics(
+                    stage=ProcessingStage.VOXEL_DOWNSAMPLE,
+                    input_points=before,
+                    output_points=int(surviving.shape[0]),
+                    rejected_points=voxel_reduced,
+                    duration_ms=voxel_ms,
+                )
+            )
+
+        ground_points: np.ndarray | None = None
+        ground_count = 0
+        if self._settings.ground_enabled:
+            before = int(surviving.shape[0])
+            mark = time.perf_counter()
+            is_ground = self._ground.ground_mask(surviving)
+            ground_points = surviving[is_ground]
+            surviving = surviving[~is_ground]
+            ground_ms = (time.perf_counter() - mark) * 1000.0
+            ground_count = int(ground_points.shape[0])
+            stages.append(
+                StageMetrics(
+                    stage=ProcessingStage.GROUND_SEGMENTATION,
+                    input_points=before,
+                    output_points=int(surviving.shape[0]),
+                    rejected_points=ground_count,
+                    duration_ms=ground_ms,
+                )
+            )
+
+        noise_removed = 0
+        if self._settings.noise_enabled:
+            before = int(surviving.shape[0])
+            # Applied to non-ground points only: ground is a dense surface whose
+            # points would always pass, and it is not what downstream detection
+            # consumes.
+            mark = time.perf_counter()
+            surviving = surviving[self._noise.keep_mask(surviving)]
+            noise_ms = (time.perf_counter() - mark) * 1000.0
+            noise_removed = before - int(surviving.shape[0])
+            stages.append(
+                StageMetrics(
+                    stage=ProcessingStage.NOISE_FILTER,
+                    input_points=before,
+                    output_points=int(surviving.shape[0]),
+                    rejected_points=noise_removed,
+                    duration_ms=noise_ms,
+                )
+            )
+
+        output_count = int(surviving.shape[0])
+        processed = self._rebuild(frame, surviving)
+        ground_frame = None if ground_points is None else self._rebuild(frame, ground_points)
 
         duration_ms = (time.perf_counter() - started) * 1000.0
 
@@ -158,34 +262,12 @@ class PointCloudPreprocessor(LiDARProcessor):
             invalid_point_count=invalid_rejected,
             roi_rejected_count=roi_rejected,
             range_rejected_count=range_rejected,
-            output_point_count=after_range,
+            voxel_reduced_count=voxel_reduced,
+            ground_point_count=ground_count,
+            noise_removed_count=noise_removed,
+            output_point_count=output_count,
             duration_ms=duration_ms,
-            stages=[
-                StageMetrics(
-                    stage=ProcessingStage.VALIDATION,
-                    input_points=input_count,
-                    output_points=input_count,
-                    rejected_points=0,
-                ),
-                StageMetrics(
-                    stage=ProcessingStage.INVALID_REMOVAL,
-                    input_points=input_count,
-                    output_points=after_invalid,
-                    rejected_points=invalid_rejected,
-                ),
-                StageMetrics(
-                    stage=ProcessingStage.ROI_FILTER,
-                    input_points=after_invalid,
-                    output_points=after_roi,
-                    rejected_points=roi_rejected,
-                ),
-                StageMetrics(
-                    stage=ProcessingStage.RANGE_FILTER,
-                    input_points=after_roi,
-                    output_points=after_range,
-                    rejected_points=range_rejected,
-                ),
-            ],
+            stages=stages,
         )
 
         # One frame-level line, never per point. DEBUG because this runs on the
@@ -197,16 +279,65 @@ class PointCloudPreprocessor(LiDARProcessor):
             "invalid": invalid_rejected,
             "roi_rejected": roi_rejected,
             "range_rejected": range_rejected,
-            "output_points": after_range,
+            "voxel_reduced": voxel_reduced,
+            "ground_points": ground_count,
+            "noise_removed": noise_removed,
+            "output_points": output_count,
             "duration_ms": round(duration_ms, 3),
         }
-        if input_count > 0 and after_range == 0:
+        if input_count > 0 and output_count == 0:
             logger.warning("preprocessing removed every point", extra={"context": context})
         else:
             logger.debug("point cloud preprocessed", extra={"context": context})
 
         return PointCloudProcessingResult(
-            frame=processed, input_summary=input_summary, metrics=metrics
+            frame=processed,
+            input_summary=input_summary,
+            metrics=metrics,
+            ground_frame=ground_frame,
+            configuration=self.configuration,
+        )
+
+    @property
+    def configuration(self) -> PipelineConfiguration:
+        """Snapshot of the settings that shape this pipeline's behaviour."""
+        settings = self._settings
+        return PipelineConfiguration(
+            min_range_m=settings.min_range_m,
+            max_range_m=settings.max_range_m,
+            roi_x_min_m=settings.roi_x_min_m,
+            roi_x_max_m=settings.roi_x_max_m,
+            roi_y_min_m=settings.roi_y_min_m,
+            roi_y_max_m=settings.roi_y_max_m,
+            roi_z_min_m=settings.roi_z_min_m,
+            roi_z_max_m=settings.roi_z_max_m,
+            voxel_enabled=settings.voxel_enabled,
+            voxel_size_m=settings.voxel_size_m,
+            ground_enabled=settings.ground_enabled,
+            ground_cell_size_m=settings.ground_cell_size_m,
+            ground_height_tolerance_m=settings.ground_height_tolerance_m,
+            ground_max_height_m=settings.ground_max_height_m,
+            noise_enabled=settings.noise_enabled,
+            noise_cell_size_m=settings.noise_cell_size_m,
+            noise_min_neighbors=settings.noise_min_neighbors,
+        )
+
+    @staticmethod
+    def _rebuild(frame: BasePointCloudFrame, points: np.ndarray) -> PointCloudFrame:
+        """Build a validated frame carrying ``points`` with the source metadata.
+
+        Every stage preserves frame_id, sensor_id, timestamp, coordinate frame
+        and provenance, so a processed frame stays traceable to its scan.
+        """
+        return PointCloudFrame(
+            schema_version=frame.schema_version,
+            timestamp=frame.timestamp,
+            frame_id=frame.frame_id,
+            sensor_id=frame.sensor_id,
+            points=points,
+            fields=frame.fields,
+            coordinate_frame=frame.coordinate_frame,
+            source=frame.source,
         )
 
     # -- Stages ------------------------------------------------------------
@@ -275,9 +406,9 @@ class PointCloudPreprocessor(LiDARProcessor):
         return (squared >= settings.min_range_m**2) & (squared <= settings.max_range_m**2)
 
 
-def build_preprocessor(settings: LiDARSettings) -> PointCloudPreprocessor:
-    """Construct the configured preprocessing pipeline."""
-    return PointCloudPreprocessor(settings)
+def build_pipeline(settings: LiDARSettings) -> LiDARProcessingPipeline:
+    """Construct the configured LiDAR processing pipeline."""
+    return LiDARProcessingPipeline(settings)
 
 
-__all__ = ["PointCloudPreprocessor", "build_preprocessor"]
+__all__ = ["LiDARProcessingPipeline", "build_pipeline"]

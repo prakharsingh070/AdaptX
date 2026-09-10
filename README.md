@@ -11,8 +11,9 @@ obstacles, high uncertainty or predicted collision risk receive finer detail.
 
 ## Implementation status
 
-> **Phase 1 (engineering foundation) and Phase 2A (LiDAR input and preprocessing) are
-> what exist today.**
+> **Phase 1 (foundation), Phase 2 (LiDAR processing pipeline and benchmarking),
+> Phase 3 (geometric object detection) and Phase 4 (temporal tracking) are what
+> exist today.**
 > Object detection, tracking, trajectory prediction, 2.5D mapping and the adaptive
 > resolution algorithm are **not implemented**. The repository provides their data
 > contracts and interfaces so they can be added without architectural rewrites.
@@ -21,11 +22,12 @@ obstacles, high uncertainty or predicted collision risk receive finer detail.
 |---|---|---|
 | Configuration, logging, API, telemetry | **Implemented** | Phase 1 |
 | LiDAR ingest | **Partial** | Structural validation, point count, bounds, metadata. |
-| LiDAR preprocessing | **Partial** | Phase 2A: NaN/Inf removal, ROI and range filtering, per-stage counts, measured duration. No downsampling, ground segmentation or clustering. |
+| LiDAR pipeline | **Partial** | Validation, NaN/Inf removal, ROI and range filtering; opt-in voxel downsampling, baseline ground segmentation and baseline noise filtering; orchestration with per-stage measured timing. No clustering, no coordinate transforms. |
+| Benchmarking (pipeline speed) | **Implemented** | Deterministic synthetic datasets and a fixed-resolution baseline. Speed only — not the Phase 11 ADAPT-X evaluation. |
 | Risk | **Partial** | Contract + a proximity-only *baseline* for testing. Not the ADAPT-X risk engine. |
 | CARLA | **Boundary only** | Connection + world info. Optional dependency; the backend runs without it. |
-| Perception (detection) | Planned | Phase 3 |
-| Tracking | Planned | Phase 4 |
+| Object detection | **Partial** | Phase 3: geometric clustering and baseline size-based classification. No trained model, no oriented boxes, no velocity. |
+| Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle. No learned model, no re-identification. |
 | 2.5D mapping + adaptive resolution | Planned | Phases 5, 7 |
 | Prediction | Planned | Phase 8 |
 
@@ -85,6 +87,7 @@ The API then serves on <http://localhost:8000>, with interactive documentation a
 | Format | `.venv\Scripts\python.exe -m ruff format .` |
 | Check formatting only | `.venv\Scripts\python.exe -m ruff format --check .` |
 | Type-check | `.venv\Scripts\python.exe -m mypy` |
+| Benchmark the LiDAR pipeline | `.venv\Scripts\python.exe -m adaptx.benchmark` |
 | Build the Docker image | `docker compose build` |
 | Start the Docker environment | `docker compose up` |
 
@@ -103,6 +106,10 @@ Convenience wrappers are available: `scripts/dev.ps1 <task>` on Windows and
 | GET | `/api/v1/system/metrics` | Measured runtime metrics |
 | GET | `/api/v1/carla/status` | CARLA connection state |
 | POST | `/api/v1/lidar/frame` | Submit a point-cloud frame for validation, optionally preprocessed |
+| POST | `/api/v1/lidar/detect` | Process a frame and detect objects in the non-ground points |
+| POST | `/api/v1/lidar/track` | Process, detect and track across frames (**stateful**) |
+| POST | `/api/v1/tracking/reset` | Drop all tracks and restart identifiers |
+| GET | `/api/v1/tracking/status` | Current tracking state |
 | GET | `/api/v1/map/status` | Mapping readiness and configured resolution levels |
 | GET | `/api/v1/risk/status` | Risk engine readiness, thresholds and modelled factors |
 | WS | `/ws/telemetry` | Live system status and measured metrics |
@@ -183,6 +190,7 @@ dashboard/      dashboard application (not started)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — what is implemented now vs planned
 - [`docs/API.md`](docs/API.md) — endpoint reference
 - [`docs/TESTING.md`](docs/TESTING.md) — how to run and extend the suite
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — benchmark method and what the numbers mean
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — phase plan and current status
 - [`docs/knowledge-base/`](docs/knowledge-base) — domain knowledge and requirements
 - [`docs/decisions/architecture-decisions.md`](docs/decisions/architecture-decisions.md) — accepted decisions

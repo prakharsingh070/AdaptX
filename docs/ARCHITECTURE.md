@@ -20,11 +20,12 @@ an abstract interface.
 | Telemetry (WebSocket) | **Implemented** | `/ws/telemetry`, carrying system status and measured metrics only |
 | Metrics | **Implemented** | Measured ingest FPS/latency and process CPU/memory; unmeasured values are `null` |
 | LiDAR ingest | **Partial** | Structural validation, point count, bounds, provenance |
-| LiDAR preprocessing | **Partial** | Phase 2A: input validation, NaN/Inf removal, ROI filtering, range filtering, per-stage counts and measured duration. **No** voxelisation/downsampling, ground segmentation, statistical outlier removal or clustering |
+| LiDAR pipeline | **Partial** | Phase 2A: input validation, NaN/Inf removal, ROI and range filtering. Phase 2B (opt-in): voxel downsampling, baseline ground segmentation, baseline noise filtering. Phase 2C: `LiDARProcessingPipeline` orchestration, per-stage timing, configuration snapshot. **No** clustering, no coordinate transforms, no exact radius/statistical outlier removal |
+| Benchmarking (LiDAR pipeline) | **Implemented** | Deterministic synthetic datasets, fixed-resolution baseline profile, measured timing/throughput/memory (`adaptx.benchmark`). Scope is processing speed only - **not** the Phase 11 ADAPT-X evaluation |
 | Risk | **Partial** | `RiskEngine` contract + a proximity-only **baseline**. The ADAPT-X risk engine does not exist |
 | CARLA | **Boundary only** | Interface, real client (connect + world info), deterministic mock, status service. Sensor and actor operations raise explicitly |
-| Object detection | *Planned* | `ObjectDetector` contract only |
-| Tracking | *Planned* | `ObjectTracker` contract only |
+| Object detection | **Partial** | Phase 3: grid clustering, size filtering and baseline classification by dimension bands (`perception/{clustering,classification,detector}.py`). **No** trained model, no oriented boxes, no velocity, no camera fusion, no semantic segmentation |
+| Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle, stateful service (`tracking/`). **No** learned motion model, no appearance features, no re-identification |
 | 2.5D mapping | *Planned* | `AdaptiveMapper` contract + cell/map models only |
 | Adaptive resolution | *Planned* | `ResolutionController` contract + `ResolutionContext` model only |
 | Trajectory prediction | *Planned* | `TrajectoryPredictor` contract only |
@@ -76,13 +77,14 @@ dashboard or API code (knowledge-base boundary rule).
 | `adaptx.config` | Typed settings loaded from the environment; validation of ranges and orderings |
 | `adaptx.core` | `logging`, `exceptions`, `lifecycle` (the service graph and startup/shutdown) |
 | `adaptx.models` | All data contracts. State and validation only — no business logic |
-| `adaptx.perception` | `LiDARProcessor` / `ObjectDetector` contracts; `FrameValidationProcessor` (Phase 1); `PointCloudPreprocessor` (Phase 2A) |
+| `adaptx.perception` | `LiDARProcessor` / `ObjectDetector` contracts; `FrameValidationProcessor` (Phase 1); `LiDARProcessingPipeline` orchestrator plus `VoxelDownsampler`, `GroundSegmenter`, `NoiseFilter` and the shared `grid` quantiser |
+| `adaptx.benchmark` | Synthetic datasets, the fixed-resolution baseline profile, pipeline and detection runners, and their record contracts |
 | `adaptx.mapping` | `AdaptiveMapper` and `ResolutionController` contracts |
 | `adaptx.risk` | `RiskEngine` contract; `BaselineProximityRiskEngine` |
-| `adaptx.tracking` | `ObjectTracker` contract |
+| `adaptx.tracking` | `ObjectTracker` contract; `GeometricObjectTracker` and the association algorithm |
 | `adaptx.prediction` | `TrajectoryPredictor` contract |
 | `adaptx.carla` | `CarlaSimulatorClient` contract, real client, mock, simulator-local models |
-| `adaptx.services` | Ingest, metrics, CARLA and system-status services |
+| `adaptx.services` | Ingest, metrics, CARLA, system-status and tracking services |
 | `adaptx.api` | Routes, HTTP schemas, WebSocket telemetry, dependency wiring |
 
 ---
@@ -96,11 +98,15 @@ Defined in `adaptx/models/`, re-exported from `adaptx.models`.
 | `BasePointCloudFrame` | Shared frame metadata and structural validation (shape, dtype, column layout) |
 | `RawPointCloudFrame` | A frame as received; **may** contain NaN/Inf (a sensor reports a non-return that way) |
 | `PointCloudFrame` | A frame whose coordinates are all finite - the contract every downstream module consumes |
-| `ProcessingMetrics` / `StageMetrics` / `PointCloudProcessingResult` | Per-stage counts and measured duration for one preprocessed frame |
+| `ProcessingMetrics` / `StageMetrics` / `PointCloudProcessingResult` | Per-stage counts and measured durations for one processed frame, plus the separated ground frame |
+| `PipelineConfiguration` | The effective settings that produced a result, so a record is self-describing |
+| `BenchmarkResult` / `BenchmarkReport` / `TimingSummary` | Measured benchmark records with dataset, seed, configuration and environment |
 | `PointCloudSummary` / `PointCloudBounds` | JSON-safe metadata and axis-aligned bounds |
 | `VehicleState` | Ego position, velocity, acceleration, heading, dimensions |
-| `DetectedObject` | Per-frame detection; identity is frame-local |
-| `TrackedObject` | Persistent track with status, kinematics, confidence, uncertainty, age |
+| `DetectedObject` | Per-frame detection: class, geometry, distance, point count, fit score. Identity is frame-local |
+| `DetectionResult` / `RejectedCluster` / `DetectionConfiguration` | What one detection pass found, what it rejected and why, with measured timings |
+| `TrackedObject` | Persistent track: status, measured kinematics (null until observed), geometry, age, hits |
+| `TrackingResult` / `TrackingConfiguration` | What one update matched, created and retired, with measured timings |
 | `PredictedTrajectory` / `TrajectoryPoint` | Predicted future path, ordered and horizon-bounded |
 | `AdaptiveMapCell` / `AdaptiveMap` | 2.5D cell (occupancy, height, resolution, risk, uncertainty) and snapshot |
 | `ResolutionContext` | Inputs to the future resolution decision |
@@ -174,20 +180,30 @@ POST /api/v1/lidar/frame
    → PointCloudSummary
 ```
 
-**`preprocess: true`** (Phase 2A)
+**`preprocess: true`** (Phase 2A + 2B)
 
 ```
 POST /api/v1/lidar/frame
    → RawPointCloudFrame            structural validation only; NaN/Inf permitted
-   → PointCloudPreprocessor.run
+   → LiDARProcessingPipeline.run
         ├ validation        configured min/max point-count limits (on the RAW input)
         ├ invalid removal   drop rows with any non-finite value, count them
         ├ ROI filter        inclusive axis-aligned box, count rejects
-        └ range filter      inclusive 3D Euclidean band, count rejects
-   → PointCloudProcessingResult    processed frame + input summary + measured metrics
+        ├ range filter      inclusive 3D Euclidean band, count rejects
+        │
+        │   ---- Phase 2B, each opt-in (ADR-012) ----
+        ├ voxel downsample  VoxelDownsampler: one real point per occupied voxel
+        ├ ground segment    GroundSegmenter:  split ground from non-ground
+        └ noise filter      NoiseFilter:      drop sparse-neighbourhood points
+   → PointCloudProcessingResult    non-ground frame + ground frame + metrics
    → LiDARIngestService            pre_validated, upstream duration folded into latency
-   → PointCloudSummary + ProcessingMetrics
+   → PointCloudSummary + ProcessingMetrics (+ ground summary)
 ```
+
+Each Phase 2B algorithm lives in its own module with its own tests; the
+orchestrator only sequences them and accounts for what each one did. All three
+share `perception/grid.py`, which quantises coordinates onto an integer grid and
+guards the int64 overflow that would otherwise corrupt cell membership silently.
 
 Points are only ever **removed**; nothing is repaired, clamped or invented. The counts
 partition the input exactly, and each stage's output is the next stage's input.
@@ -215,6 +231,101 @@ array.
 `min_points` / `max_points` bound how large a **raw** scan may be. A frame that filtering
 legitimately reduces to zero points is a valid observation ("everything was out of
 range"), not malformed input, so it is accepted and reported with its metrics.
+
+### What exists and what does not
+
+**Implemented:** LiDAR input validation and filtering, voxel downsampling, baseline ground
+segmentation, baseline noise filtering, pipeline orchestration with per-stage measurement,
+the fixed-resolution benchmark, geometric object detection with baseline classification, and
+baseline temporal tracking with persistent ids and measured velocity.
+
+**Not implemented:** ML object detection, learned tracking, appearance-based
+re-identification, camera fusion, semantic segmentation, production-grade classification,
+trajectory prediction, collision prediction, adaptive resolution, risk-aware refinement,
+predictive perception, the 2.5D map, and the dashboard. Their contracts exist; nothing
+computes them.
+
+### Object detection (Phase 3)
+
+```
+processed non-ground frame
+   -> GridConnectedComponentClusterer   grid connectivity, cluster tolerance (ADR-020)
+   -> cluster geometry                  centroid, min/max, extents, distance
+   -> size filtering                    point count, height, footprint bounds
+   -> GeometricClassifier               dimension bands, UNKNOWN on ambiguity (ADR-021)
+   -> DetectionResult                   objects + rejected candidates + measured timings
+```
+
+The detector consumes the pipeline's **non-ground** output and repeats none of its work.
+Clustering, classification and the detector are separate modules, each independently
+constructible and testable.
+
+| Property | Behaviour |
+|---|---|
+| Clustering | Grid connected components, not DBSCAN. Merges objects in touching cells; cannot split points sharing a cell (ADR-020) |
+| Bounding box | **Axis-aligned**; `yaw_rad` is always 0. No orientation is estimated |
+| Classification | Dimension bands; matches none or several → `UNKNOWN` |
+| Confidence | A **geometric fit score**, not a probability. `UNKNOWN` scores 0.0 (ADR-021) |
+| Velocity | Always `null`. One frame cannot show motion |
+| Accounting | `cluster_count == len(objects) + len(rejected)`, checked by the model |
+| Rejections | Carry the reason, the measured value and the threshold it missed |
+
+### Temporal tracking (Phase 4)
+
+```
+DetectionResult.objects
+   -> expected positions        extrapolated from measured velocity, for gating only
+   -> associate                 gated greedy nearest neighbour (ADR-024)
+   -> update matched            position, geometry, class, measured velocity
+   -> create unmatched          new tentative tracks
+   -> age unmatched tracks      CONFIRMED -> COASTING, no detection fabricated
+   -> retire stale tracks       ids retired, never reused
+   -> TrackingResult
+```
+
+| Property | Behaviour |
+|---|---|
+| Identity | `track_id` is stable for a track's lifetime and never reused once retired |
+| Association | Distance gate, plus optional class and size compatibility. Greedy, deterministic ties (ADR-024) |
+| Velocity | `(position - previous_position) / dt` from frame timestamps. **Null** until two observations, and for non-positive or over-long intervals (ADR-023) |
+| Smoothing | Exponential moving average; the raw value stays visible in `observed_velocity`, so smoothing cannot hide a jump |
+| Heading | `atan2(vy, vx)` only above the configured speed floor; null below it |
+| Acceleration | Null until two consecutive velocities exist |
+| Lifecycle | TENTATIVE → CONFIRMED → COASTING → LOST. The existing four-state enum covers it; no new states were added |
+| Class | An unknown track adopts a class immediately; a known one needs repeated agreement to change |
+| `predicted_position` | Tracker state for gating. **Not** an observation and **not** a trajectory prediction |
+
+**State.** Tracking is the first stateful stage. The tracker is owned by
+`TrackingService` on the `ApplicationContext`, cleared at shutdown and resettable through
+the API (ADR-025). One tracker serves the whole process, so concurrent clients share one
+track set.
+
+### Phase 2B stage semantics
+
+| Stage | Behaviour |
+|---|---|
+| Voxel downsample | One point per occupied voxel: the **real measured point nearest that voxel's centroid**, ties broken by lower input index. The centroid is never emitted, so no coordinate is manufactured (ADR-015). Grid anchored at the frame origin, so voxel boundaries are the same for every frame. |
+| Ground segmentation | Per xy cell, the lowest point defines the local ground level; points within a tolerance above it are ground (ADR-016). Ground is **separated, not discarded** — it is returned as `ground_frame`. Needs no sensor mount height, which is why Phase 2B needs no coordinate transform (ADR-013). |
+| Noise filter | Drops points with too few neighbours in the 3×3×3 block of cells around them (ADR-014). Applied to non-ground points only, since that is what feeds detection. |
+
+**Accounting.** `input = invalid + roi_rejected + range_rejected + voxel_reduced +
+ground + noise_removed + output`, checked by the model itself. Ground points count as
+"did not continue downstream" rather than "discarded".
+
+**Timing.** Every stage carries its own measured `duration_ms`. The stage durations sum to
+*less* than the frame total; the difference is reported as `overhead_ms` — the array
+compaction shared by the filtering stages, frame construction and metric assembly. It is
+reported rather than folded into a stage, so no stage duration is inflated.
+
+**Configuration.** Every result carries a `PipelineConfiguration` snapshot of the settings
+that produced it, so a benchmark record or a replayed frame can be reproduced from what it
+reports rather than from the environment it happened to run in.
+
+**Known stage-order consequence.** The knowledge-base order is voxelise → ground → noise,
+and ground bypasses the noise filter. An isolated stray point is therefore the lowest
+point of its own cell, is classified as ground, and is never seen by the noise filter. A
+test asserts this so it stays visible; changing it would mean deviating from the
+documented order, which is not done silently.
 
 ---
 
@@ -255,9 +366,9 @@ services or models:
 
 | To add | Implement | Then wire in |
 |---|---|---|
-| More point-cloud processing (Phase 2B) | `perception.interfaces.LiDARProcessor` | chain after `PointCloudPreprocessor` in `build_context()` |
-| Object detection (Phase 3) | `perception.interfaces.ObjectDetector` | a detection service consuming ingested frames |
-| Tracking (Phase 4) | `tracking.interfaces.ObjectTracker` | a tracking service consuming detections |
+| Further point-cloud processing (Phase 2C+) | `perception.interfaces.LiDARProcessor` | add a stage module beside `voxel` / `ground` / `noise` and sequence it in `LiDARProcessingPipeline.run` |
+| ML object detection | `perception.interfaces.ObjectDetector` | replace `GeometricObjectDetector` in `build_context()`; the API and services are unchanged (ADR-022) |
+| A learned tracker | `tracking.interfaces.ObjectTracker` | replace `GeometricObjectTracker` in `build_context()`; the API and services are unchanged |
 | 2.5D mapping (Phase 5) | `mapping.interfaces.AdaptiveMapper` | map service; set `AdaptiveMap.is_adaptive` per variant |
 | Risk (Phase 6) | `risk.interfaces.RiskEngine` | replace `BaselineProximityRiskEngine` in `ApplicationContext`; keep the baseline for comparison |
 | Adaptive resolution (Phase 7) | `mapping.interfaces.ResolutionController` | consumed by the adaptive mapper |

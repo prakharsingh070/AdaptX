@@ -78,9 +78,25 @@ Record events such as object detection, track updates, risk changes, prediction 
   Docker. No perception algorithm implemented. See `docs/ARCHITECTURE.md`.)
 - Phase 2: LiDAR processing - 2A DONE (input validation, NaN/Inf removal, ROI and
   range filtering, measured per-stage metrics; coordinate convention documented in
-  ADR-009). 2B TODO (voxel downsampling, ground segmentation, coordinate transforms).
-- Phase 3: Object detection - TODO
-- Phase 4: Tracking - TODO
+  ADR-009). 2B DONE (voxel downsampling, baseline ground segmentation, baseline
+  noise filtering; all opt-in per ADR-012. No coordinate transform: shown to be
+  unnecessary for these stages, ADR-013). 2C DONE (LiDARProcessingPipeline
+  orchestration, per-stage measured timing, configuration snapshot, deterministic
+  synthetic benchmark datasets and the fixed-resolution processing baseline of
+  ADR-018). Deferred: clustering, coordinate transforms when a tilted or
+  multi-sensor mount requires them, and a recorded dataset.
+- Phase 3: Object detection - DONE as a geometric baseline (grid connected-component
+  clustering, size filtering, dimension-band classification with UNKNOWN on ambiguity,
+  POST /api/v1/lidar/detect; ADR-020/021/022). Confidence is a geometric fit score, not
+  a probability. No ML detector, no oriented boxes, no velocity, no labelled data - so
+  detection accuracy is unmeasured and currently unmeasurable.
+- Phase 4: Tracking - DONE as a geometric baseline (gated nearest-neighbour
+  association, velocity measured from frame timestamps and null until two
+  observations, TENTATIVE/CONFIRMED/COASTING/LOST lifecycle, stateful
+  TrackingService on the application context, POST /api/v1/lidar/track and
+  /api/v1/tracking/reset; ADR-023/024/025). No learned tracker, no
+  re-identification, no trajectory prediction. Tracking correctness is
+  unmeasured and unmeasurable without labelled sequences.
 - Phase 5: 2.5D mapping - TODO
 - Phase 6: Risk and uncertainty - TODO
 - Phase 7: Adaptive resolution - TODO
@@ -89,6 +105,17 @@ Record events such as object detection, track updates, risk changes, prediction 
 - Phase 10: Scenario generation and replay - TODO
 - Phase 11: Benchmarking - TODO
 - Phase 12: Dashboard and final integration - TODO
+
+## Start Here
+
+New session? Read `docs/PROJECT_STATE.md` first — it is the current snapshot of what is
+implemented, verified and off-limits. Then `docs/PHASE_HISTORY.md` for how the project got
+here, and `docs/NEXT_PHASE.md` for the agreed next work item.
+
+Note: the phase numbering in this file and in `docs/ROADMAP.md` places trajectory prediction
+at Phase 8 and 2.5D mapping at Phase 5. A later instruction referred to trajectory
+prediction as "Phase 5". This is unresolved — confirm the intended numbering before editing
+any status text.
 
 ## Knowledge Base
 

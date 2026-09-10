@@ -105,8 +105,39 @@ class TestTrackedObject:
         assert track.status is TrackStatus.TENTATIVE
         assert track.age_frames == 1
         assert track.missed_frames == 0
-        assert track.speed_mps == pytest.approx(0.0)
         assert track.last_seen is None
+
+    def test_motion_is_unknown_until_observed(self) -> None:
+        """A track seen once has no measured motion, and must not claim zero.
+
+        Regression for ADR-023: velocity, acceleration and heading previously
+        defaulted to zero vectors, which reads identically to a measured
+        standstill pointing forward. Null is the only honest default.
+        """
+        track = TrackedObject(track_id=3, position=Vector3(x=2.0), confidence=0.5)
+
+        assert track.velocity is None
+        assert track.observed_velocity is None
+        assert track.acceleration is None
+        assert track.heading_rad is None
+        assert track.speed_mps is None
+        assert track.is_moving is None
+
+    def test_speed_and_motion_once_velocity_is_known(self) -> None:
+        track = TrackedObject(
+            track_id=3,
+            position=Vector3(x=2.0),
+            confidence=0.5,
+            velocity=Vector3(x=3.0, y=4.0),
+        )
+        assert track.speed_mps == pytest.approx(5.0)
+        assert track.is_moving is True
+
+    def test_a_measured_standstill_is_distinguishable_from_unknown(self) -> None:
+        """Zero velocity must remain expressible - it just cannot be the default."""
+        track = TrackedObject(track_id=3, position=Vector3(), confidence=0.5, velocity=Vector3())
+        assert track.speed_mps == 0.0
+        assert track.is_moving is False
 
     def test_uncertainty_is_bounded(self) -> None:
         with pytest.raises(ValidationError):

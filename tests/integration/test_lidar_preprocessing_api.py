@@ -177,18 +177,41 @@ class TestSystemStatusReporting:
         assert preprocessing["implementation"] == "PARTIAL"
         assert preprocessing["phase"] == 2
 
-    def test_detection_is_still_reported_as_planned(self, client: TestClient) -> None:
-        """Preprocessing existing must not make object detection look implemented."""
+    def test_detection_does_not_claim_to_be_finished(self, client: TestClient) -> None:
+        """Phase 3 made detection real, so this now guards against overclaiming it.
+
+        A geometric baseline must never report IMPLEMENTED, and its detail has
+        to keep naming what it cannot do.
+        """
         components = {
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
-        assert components["perception"]["implementation"] == "PLANNED"
-        assert components["perception"]["readiness"] == "NOT_READY"
+        perception = components["perception"]
+
+        assert perception["implementation"] == "PARTIAL"
+        assert "baseline" in perception["detail"]
+        assert "no velocity" in perception["detail"]
 
     def test_unimplemented_stages_are_named_in_the_detail(self, client: TestClient) -> None:
+        """Whatever the pipeline still lacks must be stated, not left implied.
+
+        Phase 2B implemented downsampling and ground segmentation, so the
+        stages this guards moved on to clustering and coordinate transforms.
+        The component must also stay PARTIAL, never IMPLEMENTED.
+        """
         components = {
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
-        detail = components["lidar_preprocessing"]["detail"]
-        assert "no downsampling" in detail
-        assert "ground segmentation" in detail
+        component = components["lidar_preprocessing"]
+        detail = component["detail"]
+
+        assert "no clustering" in detail
+        assert "no coordinate transforms" in detail
+        assert component["implementation"] == "PARTIAL"
+
+    def test_baseline_stages_are_labelled_as_baselines(self, client: TestClient) -> None:
+        """Ground segmentation and noise filtering must not read as final."""
+        components = {
+            c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
+        }
+        assert components["lidar_preprocessing"]["detail"].count("baseline") >= 2
