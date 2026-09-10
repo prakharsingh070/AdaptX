@@ -6,6 +6,9 @@ the measured runtime metrics. It emits no detections, tracks, predictions, risk
 cells or map cells, because none are produced yet - the payload's ``provides``
 and ``not_yet_available`` fields say so explicitly.
 
+The tracking summary carries counts, track identifiers and configuration -
+not per-track history and not future trajectories, which do not exist.
+
 Message envelope::
 
     {
@@ -38,8 +41,6 @@ _POLICY_VIOLATION = 1008
 
 #: Streams the dashboard will eventually consume but which produce nothing yet.
 _NOT_YET_AVAILABLE = [
-    "detected_objects",
-    "tracked_objects",
     "predicted_trajectories",
     "risk_field",
     "adaptive_map",
@@ -62,8 +63,31 @@ def build_telemetry_payload(context: ApplicationContext) -> dict[str, Any]:
     return {
         "system": status.model_dump(mode="json"),
         "metrics": metrics.model_dump(mode="json"),
-        "provides": ["system", "metrics"],
+        "detection": _detection_summary(context),
+        "tracking": context.tracking.summary(),
+        "provides": ["system", "metrics", "detection", "tracking"],
         "not_yet_available": _NOT_YET_AVAILABLE,
+    }
+
+
+def _detection_summary(context: ApplicationContext) -> dict[str, Any]:
+    """What the detector is configured to do, without any point data.
+
+    Deliberately a summary: streaming detections would mean streaming whatever
+    the last frame produced, and the telemetry channel is not the place to push
+    per-frame geometry - let alone raw point arrays, which would swamp it.
+    Detections are returned by ``POST /api/v1/lidar/detect`` instead.
+    """
+    detector = context.detector
+    return {
+        "detector": detector.name,
+        "is_baseline": detector.is_baseline,
+        "classifier": "geometric_bands_v1",
+        "configuration": detector.configuration.model_dump(mode="json"),
+        "note": (
+            "Detection runs per request, not continuously; this channel carries "
+            "no per-frame object data."
+        ),
     }
 
 

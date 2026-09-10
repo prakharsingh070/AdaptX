@@ -81,9 +81,38 @@ class TestSystemStatus:
             c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
         }
 
-        for name in ("perception", "tracking", "mapping", "prediction"):
+        for name in ("mapping", "prediction"):
             assert components[name]["implementation"] == "PLANNED"
             assert components[name]["readiness"] == "NOT_READY"
+
+    def test_tracking_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
+        """Phase 4 shipped a geometric baseline, which is not a finished tracker."""
+        components = {
+            c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
+        }
+        tracking = components["tracking"]
+
+        assert tracking["implementation"] == "PARTIAL"
+        assert "baseline" in tracking["detail"]
+        assert "no re-identification" in tracking["detail"]
+
+    def test_prediction_remains_unimplemented(self, client: TestClient) -> None:
+        """Tracking existing must not make trajectory prediction look real."""
+        components = {
+            c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
+        }
+        assert components["prediction"]["implementation"] == "PLANNED"
+        assert components["prediction"]["readiness"] == "NOT_READY"
+
+    def test_detection_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
+        """Phase 3 shipped a geometric baseline, which is not a finished detector."""
+        components = {
+            c["name"]: c for c in client.get("/api/v1/system/status").json()["components"]
+        }
+        perception = components["perception"]
+
+        assert perception["implementation"] == "PARTIAL"
+        assert "No trained model" in perception["detail"]
 
 
 class TestSystemMetrics:

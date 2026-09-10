@@ -37,7 +37,7 @@ from adaptx.services.carla_service import CarlaService
 from adaptx.services.lidar_service import LiDARIngestService
 
 
-def _phase_1_components() -> list[ComponentStatus]:
+def _declared_components() -> list[ComponentStatus]:
     """Declared implementation state of every ADAPT-X subsystem."""
     return [
         ComponentStatus(
@@ -69,24 +69,48 @@ def _phase_1_components() -> list[ComponentStatus]:
             readiness=ComponentReadiness.READY,
             implementation=ImplementationStatus.PARTIAL,
             detail=(
-                "frame validation, bounds and metadata only; no filtering, "
-                "ground segmentation, voxelisation or clustering"
+                "frame acceptance, validation, bounds and metadata only; the "
+                "processing stages are reported separately as lidar_preprocessing"
             ),
             phase=1,
             required=True,
         ),
         ComponentStatus(
+            name="lidar_preprocessing",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "input validation, NaN/Inf removal, ROI and range filtering, plus "
+                "opt-in voxel downsampling, baseline ground segmentation and "
+                "baseline noise filtering; no clustering, no coordinate transforms"
+            ),
+            phase=2,
+        ),
+        ComponentStatus(
             name="perception",
-            readiness=ComponentReadiness.NOT_READY,
-            implementation=ImplementationStatus.PLANNED,
-            detail="object detection contract only; no detector implemented",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "geometric object detection: grid clustering, size filtering and "
+                "baseline classification by dimension bands. No trained model, no "
+                "oriented boxes, no velocity, no camera fusion, no semantic "
+                "segmentation. Classification is a heuristic and its confidence is "
+                "a geometric fit score, not a calibrated probability"
+            ),
             phase=3,
         ),
         ComponentStatus(
             name="tracking",
-            readiness=ComponentReadiness.NOT_READY,
-            implementation=ImplementationStatus.PLANNED,
-            detail="tracker contract only; no tracker implemented",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "geometric baseline: gated nearest-neighbour association, "
+                "velocity measured from frame timestamps, and a track lifecycle. "
+                "No learned motion model, no appearance features, no "
+                "re-identification - a track retired for missing too many frames "
+                "does not come back. Tracking quality is bounded by detection "
+                "quality, and no trajectory prediction is performed"
+            ),
             phase=4,
         ),
         ComponentStatus(
@@ -132,7 +156,7 @@ class SystemService:
         self._lidar = lidar
         self._carla = carla
         self._started_monotonic = time.monotonic()
-        self._components = _phase_1_components()
+        self._components = _declared_components()
 
     @property
     def uptime_s(self) -> float:

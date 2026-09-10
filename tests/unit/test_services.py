@@ -125,6 +125,40 @@ class TestLiDARIngestService:
         assert status.status is LiDARStatus.DISCONNECTED
         assert "staleness limit" in status.detail
 
+    def test_pre_validated_frames_skip_the_input_limits(self) -> None:
+        """A frame preprocessing reduced to zero is a valid observation.
+
+        min_points is a limit on the raw input, not on the filtered output, so
+        re-applying it after preprocessing would reject a legitimate result.
+        """
+        import numpy as np
+
+        from adaptx.models.point_cloud import PointCloudFrame
+
+        service = self._service()
+        empty = PointCloudFrame(
+            frame_id=0, sensor_id="s", points=np.empty((0, 3), dtype=np.float64)
+        )
+
+        with pytest.raises(InvalidPointCloudError):
+            service.ingest(empty)
+
+        summary = service.ingest(empty, pre_validated=True)
+        assert summary.point_count == 0
+        assert service.frames_received == 1
+
+    def test_upstream_duration_is_added_to_the_measured_time(self) -> None:
+        metrics = MetricsService()
+        settings = LiDARSettings(min_points=0, max_points=1000)
+        service = LiDARIngestService(
+            settings=settings,
+            processor=FrameValidationProcessor(settings),
+            metrics=metrics,
+        )
+
+        service.ingest(make_frame(5), pre_validated=True, upstream_duration_s=0.25)
+        assert metrics.snapshot().processing_time_ms >= 250.0
+
     def test_oversized_frames_are_rejected_and_not_counted(self) -> None:
         service = self._service()
         with pytest.raises(InvalidPointCloudError):
@@ -147,10 +181,32 @@ class TestSystemService:
     ) -> None:
         components = {c.name: c for c in context.system.status().components}
 
-        for name in ("perception", "tracking", "mapping", "prediction"):
+        for name in ("mapping", "prediction"):
             assert components[name].implementation is ImplementationStatus.PLANNED
             assert components[name].readiness is ComponentReadiness.NOT_READY
             assert components[name].required is False
+
+    def test_tracking_is_partial_because_it_is_a_baseline(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 4 implemented a geometric tracker, not a finished one."""
+        components = {c.name: c for c in context.system.status().components}
+        tracking = components["tracking"]
+
+        assert tracking.implementation is ImplementationStatus.PARTIAL
+        assert tracking.readiness is ComponentReadiness.READY
+        assert "baseline" in tracking.detail
+
+    def test_detection_is_partial_because_it_is_a_baseline(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 3 implemented a geometric detector, not a finished one."""
+        components = {c.name: c for c in context.system.status().components}
+        perception = components["perception"]
+
+        assert perception.implementation is ImplementationStatus.PARTIAL
+        assert perception.readiness is ComponentReadiness.READY
+        assert "baseline" in perception.detail
 
     def test_risk_is_partial_because_only_a_baseline_exists(
         self, context: ApplicationContext

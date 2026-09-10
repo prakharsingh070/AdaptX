@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from adaptx.models.objects import DetectedObject
+from adaptx.models.detection import DetectionResult
 from adaptx.models.point_cloud import PointCloudFrame
 
 
@@ -37,16 +37,27 @@ class LiDARProcessor(ABC):
 class ObjectDetector(ABC):
     """Produces per-frame object detections from a point cloud.
 
-    Not implemented in Phase 1.
+    Implementations consume the **non-ground** output of the processing
+    pipeline. They do not filter, voxelise or segment: that work belongs to
+    :class:`adaptx.perception.pipeline.LiDARProcessingPipeline` and is not
+    repeated here.
+
+    The contract returns a full :class:`~adaptx.models.detection.DetectionResult`
+    rather than a bare list, because a detector is the only thing that knows its
+    own timing, its candidate count and what it rejected. Returning just the
+    objects would leave callers unable to tell "found nothing" from "found
+    candidates and turned them all down".
     """
 
     name: str = "object_detector"
+    #: True for geometric or heuristic baselines, false for a trained model.
+    is_baseline: bool = True
 
     @abstractmethod
-    def detect(self, frame: PointCloudFrame) -> list[DetectedObject]:
-        """Return the objects detected in ``frame``.
+    def detect(self, frame: PointCloudFrame) -> DetectionResult:
+        """Detect objects in ``frame``.
 
-        The returned detections carry frame-local ``object_id`` values; stable
-        identity is assigned later by
+        The detections carry frame-local ``object_id`` values; stable identity
+        is assigned later by
         :class:`adaptx.tracking.interfaces.ObjectTracker`.
         """

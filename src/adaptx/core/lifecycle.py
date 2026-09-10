@@ -11,12 +11,15 @@ from dataclasses import dataclass
 
 from adaptx.config.settings import Settings, get_settings
 from adaptx.core.logging import configure_logging, get_logger
+from adaptx.perception.detector import GeometricObjectDetector
 from adaptx.perception.lidar import FrameValidationProcessor
+from adaptx.perception.pipeline import LiDARProcessingPipeline
 from adaptx.risk.baseline import BaselineProximityRiskEngine
 from adaptx.services.carla_service import CarlaService
 from adaptx.services.lidar_service import LiDARIngestService
 from adaptx.services.metrics_service import MetricsService
 from adaptx.services.system_service import SystemService
+from adaptx.services.tracking_service import TrackingService
 
 logger = get_logger(__name__)
 
@@ -31,6 +34,9 @@ class ApplicationContext:
     carla: CarlaService
     system: SystemService
     risk_engine: BaselineProximityRiskEngine
+    preprocessor: LiDARProcessingPipeline
+    detector: GeometricObjectDetector
+    tracking: TrackingService
 
 
 def build_context(settings: Settings | None = None) -> ApplicationContext:
@@ -52,6 +58,9 @@ def build_context(settings: Settings | None = None) -> ApplicationContext:
         carla=carla,
         system=system,
         risk_engine=BaselineProximityRiskEngine(resolved.risk),
+        preprocessor=LiDARProcessingPipeline(resolved.lidar),
+        detector=GeometricObjectDetector(resolved.detection),
+        tracking=TrackingService(resolved.tracking),
     )
 
 
@@ -77,6 +86,12 @@ def startup(context: ApplicationContext) -> None:
 
 
 def shutdown(context: ApplicationContext) -> None:
-    """Release resources held by the context."""
+    """Release resources held by the context.
+
+    Tracking state is dropped explicitly: it is the only accumulated state in
+    the process, and leaving it behind would let a restarted context inherit
+    tracks from frames it never saw.
+    """
+    context.tracking.reset()
     context.carla.disconnect()
     logger.info("ADAPT-X stopped")

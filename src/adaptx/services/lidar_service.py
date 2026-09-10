@@ -46,17 +46,35 @@ class LiDARIngestService:
         self._last_received_monotonic: float | None = None
         self._frames_received = 0
 
-    def ingest(self, frame: PointCloudFrame) -> PointCloudSummary:
+    def ingest(
+        self,
+        frame: PointCloudFrame,
+        *,
+        pre_validated: bool = False,
+        upstream_duration_s: float = 0.0,
+    ) -> PointCloudSummary:
         """Validate ``frame``, record metrics and return its summary.
+
+        Args:
+            frame: The frame to account for.
+            pre_validated: Skip the point-count limits because an upstream
+                pipeline already enforced them on this frame's *input*. The
+                limits describe how large a raw scan may be; a frame that
+                preprocessing legitimately reduced to zero points is a valid
+                observation ("everything was out of range"), not malformed
+                input, and must not be rejected here.
+            upstream_duration_s: Time already measured upstream for this frame,
+                added to the recorded processing time so the reported latency
+                reflects the real total work rather than only this step.
 
         Raises:
             adaptx.core.exceptions.InvalidPointCloudError: the frame violates
                 the contract or the configured size limits.
         """
         started = time.perf_counter()
-        processed = self._processor.process(frame)
+        processed = frame if pre_validated else self._processor.process(frame)
         summary = processed.summary()
-        elapsed = time.perf_counter() - started
+        elapsed = time.perf_counter() - started + upstream_duration_s
 
         with self._lock:
             self._last_summary = summary
