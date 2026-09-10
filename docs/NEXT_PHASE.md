@@ -1,167 +1,127 @@
-# Next Phase — Adaptive Resolution (Phase 8)
+# Next Phase — CARLA Integration (Phase 9)
 
 Handoff for the next work item. Read [`PROJECT_STATE.md`](PROJECT_STATE.md) first.
 
 > **Numbering is settled.** Prediction is Phase 5 (done), 2.5D mapping Phase 6 (done), risk
-> and uncertainty Phase 7 (done), adaptive resolution **Phase 8**. `CLAUDE.md`,
-> `ROADMAP.md` and `services/system_service.py` all agree. Do not renumber.
+> and uncertainty Phase 7 (done), adaptive resolution Phase 8 (done), CARLA **Phase 9**.
+> `CLAUDE.md`, `ROADMAP.md` and `services/system_service.py` all agree. Do not renumber.
 
 ---
 
-## This is the phase the project exists for
+## The perception chain is complete. Nothing has ever seen real data.
 
-Every phase so far has built a piece. Phase 8 connects the last two and **tests the central
-claim**: that allocating spatial resolution by risk and uncertainty beats allocating it
-uniformly.
+Phases 1–8 built the whole pipeline: processing, detection, tracking, prediction, mapping,
+risk, and the adaptive resolution controller that ties them together. Every stage works, is
+tested, and is measured.
 
-Phase 6 built the fixed-resolution mapper and the `ResolutionDecision` contract it applies.
-Phase 7 produced per-object risk and uncertainty. Neither knows about the other. Phase 8 is
-the controller between them:
+Every stage has also only ever been fed geometry this repository generated for itself.
 
-```
-RiskAssessment[]  ->  ResolutionContext  ->  [ResolutionController]  ->  ResolutionDecision
-                                                                              |
-                                                                              v
-                                                                    FixedResolutionMapper
-                                                                    (unchanged, ADR-029)
-```
+That is the single root of almost every limitation in `PROJECT_STATE.md` §15. Detection
+accuracy, tracking correctness, prediction accuracy, map correctness, whether the risk
+ordering is sensible, whether the resolution allocation is *appropriate* — all of them are
+recorded as "unmeasured and unmeasurable", and all for the same reason: **no labelled data
+exists**.
 
-**Neither the mapper nor the risk engine should need to change.** If either does, the
-boundary drawn in ADR-029 and ADR-036 was wrong and that is worth knowing early — say so
-rather than quietly editing them.
+Phase 9 is the first thing in the roadmap that can change that. CARLA knows where every
+object actually is, where it actually goes, and what is actually occupied. It is the
+precondition for measuring correctness rather than cost.
 
 ## Objective
 
-Implement `mapping.interfaces.ResolutionController`:
+Complete `adaptx.carla.client.CarlaClient`. Every method below currently raises an explicit
+"not implemented in Phase 1" error, which is the honest placeholder it was built as:
 
-- `select_resolution(context: ResolutionContext) -> ResolutionLevel`
-- `cell_size_m(level: ResolutionLevel) -> float`
+- sensor attachment and LiDAR frame retrieval
+- ego-state extraction
+- actor spawning and cleanup
+- world/settings configuration
 
-Both already exist as abstract methods with **no implementation**. `ResolutionContext` also
-already exists (`models/map.py`) carrying exactly the inputs a controller needs:
-`distance_from_ego_m`, `risk_score`, `predicted_risk_score`, `uncertainty`, `object_density`,
-`max_object_speed_mps`, `in_ego_path`, `current_level`.
+The boundary already exists and is already exercised by `CarlaMockClient`. Phase 9 fills it
+in; it does not redesign it.
 
-Populating that contract from Phase 7 `RiskAssessment` values is most of the work.
+## What already works, and must keep working
 
-## Inputs available
+- `CarlaService` and the `/api/v1/carla/status` endpoint.
+- `CarlaMockClient` — the in-process fake. It must stay, and must stay clearly labelled: data
+  produced through it is `SYNTHETIC_TEST` and must never be presented as sensor output.
+- The whole perception chain, which consumes `RawPointCloudFrame` and does not care where it
+  came from. **A CARLA frame should enter through the existing ingest path**, not a parallel
+  one.
 
-| From | Field | Note |
-|---|---|---|
-| `RiskAssessment` | `risk_score` | **`None` when `risk_level` is `UNKNOWN`** — handle it, do not coerce to 0.0 |
-| `RiskAssessment` | `uncertainty.score` + `.reasons` | Heuristic, with contributors visible |
-| `RiskAssessment` | `distance_m`, `closing_speed_mps` | Closing speed is `None` when velocity was never measured |
-| `RiskAssessment` | `trajectory.min_distance_m`, `.time_to_min_distance_s` | `None` without a prediction |
-| `RiskAssessment` | `map_context.observation` | `OBSERVED_EMPTY` means **unobserved**, not free |
-| `SpatialMap` | bounds, resolution, occupancy | The map being refined |
-| `MapSettings` | `resolution_low/medium/high/critical_m` | The existing level vocabulary |
+## The trap in this phase
 
-## The three traps in this phase
+**CARLA is an optional dependency and must stay optional.** The `carla` package is not
+installed, is large, is version-locked to a simulator binary, and is unavailable on many
+machines — including CI.
 
-**1. `uncertainty` is not a second risk score.** Phase 7 deliberately kept them separate
-(ADR-033) so this phase can use both. A region can be low-risk and badly observed, and that
-is a strong argument for *more* detail, not less. If the controller only reads `risk_score`,
-the separation was pointless.
+- Nothing outside `adaptx.carla` may import `carla`.
+- The backend must start, all 17 endpoints must respond, and the full test suite must pass
+  with the package absent. That is the current state and it is not negotiable.
+- Tests for the real client belong behind a marker that skips cleanly when the import fails.
+  The mock stays the default everywhere else.
 
-**2. `risk_score` is `None` for `UNKNOWN` assessments.** A lost track, or one where nothing
-could be computed. Coercing it to `0.0` would allocate the coarsest resolution to the objects
-the system understands least — the same inversion ADR-032 exists to prevent, one phase later.
+## Provenance is the whole point
 
-**3. Resolution must not oscillate.** `knowledge-base/10_adaptive-resolution.md` requires a
-documented stabilisation mechanism, and `ResolutionContext.current_level` exists for exactly
-that. Hysteresis, smoothing or a minimum dwell time — pick one, document it, and **test that
-a region on a threshold boundary does not flip every frame**. An oscillating map is worse
-than a uniform one: it costs more and produces unstable output.
+`DataSource` already distinguishes `live_sensor`, `simulation`, `replay`, `synthetic_test`
+and `unavailable`. A CARLA frame is `simulation` — never `live_sensor`. This is the rule that
+stops a demo screenshot becoming an accidental claim about real hardware, and it is asserted
+by existing tests.
 
-## Expected outputs
+## Reproducibility
 
-Reuse the existing contracts. Do **not** create parallel ones:
+`knowledge-base/11_carla.md` requires the CARLA version, map, synchronous mode, fixed
+timestep, sensor transforms and seeds to be documented. Record them where a result can find
+them — a run that cannot be reproduced cannot be a measurement.
 
-- `ResolutionLevel` (LOW/MEDIUM/HIGH/CRITICAL) and `MapSettings.resolution_*_m`
-- `ResolutionDecision` with `source = ResolutionSource.ADAPTIVE` — **reserved in Phase 6
-  specifically for this** and never yet produced
-- `AdaptiveMap.is_adaptive = True` on maps built from an adaptive decision
+Synchronous mode with a fixed timestep matters more than it looks: **tracking and adaptive
+resolution both depend on frame ordering and timestamps**. Velocity is measured from the
+interval between frames, and the resolution dwell time counts frames. Free-running
+asynchronous mode would make both non-deterministic.
 
-Following ADR-022/024/027/029/032, return a result object carrying the decisions, what was
-excluded and why, measured durations, and a configuration snapshot.
+## Ground truth is the prize — take it if it is cheap
 
-## The hard part: one map, many resolutions
+CARLA can report actual actor positions, extents and velocities. If that is straightforward
+to capture alongside the sensor frame, capture it: it is the raw material for the first real
+accuracy measurement this project could make.
 
-Phase 6's mapper applies **one uniform cell size** per call. A genuinely adaptive map needs
-different cell sizes in different regions, and that is a real design decision this handoff
-deliberately does not make for you. Options, none free:
+But keep it **strictly separate from the perception path**. Ground truth is for evaluation,
+never an input. A detector that can see the answer measures nothing.
 
-- **Multiple passes.** Run the mapper at several resolutions and compose. Simple, reuses
-  Phase 6 unchanged, but costs several full grids.
-- **A region-partitioned map.** Tile the extent and assign each tile a level. Needs a new map
-  representation and a decision about tile granularity.
-- **A hierarchical grid.** Coarse base with refined sub-blocks. Most efficient, most complex,
-  and hardest to serialise for the dashboard.
-
-Whichever you choose, **write an ADR before implementing it**, and keep `AdaptiveMap.is_adaptive`
-meaningful so fixed and adaptive results can never be confused (ADR-003).
-
-## Measurement — this is the deliverable
-
-Experiment 007 must run **fixed and adaptive over identical input** and report:
-
-- total cells, occupied cells, and cell count per resolution level
-- mapping duration and peak memory
-- **cells spent on high-risk regions vs low-risk regions** — the number the whole claim rests on
-- what the adaptive map loses: where it is coarser than the fixed baseline, and what that
-  costs in represented detail
-
-Phase 6 measured the problem: occupancy falls to 1–16% at 0.25 m, so a uniform fine map
-spends most of its cells recording that nothing was observed (Experiment 005). **That is the
-figure to beat.** Report it honestly if the adaptive mapper does not beat it — a negative
-result, measured properly, is a real finding and far more valuable than a flattering one.
-
-## API, telemetry, status
-
-- Extend `GET /api/v1/map/status` — `adaptive_resolution_implemented` is currently hardcoded
-  `false` in `routes/map.py`; it becomes real.
-- A frame-level endpoint (`POST /api/v1/lidar/adaptive-map`) matching the existing shape.
-- Remove `"adaptive_map"` from `_NOT_YET_AVAILABLE` **only once it genuinely exists**.
-- Update the `mapping` component detail: it currently says
-  `ADAPTIVE RESOLUTION IS NOT IMPLEMENTED` in capitals. That sentence is the thing you are
-  deleting — make sure it is actually true first.
-- **Never `IMPLEMENTED`.** This is still a baseline.
-
-## Testing
-
-- a high-risk region receives finer cells than a low-risk one, on identical geometry
-- a **high-uncertainty, low-risk** region also receives finer cells — the ADR-033 payoff
-- an `UNKNOWN` assessment (`risk_score is None`) does **not** receive the coarsest level
-- a region sitting exactly on a threshold does not oscillate across frames
-- levels stay within the configured vocabulary and cell sizes
-- fixed and adaptive over the same input, with `is_adaptive` set correctly
-- empty scene, single object, objects at map bounds
-- determinism: same assessments, same decisions
-- integration: raw frame → … → risk → resolution → adaptive map
-- API contract and OpenAPI documentation
-
-Add an adaptive-mapping benchmark and record Experiment 007.
+If it turns out not to be cheap, leave it for Phase 11 and say so.
 
 ## MUST NOT implement
 
-- Learned or ML resolution policy
-- CARLA scenarios (Phase 9), scenario generation (Phase 10) or the dashboard (Phase 12)
-- Collision avoidance, vehicle control, or anything actuating
-- Any new dependency without an ADR
+- Scenario generation and replay (Phase 10) — CARLA is the environment, not the scenarios.
+- Benchmarking against scenarios (Phase 11).
+- The dashboard (Phase 12).
+- Vehicle control, autopilot behaviour, planning or actuation of any kind.
+- Any change to the perception algorithms of Phases 1–8. If real data exposes a defect,
+  **report it** — a measured defect is a finding, and Phase 9 is the first chance to have one.
+- New dependencies beyond `carla` itself, which is already declared as an optional extra.
 
 ## Backward-compatibility rules
 
-1. Do not change the coordinate convention (ADR-009).
-2. Do not modify Phase 1–7 algorithms unless a measured defect justifies it.
+1. Do not change the coordinate convention (ADR-009). CARLA's axes differ; convert at the
+   boundary and document it. This is exactly the trigger ADR-013 named for a transform stage.
+2. Do not modify Phase 1–8 algorithms unless a measured defect justifies it.
 3. Do not change existing endpoint behaviour — extend additively.
-4. Do not weaken or delete tests. If a premise genuinely changes (as in Phases 3–7 when a
-   module stopped being "planned"), retarget the test to guard the same property and report
-   it.
-5. If an existing file must change: explain why, make the smallest change, preserve
-   compatibility, add a regression test, and list it in the final report.
-6. Reuse `ResolutionContext` / `ResolutionDecision` / `ResolutionLevel` / `AdaptiveMap`; do
-   not duplicate contracts.
-7. Keep the honesty rules: unmeasured values are `null` with a reason, `source` provenance is
-   mandatory, baselines are labelled `is_baseline`, risk stays normalised to `[0, 1]`
-   (ADR-006), **no fabricated accuracy or performance figures**, and nothing describes the
-   risk score as a probability, calibrated or validated.
+4. Do not weaken or delete tests. If a premise genuinely changes, retarget it narrowly and
+   report it, as Phases 3–8 each did.
+5. Keep the honesty rules: no fabricated metrics; unmeasured values are `null` with a reason;
+   `source` provenance is mandatory; simulation is labelled as simulation everywhere it
+   appears; and nothing describes the risk score or the detail priority as a probability,
+   calibrated or validated.
+6. `IMPLEMENTED` stays reserved for mature functionality. A working CARLA client is still
+   `PARTIAL`.
+
+## Testing
+
+- The client with `carla` absent: every method fails explicitly, and the backend still starts.
+- The mock, unchanged, still satisfies the interface.
+- Axis conversion, against hand-computed values.
+- Frames ingested from CARLA are labelled `simulation` and reach the pipeline through the
+  existing path.
+- Determinism under synchronous mode with a fixed timestep and a fixed seed.
+- The full existing suite, unchanged.
+
+Record the setup and any measurement in `docs/experiments/experiment-log.md`.

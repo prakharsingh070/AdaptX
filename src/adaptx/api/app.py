@@ -38,9 +38,10 @@ ADAPT-X backend - Adaptive Dynamic Perception and Tracking.
 It exposes configuration, health, measured runtime metrics, the CARLA
 connection boundary and LiDAR frame ingestion with structural validation.
 
-Object detection, tracking, trajectory prediction, 2.5D mapping and the
-adaptive resolution algorithm are **not implemented**. Every subsystem reports
-its own implementation status through `/api/v1/system/status`.
+Object detection, tracking, trajectory prediction, 2.5D mapping, risk and
+adaptive spatial resolution exist as **deterministic baselines**, not as
+finished implementations. Every subsystem reports its own implementation
+status through `/api/v1/system/status`, and none of them reports IMPLEMENTED.
 """.strip()
 
 

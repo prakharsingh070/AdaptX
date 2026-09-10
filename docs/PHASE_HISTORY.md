@@ -427,8 +427,102 @@ than zero, and the Phase 8 boundary confirmed absent from every response.
 
 ---
 
+## Phase 8 — Adaptive spatial resolution · verified
+
+**The phase the project is named for.** Phase 6 built a mapper that applies a resolution;
+Phase 7 built an engine that scores concern. Phase 8 is the policy between them, and it is
+the first time ADAPT-X does the thing it claims: spend spatial detail unevenly, on purpose,
+for a stated reason.
+
+**One map, several resolutions (ADR-037).** A dense NumPy grid has exactly one cell size, so
+an adaptive map cannot be one. The extent is partitioned into fixed-size square **regions**,
+each holding its own sub-grid at its own cell size. Regions are half-open on their upper
+edges and clipped at the map bounds, so they partition the extent exactly — a point lands in
+one region and one cell of it, and `input == mapped + out_of_bounds` survives untouched. A
+quadtree would allocate fewer cells and was deferred, not rejected; the reason is in the ADR,
+and Experiment 007 is the evidence for when to revisit it.
+
+**A detail priority, not a second risk score (ADR-038).** Six normalised factors — risk,
+uncertainty, predicted-motion relevance, proximity, object density, measured motion —
+combined as a weighted mean **over the factors actually available**. A factor that cannot be
+computed is dropped and the weights renormalise. That is ADR-032 one phase later, and the
+failure it prevents is worse here: coercing an unknown risk to zero would hand the *coarsest*
+representation to exactly the objects the system understands least. Instead `risk_score is
+None` drops the risk factor **and** floors the region level.
+
+**Uncertainty finally pays for itself.** Phase 7 kept uncertainty separate from risk on the
+argument that a later phase would need both. This is that phase: a quiet, badly observed
+region earns detail on uncertainty alone. The `high_uncertainty` benchmark scene refines 27
+regions with two of its three objects carrying no risk score at all.
+
+**Refinement is immediate; coarsening is earned twice (ADR-039).** A hysteresis margin must
+be cleared before a coarser level is even proposed, and it must then be proposed on three
+consecutive frames before it applies. Both are needed — the margin alone still flips on wide
+oscillation, the dwell alone still flips on a boundary. The asymmetry is deliberate: the cost
+of refining a region that did not need it is some wasted cells; the cost of coarsening one
+that did is missing structure exactly where the system was most concerned.
+
+**The controller is stateful, and it is the only mapping state that survives a frame.** It
+remembers each region's level and dwell counter, because stabilisation is temporal by
+definition. Occupancy still accumulates nowhere: what persists is a policy decision, not a
+measurement (ADR-030 intact).
+
+**Budgets coarsen the least important regions, and say so (ADR-040).** Region, cell and
+fine-region ceilings are enforced by demoting lowest-priority regions first, deterministically,
+with every demotion recorded on the decision and counted in the plan. A budget that silently
+coarsened the map would make a benchmark measure the budget instead of the policy.
+
+**Neither Phase 6 nor Phase 7 changed.** `NEXT_PHASE.md` asked for that to be reported either
+way, and the boundaries held. The controller reads positions from **tracks**, not from
+assessments, because a `RiskAssessment` deliberately carries a distance rather than a
+location (ADR-036, ADR-041) — adding a position to it would have eroded the separation for
+one consumer's convenience.
+
+**Six Phase 6/7-era tests were retargeted, none weakened.** Their premise was that adaptive
+resolution did not exist. Each now guards what mattered underneath: that the *fixed* mapper
+keeps its own identity and never claims to be adaptive, that a stream leaves
+`not_yet_available` only when something genuinely produces it and then appears as a summary
+rather than raw geometry, and that neither component ever reports IMPLEMENTED. One
+contract was widened: `ResolutionContext.risk_score` became nullable, because a Phase 1
+default of `0.0` could not express the very case Phase 7 made central.
+
+**Measured (Experiment 007) — and it is not a clean win.** Against a uniform 0.25 m map the
+adaptive map uses 6–30% of the cells; against 0.5 m, 25–50%. Against a **1.0 m** map it uses
+*more* cells in every scene containing an object, which is arithmetic rather than a defect:
+the base level is 1.0 m, so the policy can only add to it. Adaptive resolution is a way of
+affording a fine map, not of beating a coarse one.
+
+More awkwardly: **adaptive mapping is slower in wall-clock time than the fixed mapper in
+every scene**, 25–32 ms against 5–8 ms, even where it allocates a quarter of the cells. The
+cause was measured rather than guessed — holding cells constant at 14,400 and varying only
+the region size moved mapping from 8.9 ms at 1 region to 77.2 ms at 576. **Cost scales with
+region count, not cell count**, at roughly 120 µs per region. The lever is `tile_size_m`, and
+that is now a number instead of an intuition. One small optimisation was tried, measured, and
+kept only for the validation it added, because it changed nothing outside noise.
+
+**Limitations:** the priority orders regions but measures nothing physical — not a
+probability, not a safety margin, never calibrated or validated, because no labelled data
+exists; whether the allocation is *appropriate* is unmeasured and unmeasurable; what the
+coarse regions lose is not quantified, which would need a reference map; allocation is
+quantised to the region, so a small object refines the ground around it; a quiet region keeps
+its detail for up to the dwell time; `in_ego_path` is never set true and
+`predicted_risk_score` is always null, because no planner and no predicted-risk formulation
+exist.
+
+**Status:** 1181 tests, ruff and mypy clean, 17 endpoints responding, a real scene mapped end
+to end at four resolutions in one grid, and threshold jitter proven not to flip a region.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
-visible. No phase has added a dependency beyond the Phase 1 set - seven phases, zero new dependencies.
+visible. No phase has added a dependency beyond the Phase 1 set - eight phases, zero new
+dependencies.
+
+Phase 8 added a second pattern worth naming: **the honest negative**. The phase the project
+is named for produced a result that is partly unflattering — slower than the baseline, and
+more expensive than a coarse uniform map — and the measurement was recorded as taken, with
+the cause identified rather than explained away. A benchmark that could only ever confirm the
+premise would not have been worth running.

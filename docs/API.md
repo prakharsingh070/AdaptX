@@ -5,11 +5,15 @@ Versioned prefix: `/api/v1`
 Interactive documentation: `/docs` (Swagger UI), `/redoc`, `/openapi.json`
 
 **This document describes only what is implemented.** Detection, tracking, trajectory
-prediction, 2.5D mapping and object-level risk exist as deterministic baselines. Endpoints
-for the **adaptive** map and the spatial **risk map** — a per-cell risk field, which Phase 7
-does not produce — plus events, scenarios and benchmarking are sketched in
+prediction, 2.5D mapping, object-level risk and adaptive spatial resolution all exist as
+deterministic baselines. An endpoint for the spatial **risk map** — a per-cell risk field,
+which Phase 7 does not produce — plus events, scenarios and benchmarking are sketched in
 [`knowledge-base/16_api-contract.md`](knowledge-base/16_api-contract.md) and do not exist
 yet.
+
+`POST /api/v1/lidar/adaptive-map` is the Phase 8 endpoint. Its detail priority is an
+**engineering prioritisation score**, not a probability of collision and not a safety
+margin.
 
 ---
 
@@ -674,8 +678,11 @@ map from the frame it is given; nothing accumulates and nothing carries over fro
 request. There is no reset endpoint because there is no state to reset.
 
 **The mapper is a deterministic fixed-resolution baseline** (ADR-028). One cell size applies
-across the whole map. **Adaptive, risk-aware resolution is not implemented** — the mapper is
-handed a resolution and never chooses one (ADR-029).
+across the whole map, and the mapper is handed that size rather than choosing it (ADR-029).
+
+This endpoint stays uniform on purpose: it is the baseline the adaptive mapper is measured
+against (ADR-003). Risk-aware allocation lives at
+[`POST /api/v1/lidar/adaptive-map`](#post-apiv1lidaradaptive-map).
 
 | Rule | Why |
 |---|---|
@@ -751,6 +758,157 @@ overwhelmingly empty and serialising it would say nothing at great length.
 **422** — malformed points, as the other LiDAR endpoints; also when `resolution_m` is
 outside the configured `[min_resolution_m, max_resolution_m]` range, or when the resulting
 grid would exceed the configured cell budget.
+
+---
+
+## `POST /api/v1/lidar/adaptive-map`
+
+Run the whole perception chain, then allocate spatial detail region by region.
+
+**Stateful in two ways, and both matter.** It consumes tracks, so every rule on
+`POST /api/v1/lidar/track` applies — temporal order, explicit timestamps, reset between
+sequences. It *also* stabilises resolution across frames: each region remembers the level it
+held and how long a coarser one has been proposed, so it does not give up detail the instant
+a score dips. Call **both** `POST /api/v1/tracking/reset` and
+`POST /api/v1/map/adaptive/reset` between unrelated sequences.
+
+> **The detail priority is a deterministic engineering prioritisation score. It is not a
+> probability of collision and it is not a safety margin.** It is not calibrated, has never
+> been validated against labelled data — none exists — and its weights and thresholds are
+> baseline engineering values. It orders regions by how much detail they deserve relative to
+> each other; it measures nothing physical.
+
+### How resolution is chosen
+
+The map extent is partitioned into fixed-size square **regions** (`ADAPTX_ADAPTIVE__TILE_SIZE_M`,
+10 m by default), each given its own cell size — which is how one map holds several
+resolutions at once. Regions partition the extent exactly: no point falls in two, and none
+falls in none.
+
+Each region gets a **detail priority** in `[0, 1]`: a weighted mean of six normalised factors
+over the ones **actually available**.
+
+| Factor | Meaning | When it is absent |
+|---|---|---|
+| `risk` | Strongest influencing Phase 7 risk score | No influencing object could be scored |
+| `uncertainty` | Strongest influencing heuristic uncertainty | Nothing influences the region |
+| `proximity` | Nearness of the region to the ego reference | Nothing influences the region |
+| `trajectory` | Predicted-motion relevance, weighted to the near future | No predicted path reaches it |
+| `density` | Saturating count of influencing objects | Nothing influences the region |
+| `motion` | Fastest **measured** influencing speed | No influencing speed was ever measured |
+
+A factor that cannot be computed is **dropped and the remaining weights renormalise** — it is
+never treated as zero. The priority maps to a level through the configured thresholds, and
+the level to a cell size through `ADAPTX_MAP__RESOLUTION_*_M`.
+
+### Three rules worth knowing
+
+**Unknown risk is not low risk.** An object with `risk_score: null` has its risk factor
+dropped *and* raises a floor on the region's level. Coercing it to `0.0` would hand the
+coarsest representation to the objects the system understands least.
+
+**Uncertainty raises detail on its own.** A quiet but badly observed region can earn a finer
+level than a confidently quiet one. That is the whole reason risk and uncertainty are
+reported separately.
+
+**Resolution does not oscillate.** Refinement applies on the frame it is asked for;
+coarsening must clear a hysteresis margin *and* be proposed on several consecutive frames.
+A region with no influencing object at all reports `detail_priority: null` — not `0.0` — and
+takes the base level.
+
+### Request
+
+Everything `POST /api/v1/lidar/risk` accepts, plus:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `include_decisions` | `true` | Return the per-region decisions |
+| `max_decisions` | `256` | Cap on returned decisions; truncation is reported |
+| `include_cells` | `false` | Return occupied cells only |
+| `max_cells` | `20000` | Cap on returned cells; truncation is reported |
+| `include_fixed_comparison` | `false` | Also build the Phase 6 map over the same frame and return both workloads |
+
+### 200 OK (abridged)
+
+```json
+{
+  "accepted": true,
+  "map": {
+    "mapper": "tiled_adaptive_mapper_v1",
+    "controller": "heuristic_resolution_controller_v1",
+    "is_adaptive": true,
+    "tile_size_m": 10.0,
+    "tile_count": 64,
+    "tiles_by_level": {"low": 58, "medium": 4, "high": 2, "critical": 0},
+    "cells_by_level": {"low": 5800, "medium": 1600, "high": 5000, "critical": 0},
+    "finest_resolution_m": 0.2,
+    "coarsest_resolution_m": 1.0,
+    "changed_tile_count": 0,
+    "accounting": {
+      "input_point_count": 1579,
+      "mapped_point_count": 1579,
+      "out_of_bounds_point_count": 0,
+      "occupied_cell_count": 812,
+      "total_cell_count": 12400
+    },
+    "controller_duration_ms": 8.4,
+    "mapping_duration_ms": 26.0
+  },
+  "plan_summary": {
+    "considered_assessments": 2,
+    "influencing_assessments": 2,
+    "excluded_assessments": 0,
+    "budget": {"within_budget": true, "demoted_tile_count": 0}
+  },
+  "decisions": [
+    {
+      "tile_index": 34,
+      "level": "high",
+      "resolution": {"resolution_m": 0.2, "source": "adaptive"},
+      "previous_level": "low",
+      "changed": true,
+      "detail_priority": 0.72,
+      "factors": ["risk", "uncertainty", "proximity", "density"],
+      "factor_scores": {"risk": 0.89, "uncertainty": 0.65, "proximity": 1.0,
+                        "trajectory": null, "density": 0.5, "motion": null},
+      "influencing_track_ids": [1],
+      "unknown_risk_track_ids": [],
+      "reason": "high: detail priority 0.72 (heuristic); risk 0.89, uncertainty 0.65, ..."
+    }
+  ],
+  "decisions_truncated": false,
+  "comparison": null,
+  "cells": null
+}
+```
+
+The dense grid is **never** returned. `map` carries the tiling, the level distribution and
+full point accounting; `decisions` carries region decisions; `cells` carries occupied cells
+only, and only when asked for — each reporting its own region's `resolution_m` and
+`resolution_level`.
+
+Returns **422** for the same malformed input as the other LiDAR endpoints, and when the plan
+would exceed the configured cell ceiling.
+
+---
+
+## `POST /api/v1/map/adaptive/reset`
+
+Make every region forget the resolution level it was holding.
+
+The adaptive path is the only mapping state that survives a frame. That memory must not carry
+across unrelated sequences, or a new scene starts refined wherever the old one happened to be
+busy. This clears **policy** state only — no occupancy is retained anywhere.
+
+**200 OK**
+
+```json
+{
+  "reset": true,
+  "cleared_region_count": 64,
+  "detail": "Every region forgot the level it held and how long it had been quiet. ..."
+}
+```
 
 ---
 
@@ -996,7 +1154,13 @@ Report mapping readiness, the applied resolution and the mapped extent.
   },
   "mapper": "fixed_resolution_mapper_v1",
   "is_adaptive": false,
-  "adaptive_resolution_implemented": false,
+  "adaptive_resolution_implemented": true,
+  "adaptive_mapper": "tiled_adaptive_mapper_v1",
+  "adaptive_controller": "heuristic_resolution_controller_v1",
+  "adaptive_enabled": true,
+  "adaptive_is_baseline": true,
+  "tile_size_m": 10.0,
+  "tile_count": 144,
   "lifecycle": "frame_local",
   "resolution_m": 0.5,
   "resolution_source": "fixed",

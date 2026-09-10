@@ -11,6 +11,8 @@ import argparse
 import json
 import pathlib
 
+from adaptx.benchmark.adaptive import render as render_adaptive
+from adaptx.benchmark.adaptive import run_adaptive_benchmark
 from adaptx.benchmark.baseline import (
     BASELINE_PROFILE,
     BASELINE_VOXEL_SIZE_M,
@@ -84,6 +86,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Benchmark risk assessment on synthetic tracks instead.",
     )
+    parser.add_argument(
+        "--adaptive",
+        action="store_true",
+        help="Benchmark adaptive resolution against the fixed baseline instead.",
+    )
     parser.add_argument("--json", type=pathlib.Path, help="Write the full report here.")
     return parser.parse_args()
 
@@ -144,6 +151,18 @@ def main() -> None:
     scenarios = (
         tuple(DatasetScenario(name) for name in args.scenarios) if args.scenarios else SIZE_LADDER
     )
+
+    if args.adaptive:
+        adaptive_report = run_adaptive_benchmark(repeats=args.repeats, warmup=args.warmup)
+        print(render_adaptive(adaptive_report))
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(
+                json.dumps(adaptive_report.model_dump(mode="json"), indent=2),
+                encoding="utf-8",
+            )
+            print(f"\nfull report written to {args.json}")
+        return
 
     if args.risk:
         risk_report = run_risk_benchmark(repeats=args.repeats, warmup=args.warmup)

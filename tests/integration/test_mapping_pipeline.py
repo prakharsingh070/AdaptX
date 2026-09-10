@@ -358,10 +358,18 @@ class TestMapEndpoint:
     def test_the_response_is_labelled_a_fixed_resolution_baseline(
         self, map_client: TestClient
     ) -> None:
+        """Retargeted in Phase 8: the response no longer says adaptive is absent.
+
+        It said so truthfully until a controller existed. The property preserved
+        is the one that matters for ADR-003 - this endpoint is the *baseline*,
+        it says so, and it never presents itself as the adaptive variant.
+        """
         body = map_client.post("/api/v1/lidar/map", json=frame_body(road_scene())).json()
 
         assert body["map"]["is_adaptive"] is False
-        assert "adaptive resolution is not implemented" in body["detail"]
+        assert "fixed-resolution baseline" in body["detail"]
+        assert "never chooses it" in body["detail"]
+        assert "retained unchanged so the two can be compared" in body["detail"]
         assert "not a persistent world map" in body["detail"]
 
     def test_consecutive_requests_are_independent(self, map_client: TestClient) -> None:
@@ -385,12 +393,24 @@ class TestMapEndpoint:
 
 class TestMapStatusEndpoint:
     def test_it_reports_the_configured_mapper(self, map_client: TestClient) -> None:
+        """Retargeted in Phase 8: a controller now exists alongside the baseline.
+
+        ``adaptive_resolution_implemented`` was false and is now true. The
+        property preserved is that the *baseline* mapper keeps its own
+        identity: ``mapper`` and ``is_adaptive`` still describe the uniform
+        mapper, which is what ``POST /api/v1/lidar/map`` uses, and the adaptive
+        pair is reported under separate keys rather than replacing it.
+        """
         body = map_client.get("/api/v1/map/status").json()
 
         assert body["mapper"] == "fixed_resolution_mapper_v1"
         assert body["is_adaptive"] is False
-        assert body["adaptive_resolution_implemented"] is False
         assert body["lifecycle"] == "frame_local"
+
+        assert body["adaptive_resolution_implemented"] is True
+        assert body["adaptive_mapper"] == "tiled_adaptive_mapper_v1"
+        assert body["adaptive_controller"] == "heuristic_resolution_controller_v1"
+        assert body["tile_count"] >= 1
 
     def test_it_reports_the_mapped_extent_and_dimensions(self, map_client: TestClient) -> None:
         body = map_client.get("/api/v1/map/status").json()
@@ -417,11 +437,21 @@ class TestMapStatusEndpoint:
         assert body["summary"]["frames_mapped"] == 1
 
     def test_it_names_what_it_does_not_model(self, map_client: TestClient) -> None:
+        """Retargeted in Phase 8: adaptive resolution left ``not_modelled``.
+
+        It left because it is now genuinely modelled, which is the rule the
+        list has always followed. Everything mapping still does not model is
+        asserted here, including two limits Phase 8 does not remove -
+        occlusion and a per-cell risk field.
+        """
         configuration = map_client.get("/api/v1/map/status").json()["configuration"]
 
-        assert configuration["adaptive_resolution_implemented"] is False
+        assert configuration["adaptive_resolution_implemented"] is True
+        assert "adaptive_resolution" not in configuration["not_modelled"]
         assert "probabilistic_occupancy" in configuration["not_modelled"]
-        assert "adaptive_resolution" in configuration["not_modelled"]
+        assert "temporal_fusion" in configuration["not_modelled"]
+        assert "occlusion" in configuration["not_modelled"]
+        assert "per_cell_risk" in configuration["not_modelled"]
         assert configuration["unobserved_height"] == "null, never zero"
 
     def test_the_component_is_ready_but_never_implemented(self, map_client: TestClient) -> None:
@@ -452,7 +482,10 @@ class TestMappingTelemetry:
         assert mapping["resolution_m"] == 0.5
         assert mapping["width"] == 160
         assert mapping["lifecycle"] == "frame_local"
+        # The Phase 6 summary describes the baseline mapper, which still never
+        # chooses its own resolution regardless of what the controller does.
         assert mapping["adaptive_resolution_implemented"] is False
+        assert mapping["is_adaptive"] is False
 
     def test_mapping_is_listed_among_what_the_channel_provides(
         self, map_client: TestClient
@@ -463,13 +496,27 @@ class TestMappingTelemetry:
 
         assert "mapping" in data["provides"]
 
-    def test_the_adaptive_map_stream_remains_unavailable(self, map_client: TestClient) -> None:
-        """A fixed-resolution map must not make the adaptive one look present."""
+    def test_the_adaptive_stream_is_a_summary_not_the_tiles(self, map_client: TestClient) -> None:
+        """Retargeted in Phase 8: the adaptive stream now genuinely exists.
+
+        It previously asserted ``adaptive_map`` stayed in
+        ``not_yet_available``, guarding against a fixed map making an adaptive
+        one look present. A real one exists now, so the guard moves to the rule
+        that outlives it: the channel advertises the stream and carries counts,
+        never the tiles or their cell arrays.
+        """
         with map_client.websocket_connect("/ws/telemetry") as websocket:
             websocket.receive_json()
             data = websocket.receive_json()["data"]
 
-        assert "adaptive_map" in data["not_yet_available"]
+        assert "adaptive_map" not in data["not_yet_available"]
+        assert "adaptive_mapping" in data["provides"]
+
+        adaptive = data["adaptive_mapping"]
+        assert adaptive["controller"] == "heuristic_resolution_controller_v1"
+        assert adaptive["is_collision_probability"] is False
+        for absent in ("tiles", "cells", "point_count", "decisions", "occupancy"):
+            assert absent not in adaptive
 
     def test_the_summary_reflects_a_mapped_frame(self, map_client: TestClient) -> None:
         map_client.post("/api/v1/lidar/map", json=frame_body(road_scene()))

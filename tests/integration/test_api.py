@@ -237,12 +237,15 @@ class TestLiDARFrame:
 
 class TestMapStatus:
     def test_reports_configuration_and_no_adaptive_implementation(self, client: TestClient) -> None:
-        """Retargeted in Phase 6: a mapper exists, an adaptive one does not.
+        """Retargeted in Phase 6, then in Phase 8 when a controller arrived.
 
-        Previously asserted the component was PLANNED. The property preserved
-        is the one that protects the project's central claim - shipping a
-        fixed-resolution mapper must not make ADAPT-X look like it allocates
-        resolution by risk.
+        Phase 1 asserted the component was PLANNED; Phase 6 asserted no
+        adaptive algorithm existed. Both premises are now gone, but the
+        property they protected is not: a *fixed-resolution* mapper must never
+        be presented as allocating resolution by risk. That is what is asserted
+        here - the default mapper still reports ``is_adaptive: false`` even
+        though an adaptive one now exists beside it, and neither reports
+        IMPLEMENTED.
         """
         response = client.get("/api/v1/map/status")
         assert response.status_code == 200
@@ -250,9 +253,12 @@ class TestMapStatus:
         body = response.json()
         assert body["component"]["implementation"] == "PARTIAL"
         assert body["active_cells"] == 0
-        assert body["configuration"]["is_adaptive_algorithm_implemented"] is False
-        assert body["adaptive_resolution_implemented"] is False
+        assert body["configuration"]["is_adaptive_algorithm_implemented"] is True
+        assert body["adaptive_resolution_implemented"] is True
+        # The baseline mapper must not inherit the adaptive label.
         assert body["is_adaptive"] is False
+        assert body["adaptive_is_baseline"] is True
+        assert body["configuration"]["adaptive_priority_is_collision_probability"] is False
         assert set(body["resolution_levels"]) == {"low", "medium", "high", "critical"}
         assert body["resolution_levels"]["low"] > body["resolution_levels"]["critical"]
 

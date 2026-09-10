@@ -189,6 +189,36 @@ enforced by CI rather than by review:
 
 ---
 
+### Adaptive spatial resolution (Phase 8)
+
+- **Spatial differentiation.** A close, high-risk object refines its own region while distant
+  unrelated regions stay coarse, and one object never refines the whole map.
+- **Low complexity stays coarse.** An open scene with no objects holds every region at the
+  base level — the reason adaptive mapping exists.
+- **Unknown risk is not low risk.** An assessment with `risk_score is None` drops the risk
+  factor rather than scoring it zero, takes a floored level rather than the coarsest, and
+  outranks a *confidently quiet* object. The cause is visible in the decision.
+- **Uncertainty earns detail on its own.** A low-risk, badly observed region receives a finer
+  level than a low-risk, well observed one — the ADR-033 payoff, asserted directly.
+- **Predicted motion refines ahead of arrival.** A trajectory raises the priority of regions
+  it crosses, weighted towards the near future.
+- **No oscillation.** A region driven through 0.61 / 0.59 / 0.60 / 0.58 / 0.61 / 0.59 holds a
+  single level. A sustained rise upgrades on the first frame; a sustained fall downgrades only
+  after the dwell time; a disappearing object returns the region to the base level.
+- **Region partition is exact.** Points swept across every region boundary, on the lower edge,
+  on the upper edge, at interior boundaries and at negative coordinates are each counted
+  exactly once, and `input == mapped + out_of_bounds` holds across mixed resolutions.
+- **Several resolutions in one map**, with a projected cell reporting its own region's cell
+  size and level.
+- **Budgets bind deterministically**, coarsening the lowest-priority regions first and
+  reporting every demotion.
+- **Determinism.** Identical input gives identical decisions, and the order assessments arrive
+  in does not change them.
+- **No overclaiming.** A parametrised test asserts no generated explanation contains
+  "probability", "calibrated", "validated", "guaranteed" or "safe".
+- **The baseline survives.** The Phase 6 mapper still reports `is_adaptive: false`, still uses
+  `source: fixed`, and `POST /api/v1/lidar/map` is unchanged.
+
 ## Conventions for new tests
 
 - **Never weaken or delete a test to make the suite green.** If a test fails, either the

@@ -114,7 +114,7 @@ class MappingBenchmarkReport(TimestampedModel):
             "and grid workload on generated geometry. They say nothing about "
             "map correctness, and nothing about whether a given resolution is "
             "appropriate for a scene - that question belongs to adaptive "
-            "resolution, which is not implemented."
+            "resolution, measured separately by the --adaptive benchmark."
         )
     )
 

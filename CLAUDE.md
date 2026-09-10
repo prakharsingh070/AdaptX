@@ -14,7 +14,7 @@ The central innovation is risk-aware adaptive perception: low-risk regions use c
 
 LiDAR / CARLA -> point-cloud processing -> ground and noise filtering -> object detection -> object tracking -> trajectory prediction -> 2.5D occupancy mapping -> risk and uncertainty estimation -> predictive risk -> adaptive resolution controller -> adaptive 2.5D map -> benchmarking -> dashboard.
 
-Stages up to and including trajectory prediction are implemented as deterministic, explainable baselines. Nothing after it is implemented.
+Stages up to and including the adaptive resolution controller are implemented as deterministic, explainable baselines. Nothing after it is implemented.
 
 ## Core Modules
 
@@ -138,8 +138,26 @@ every component in `services/system_service.py` agree with the list below.
   intersection, no spatial risk field, no ego planned path. RISK DOES NOT
   DECIDE SPATIAL RESOLUTION - that is Phase 8. The proximity-only baseline is
   retained unchanged for comparison.
-- Phase 8: Adaptive resolution - TODO
-- Phase 9: CARLA - TODO
+- Phase 8: Adaptive resolution - DONE as a deterministic heuristic baseline (the map
+  extent is partitioned into fixed-size regions and a controller gives each its own cell
+  size, so one map genuinely holds several resolutions; regions partition the extent
+  exactly, with no gap and no double coverage. The level comes from a detail priority
+  combining risk, uncertainty, predicted-motion relevance, object density, proximity and
+  measured motion as a weighted mean over the factors actually available, a missing factor
+  dropped and never scored zero; `risk_score=None` drops the risk factor AND floors the
+  level, because unknown is not low; resolution is stabilised by an asymmetric hysteresis
+  margin plus a minimum dwell time, so it does not oscillate; region and cell budgets
+  coarsen the lowest-priority regions first and report the demotion; POST
+  /api/v1/lidar/adaptive-map and POST /api/v1/map/adaptive/reset;
+  ADR-037/038/039/040/041). THE DETAIL PRIORITY IS NOT A PROBABILITY OF COLLISION and is
+  not a safety margin: it is an engineering prioritisation score, never calibrated and
+  never validated, because no labelled data exists. Whether the allocation is *appropriate*
+  is unmeasured and unmeasurable. Measured in Experiment 007: adaptive costs 0.06-0.30x the
+  cells of a 0.25 m uniform map but MORE cells than a 1.0 m one, and adaptive mapping is
+  slower in wall-clock time than the fixed mapper in every scene - cost scales with region
+  count, not cells. The fixed-resolution mapper is retained unchanged as the baseline. No
+  learned policy, no ego planned path, no per-cell risk field, no occlusion model.
+- Phase 9: CARLA - TODO (next)
 - Phase 10: Scenario generation and replay - TODO
 - Phase 11: Benchmarking - TODO
 - Phase 12: Dashboard and final integration - TODO

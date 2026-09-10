@@ -13,8 +13,8 @@ unchanged as the proximity-only comparison reference.
 
 **Risk does not decide resolution.** How much spatial detail a region receives
 is a separate decision, made by a
-:class:`~adaptx.mapping.interfaces.ResolutionController` that does not exist
-(ADR-036).
+:class:`~adaptx.mapping.interfaces.ResolutionController`, which consumes these
+assessments and is never consulted by this engine (ADR-036).
 """
 
 from adaptx.risk.baseline import BaselineProximityRiskEngine

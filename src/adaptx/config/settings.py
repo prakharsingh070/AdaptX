@@ -18,6 +18,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from adaptx.models.map import ResolutionLevel
+
 
 class Environment(StrEnum):
     """Deployment environment."""
@@ -472,6 +474,21 @@ class MapSettings(BaseModel):
         ),
     )
 
+    @property
+    def level_cell_sizes(self) -> dict[ResolutionLevel, float]:
+        """Cell edge length in metres for each resolution level, coarse to fine.
+
+        The single definition of the level vocabulary. A resolution controller
+        reads it rather than restating the mapping, so a configuration change
+        moves both together.
+        """
+        return {
+            ResolutionLevel.LOW: self.resolution_low_m,
+            ResolutionLevel.MEDIUM: self.resolution_medium_m,
+            ResolutionLevel.HIGH: self.resolution_high_m,
+            ResolutionLevel.CRITICAL: self.resolution_critical_m,
+        }
+
     @model_validator(mode="after")
     def _check_monotonic(self) -> MapSettings:
         sizes = [
@@ -507,6 +524,197 @@ class MapSettings(BaseModel):
                 f"{width * height} cells, above map.max_cells ({self.max_cells})"
             )
         return self
+
+
+class AdaptiveResolutionSettings(BaseModel):
+    """Adaptive spatial resolution policy (Phase 8).
+
+    The controller decides how much detail each **region** of the map receives.
+    The resolution *vocabulary* - what LOW/MEDIUM/HIGH/CRITICAL mean in metres -
+    stays in :class:`MapSettings`, so there is one definition of a level and
+    this section only says how one is chosen.
+
+    Every value here is a **baseline engineering parameter**, chosen as a
+    plausible starting point for an automotive scene. None has been tuned or
+    validated against labelled data, because no labelled data exists, and none
+    is a safety-certified limit. The priority they combine into is a
+    prioritisation score, **not** a probability and not a safety margin.
+
+    Coordinate convention as everywhere else (ADR-009): +x forward, +y left,
+    +z up, metres, ego reference at the origin.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When false the controller assigns base_level everywhere and says "
+            "so in each decision, rather than silently behaving like Phase 6."
+        ),
+    )
+
+    # -- tiling ------------------------------------------------------------
+    tile_size_m: float = Field(
+        default=10.0,
+        gt=0.0,
+        description=(
+            "Edge length of one square region. Resolution is decided per tile, "
+            "never per point: per-point allocation would fragment the map "
+            "beyond any useful representation (ADR-037)."
+        ),
+    )
+
+    # -- level vocabulary --------------------------------------------------
+    base_level: ResolutionLevel = Field(
+        default=ResolutionLevel.LOW,
+        description="Level for a region no object influences. Coarsest by default.",
+    )
+    unknown_risk_min_level: ResolutionLevel = Field(
+        default=ResolutionLevel.MEDIUM,
+        description=(
+            "Floor applied to a region influenced by an object whose risk could "
+            "not be scored. Unknown is not low risk (ADR-032), so such a region "
+            "may never receive the coarsest level."
+        ),
+    )
+
+    # -- priority thresholds ----------------------------------------------
+    threshold_medium: float = Field(default=0.35, ge=0.0, le=1.0)
+    threshold_high: float = Field(default=0.60, ge=0.0, le=1.0)
+    threshold_critical: float = Field(default=0.85, ge=0.0, le=1.0)
+
+    # -- factor weights ----------------------------------------------------
+    # Combined as a weighted mean over the factors actually available; a factor
+    # that could not be computed is dropped and the remaining weights
+    # renormalise, never treated as zero (the ADR-032 rule, one phase later).
+    weight_risk: float = Field(default=0.35, ge=0.0)
+    weight_uncertainty: float = Field(
+        default=0.20,
+        ge=0.0,
+        description=(
+            "Uncertainty is an independent input, not a second risk score "
+            "(ADR-033). A poorly observed region can deserve detail precisely "
+            "because it is poorly observed."
+        ),
+    )
+    weight_proximity: float = Field(default=0.15, ge=0.0)
+    weight_trajectory: float = Field(default=0.15, ge=0.0)
+    weight_density: float = Field(default=0.10, ge=0.0)
+    weight_motion: float = Field(default=0.05, ge=0.0)
+
+    # -- factor normalisation ---------------------------------------------
+    proximity_near_m: float = Field(
+        default=10.0, gt=0.0, description="At or inside this distance the proximity factor is 1.0."
+    )
+    proximity_far_m: float = Field(
+        default=50.0, gt=0.0, description="At or beyond this distance the proximity factor is 0.0."
+    )
+    density_saturation_objects: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "Influencing objects at which the density factor saturates at 1.0. "
+            "Bounded so a crowd cannot dominate every other factor."
+        ),
+    )
+    motion_saturation_mps: float = Field(
+        default=15.0, gt=0.0, description="Measured speed at which the motion factor saturates."
+    )
+
+    # -- spatial influence -------------------------------------------------
+    influence_radius_m: float = Field(
+        default=8.0,
+        gt=0.0,
+        description=(
+            "How far one object raises the priority of surrounding regions. "
+            "Bounded so a single object can never refine the whole map."
+        ),
+    )
+    uncertainty_radius_gain_m: float = Field(
+        default=4.0,
+        ge=0.0,
+        description="Extra influence radius at maximum uncertainty: a vaguer object reaches wider.",
+    )
+    trajectory_corridor_m: float = Field(
+        default=4.0,
+        gt=0.0,
+        description=(
+            "Half-width of the corridor a predicted path marks as relevant. "
+            "Predicted-motion relevance only - it is not a collision test."
+        ),
+    )
+
+    # -- stabilisation -----------------------------------------------------
+    hysteresis_margin: float = Field(
+        default=0.08,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Priority must fall this far below the band it currently holds "
+            "before a coarser level is even proposed. Refinement has no such "
+            "margin: detail is cheap to gain and slow to give up (ADR-039)."
+        ),
+    )
+    min_dwell_frames: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Consecutive frames a coarser level must be proposed before it is "
+            "applied. Upgrades apply on the first frame."
+        ),
+    )
+
+    # -- budgets -----------------------------------------------------------
+    max_tiles: int = Field(
+        default=4_096, ge=1, description="Hard ceiling on regions in one plan (ADR-040)."
+    )
+    max_total_cells: int = Field(
+        default=1_000_000,
+        ge=1,
+        description=(
+            "Hard ceiling on cells across every tile. Exceeding it coarsens the "
+            "lowest-priority regions first, and the demotion is reported."
+        ),
+    )
+    max_fine_tiles: int = Field(
+        default=64,
+        ge=0,
+        description="Ceiling on regions at HIGH or CRITICAL, so refinement stays concentrated.",
+    )
+    max_influencing_objects: int = Field(
+        default=512,
+        ge=1,
+        description=(
+            "Upper bound on assessments projected into regions in one pass. "
+            "Assessments beyond it are recorded as excluded rather than "
+            "silently dropped."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_thresholds(self) -> AdaptiveResolutionSettings:
+        if not (self.threshold_medium < self.threshold_high < self.threshold_critical):
+            raise ValueError("adaptive resolution thresholds must satisfy medium < high < critical")
+        return self
+
+    @model_validator(mode="after")
+    def _check_factors(self) -> AdaptiveResolutionSettings:
+        if self.proximity_near_m >= self.proximity_far_m:
+            raise ValueError("adaptive.proximity_near_m must be < adaptive.proximity_far_m")
+        if self.total_weight <= 0.0:
+            raise ValueError("adaptive resolution factor weights must not all be zero")
+        return self
+
+    @property
+    def total_weight(self) -> float:
+        """Sum of the factor weights, used to renormalise available factors."""
+        return (
+            self.weight_risk
+            + self.weight_uncertainty
+            + self.weight_proximity
+            + self.weight_trajectory
+            + self.weight_density
+            + self.weight_motion
+        )
 
 
 class RiskSettings(BaseModel):
@@ -644,6 +852,7 @@ class Settings(BaseSettings):
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
     prediction: PredictionSettings = Field(default_factory=PredictionSettings)
     map: MapSettings = Field(default_factory=MapSettings)
+    adaptive: AdaptiveResolutionSettings = Field(default_factory=AdaptiveResolutionSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     websocket: WebSocketSettings = Field(default_factory=WebSocketSettings)
 
