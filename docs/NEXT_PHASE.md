@@ -8,6 +8,23 @@ Handoff for the next work item. Read [`PROJECT_STATE.md`](PROJECT_STATE.md) firs
 
 ---
 
+## Three questions, three phases
+
+The separation matters more than any individual implementation choice. Each phase answers
+exactly one question and must not answer another's:
+
+| Phase | Question | Status |
+|---|---|---|
+| **6** Mapping | *How do we represent space at a **fixed** resolution?* | Done |
+| **7** Risk | *How **concerning** is this object?* | Done |
+| **8** Adaptive resolution | *How much **spatial detail** should this region receive?* | **This phase** |
+
+Phase 7 deliberately cannot answer Phase 8's question: it is never handed a cell size, and
+`RiskAssessment` carries no resolution field (ADR-036). Phase 6 deliberately cannot answer
+it either: the mapper applies a resolution it is given and never chooses one (ADR-029).
+
+Phase 8 is the missing middle, and it is the phase this project exists for.
+
 ## This is the phase the project exists for
 
 Every phase so far has built a piece. Phase 8 connects the last two and **tests the central
@@ -44,6 +61,21 @@ already exists (`models/map.py`) carrying exactly the inputs a controller needs:
 
 Populating that contract from Phase 7 `RiskAssessment` values is most of the work.
 
+## What Phase 8 must eventually provide
+
+Not all of it has to land in one commit, but the design should leave room for all of it:
+
+- a `ResolutionController` implementation and the `ResolutionDecision`s it produces
+- an adaptive map representation genuinely carrying **more than one** cell size
+- region- or tile-based adaptation, at a documented granularity
+- influence from **risk**, **uncertainty**, predicted **trajectories**, and object presence
+- object density where it is genuinely informative rather than decorative
+- deterministic decisions with **explicit tie-breaking**
+- hysteresis or an equivalent anti-oscillation mechanism
+- bounded memory and a bounded region/cell count, checked **before** allocation
+- a fixed-versus-adaptive comparison over identical input
+- API, telemetry, benchmark and tests, following the shapes Phases 6 and 7 already use
+
 ## Inputs available
 
 | From | Field | Note |
@@ -73,6 +105,40 @@ that. Hysteresis, smoothing or a minimum dwell time — pick one, document it, a
 a region on a threshold boundary does not flip every frame**. An oscillating map is worse
 than a uniform one: it costs more and produces unstable output.
 
+## The twelve rules
+
+Numbered so a review can cite them. The first six are correctness; the rest are honesty and
+scope. Rules 1, 2 and 5 each undo a specific, deliberate decision from an earlier phase if
+broken — they are not style preferences.
+
+1. **`risk_score is None` must not become `0.0`.** `UNKNOWN` is not `LOW`. Coercing it
+   allocates the coarsest detail to the objects the system understands least — the exact
+   inversion ADR-032 exists to prevent.
+2. **Uncertainty is not another risk score.** Do not simply add it to risk. Phase 7 kept them
+   separate (ADR-033) *so this phase can use both*. A low-risk, badly observed region is a
+   strong argument for more detail.
+3. **Phase 7 must not decide resolution.** If the controller needs something Phase 7 does not
+   expose, add it to `ResolutionContext` — do not push a resolution decision back into the
+   risk engine (ADR-036).
+4. **`FixedResolutionMapper` must remain intact.** It is the baseline the comparison rests
+   on. If it must change, the boundary in ADR-029 was wrong; say so explicitly rather than
+   editing quietly.
+5. **Unobserved space is not free space.** An empty cell may be empty or occluded, and the
+   map cannot tell (ADR-031, ADR-034). Never coarsen a region because nothing was observed
+   there — that reduces detail exactly where the sensor saw least.
+6. **Resolution must not oscillate** around a threshold. Document the stabilisation mechanism
+   and test a region sitting exactly on a boundary across several frames.
+7. **Adaptive mapping must be bounded.** Compute region and cell counts *before* allocating,
+   and reject a configuration that would exceed the limit — as `grid_shape` already does
+   (ADR-028).
+8. **Decisions must be deterministic**, including tie-breaking. Same assessments, same map,
+   same configuration → byte-identical decisions.
+9. **No collision-probability claims.** No calibrated probability model exists anywhere in
+   this project.
+10. **No safety-certification claims.** Thresholds are baseline engineering values.
+11. **No real-time claims** without measurement, and none from a synthetic benchmark at all.
+12. **No ML, GPU/CUDA, CARLA or dashboard work** in Phase 8.
+
 ## Expected outputs
 
 Reuse the existing contracts. Do **not** create parallel ones:
@@ -95,21 +161,44 @@ deliberately does not make for you. Options, none free:
   Phase 6 unchanged, but costs several full grids.
 - **A region-partitioned map.** Tile the extent and assign each tile a level. Needs a new map
   representation and a decision about tile granularity.
-- **A hierarchical grid.** Coarse base with refined sub-blocks. Most efficient, most complex,
-  and hardest to serialise for the dashboard.
+- **A hierarchical / quadtree-like grid.** Coarse base with refined sub-blocks. Most
+  efficient, most complex, and hardest to serialise for the dashboard.
+- **Multi-layer grids.** One full grid per resolution level, with a rule for which layer owns
+  a region. Conceptually simple and easy to compare against the baseline, but memory scales
+  with the number of levels.
 
-Whichever you choose, **write an ADR before implementing it**, and keep `AdaptiveMap.is_adaptive`
-meaningful so fixed and adaptive results can never be confused (ADR-003).
+**This decision is deliberately left open.** It is the one genuine architectural question
+Phase 8 must answer, and answering it here without reading the current code would be
+guessing. Inspect `models/spatial_map.py`, `mapping/grid_mapper.py` and how `AdaptiveMap`
+is consumed, then pick one.
+
+Whichever you choose, **write it up as ADR-037 before implementing**, with context,
+decision, alternatives, consequences and risks — the shape every ADR in this project uses.
+Keep `AdaptiveMap.is_adaptive` meaningful so fixed and adaptive results can never be
+confused (ADR-003).
 
 ## Measurement — this is the deliverable
 
-Experiment 007 must run **fixed and adaptive over identical input** and report:
+Experiment 007 must run **`FixedResolutionMapper` versus the adaptive mapper over identical
+deterministic input** and report, at minimum:
 
-- total cells, occupied cells, and cell count per resolution level
-- mapping duration and peak memory
-- **cells spent on high-risk regions vs low-risk regions** — the number the whole claim rests on
-- what the adaptive map loses: where it is coarser than the fixed baseline, and what that
-  costs in represented detail
+| Metric | Why |
+|---|---|
+| mapping latency | the cost of building the map |
+| controller latency | the cost of *deciding*, separated from building |
+| total latency | what a caller actually pays |
+| total cells | the workload headline |
+| occupied cells | how much of that workload held data |
+| resolution distribution | cells at each level |
+| finest / coarsest / average resolution | whether adaptation genuinely varied |
+| peak memory | the other half of the workload claim |
+| number of resolution changes between frames | stability, and evidence rule 6 holds |
+| **cells spent on high-risk vs low-risk regions** | the number the whole claim rests on |
+| what the adaptive map loses | where it is coarser than the baseline, and what detail that costs |
+
+Label it exactly as every other experiment is labelled:
+
+> Synthetic benchmark. Not a real-world autonomous-driving performance claim.
 
 Phase 6 measured the problem: occupancy falls to 1–16% at 0.25 m, so a uniform fine map
 spends most of its cells recording that nothing was observed (Experiment 005). **That is the

@@ -138,7 +138,10 @@ every component in `services/system_service.py` agree with the list below.
   intersection, no spatial risk field, no ego planned path. RISK DOES NOT
   DECIDE SPATIAL RESOLUTION - that is Phase 8. The proximity-only baseline is
   retained unchanged for comparison.
-- Phase 8: Adaptive resolution - TODO
+- Phase 8: Adaptive resolution - **NEXT, NOT STARTED**. `ResolutionController` is an
+  abstract contract with zero implementations. This is the phase that tests the
+  project's central claim. Full handoff, constraints and the one unresolved
+  architectural question: `docs/NEXT_PHASE.md`.
 - Phase 9: CARLA - TODO
 - Phase 10: Scenario generation and replay - TODO
 - Phase 11: Benchmarking - TODO
@@ -146,14 +149,45 @@ every component in `services/system_service.py` agree with the list below.
 
 ## Start Here
 
-New session? Read `docs/PROJECT_STATE.md` first — it is the current snapshot of what is
-implemented, verified and off-limits. Then `docs/PHASE_HISTORY.md` for how the project got
-here, and `docs/NEXT_PHASE.md` for the agreed next work item.
+**The repository is the source of truth, not any conversation.** These documents are this
+project's persistent memory: they are written so a session starting with no history can pick
+the work up. Keep them that way — when a phase lands, update them in the same commit.
 
-Note: the earlier phase-numbering discrepancy is resolved. Trajectory prediction is
-**Phase 5**; 2.5D mapping, risk and adaptive resolution are Phases 6, 7 and 8. This file,
-`docs/ROADMAP.md` and `services/system_service.py` all use those numbers. The phase
-headings in `docs/PHASE_HISTORY.md` are a historical record and were left as written.
+Read in this order:
+
+1. `docs/PROJECT_STATE.md` — the current snapshot: what is implemented, the git checkpoint,
+   what is verified, what must not change. **Start here.**
+2. `docs/NEXT_PHASE.md` — the agreed next work item, its constraints and its open questions.
+3. `docs/PHASE_HISTORY.md` — how the project got here, phase by phase, including defects
+   found and decisions reversed.
+4. `docs/decisions/architecture-decisions.md` — ADR-001 … ADR-036. Read the ones a module
+   cites before changing it.
+5. `docs/experiments/experiment-log.md` — every measured result. Experiments 001–006.
+
+Then **inspect the actual code** for the module you are about to touch. Where documentation
+and implementation disagree, the implementation wins and the document is the thing to fix.
+
+### Working rules
+
+- **Preserve earlier phases.** Do not rewrite Phase 1–7 algorithms without a measured defect.
+  If a compatibility change is genuinely required: explain why, make the smallest change, add
+  a regression test, and say so in the report.
+- **Never claim an unimplemented feature**, in code, docs, status endpoints or commit
+  messages. A baseline is reported `PARTIAL`, never `IMPLEMENTED`.
+- **Never invent a benchmark number.** Measure it, label it synthetic, or omit it.
+- **Never weaken or delete a test to make a suite pass.** If a premise genuinely changed,
+  retarget the test to guard the same property and report that you did.
+- **Do not start a future phase** without being asked. Finishing Phase N does not authorise
+  Phase N+1.
+- **Verify git before branching.** Local `main` has been left behind before; check it against
+  `origin/main` rather than assuming.
+
+### Phase numbering
+
+The earlier discrepancy is resolved. Trajectory prediction is **Phase 5**; 2.5D mapping,
+risk and adaptive resolution are Phases 6, 7 and 8. This file, `docs/ROADMAP.md` and the
+`phase` field in `services/system_service.py` all use those numbers. The phase headings in
+`docs/PHASE_HISTORY.md` are a historical record and were left as originally written.
 
 ## Knowledge Base
 

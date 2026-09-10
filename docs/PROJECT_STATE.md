@@ -30,16 +30,46 @@ and adaptive resolution each shifted one later (now 6, 7, 8). `CLAUDE.md`,
 agree. Phase headings in [`PHASE_HISTORY.md`](PHASE_HISTORY.md) are a historical record and
 were deliberately left as originally written.
 
-## 3. Branch and status
+## 3. Git checkpoint
 
-- Branch: `phase-7-risk-uncertainty`
-- Phases 1 through 4 are committed and merged (PR #1 and PR #2)
-- Phase 5 is committed on `phase-5-trajectory-prediction` (commit `8fb844d`), not pushed
-- Phase 6 is committed on `phase-6-spatial-mapping` (commit `dae152b`), not pushed
-- Phase 7 is in the working tree
+Verified against `git` on 2026-09-10. **Everything through Phase 7 is committed, pushed and
+merged.** There is no uncommitted work.
 
-> A previous version of this file claimed Phases 2B–4 were uncommitted and unpushed. That
-> was stale: they are commit `e3677dd`, merged as PR #2.
+| | |
+|---|---|
+| Branch | `phase-7-risk-uncertainty` |
+| HEAD | `a652622f00282755898c4bc9fa00880b9a5eb646` (`a652622`) |
+| HEAD message | `feat: add deterministic risk and uncertainty engine` |
+| Parent | `73f08e3` |
+| `origin/main` | `5f68a5e` — *Merge pull request #4 from prakharsingh070/phase-7-risk-uncertainty* |
+| Working tree | clean |
+| HEAD vs `origin/main` | 0 ahead — HEAD is **contained in** `origin/main` |
+
+Merged history, newest first:
+
+```
+5f68a5e  Merge PR #4  <- phase-7-risk-uncertainty
+a652622  feat: add deterministic risk and uncertainty engine      (Phase 7)
+43b6fc2  Merge PR #3  <- phase-6-spatial-mapping
+73f08e3  Add dashboard design reference
+dae152b  feat: add deterministic 2.5D spatial mapping baseline    (Phase 6)
+8fb844d  feat: add trajectory prediction baseline                 (Phase 5)
+0c3806d  Merge PR #2  <- phase-2a-lidar-preprocessing             (Phases 2-4)
+14f5e3f  Merge PR #1  <- phase-1-foundation                       (Phase 1)
+```
+
+> **Local `main` is stale — 6 commits behind `origin/main`.** It still points at `0c3806d`.
+> Before starting Phase 8, fast-forward it or branch from `origin/main`:
+>
+> ```bash
+> git checkout main && git pull --ff-only origin main
+> ```
+>
+> Branching Phase 8 off local `main` as it stands would silently lose Phases 5, 6 and 7.
+> This has caught a session out before.
+
+Phase branches `phase-5-trajectory-prediction` and `phase-6-spatial-mapping` still exist
+locally and are fully merged; they can be deleted safely.
 
 ## 4. Architecture implemented
 
@@ -73,6 +103,29 @@ does not read detections, tracks or trajectories, and stays independently usable
 
 Every stage measures its own duration with `time.perf_counter`. Every result carries a
 configuration snapshot so a record is self-describing.
+
+### What each phase delivered
+
+Full narrative per phase — objective, decisions, defects found, measurements — is in
+[`PHASE_HISTORY.md`](PHASE_HISTORY.md). This table is the index.
+
+| Phase | Status | Delivered | Key ADRs |
+|---|---|---|---|
+| **1** Foundation | Done | Package, typed settings, structured logging, exception→HTTP mapping, all data contracts, every module interface, FastAPI + `/ws/telemetry`, CARLA boundary (optional dep, real client + mock), Docker | 004, 005, 006, 007, 008 |
+| **2A** LiDAR input | Done | Structural validation, NaN/Inf removal, ROI box, 3D range filter. NumPy masks over the original array, so counts partition the input exactly | 009, 010, 011 |
+| **2B** Downsampling | Done | Voxelisation keeping a **real measured point**; per-cell-lowest ground segmentation; grid-approximated noise filter. All three **opt-in**. Guarded int64 quantiser after an overflow defect | 012, 013, 014, 015, 016 |
+| **2C** Pipeline | Done | `LiDARProcessingPipeline` orchestrating 7 stages, per-stage measured timing, `overhead_ms` reported separately, synthetic benchmark datasets, fixed-resolution *processing* baseline | 017, 018, 019 |
+| **3** Detection | Done | Grid connected-component clustering (not DBSCAN), dimension-band classification, `UNKNOWN` on ambiguity, rejected clusters reported with reasons | 020, 021, 022 |
+| **4** Tracking | Done | Gated greedy nearest-neighbour association, velocity measured from frame timestamps, TENTATIVE/CONFIRMED/COASTING/LOST lifecycle, stateful service on the context | 023, 024, 025 |
+| **5** Prediction | Done | Constant-velocity extrapolation `p + v·(age_s + t)`, 13 points over 3.0 s, heuristic uncertainty growing with time, `velocity is None` → **no trajectory** + recorded skip | 026, 027 |
+| **6** Mapping | Done | Bounded dense XY grid, uniform cell size, binary occupancy, per-cell point count and min/max/mean height, **null** height where unobserved, full point accounting, frame-local | 028, 029, 030, 031 |
+| **7** Risk | Done | Object-level risk from 3 factors as a weighted mean **over available factors**, `UNKNOWN` + null score, uncertainty reported **separately** with visible reasons, map context never lowers risk, aggregate by maximum | 032, 033, 034, 035, 036 |
+| **8** Adaptive resolution | **NEXT** | Nothing. `ResolutionController` is an ABC with zero implementations | — |
+| 9–12 | Future | CARLA, scenarios/replay, fixed-vs-adaptive evaluation, dashboard | — |
+
+**Every implemented phase is a deterministic, explainable baseline behind an interface,
+labelled `is_baseline`, with its failure modes asserted by tests.** None is a finished
+subsystem, and no phase has added a dependency beyond the Phase 1 set.
 
 ## 5. Module structure
 
@@ -198,12 +251,31 @@ Optional extras declared but **not installed**: `open3d` (`[pointcloud]`), `carl
   rose 0.5 → 2.0 m; the track's first frame produced **no trajectory** and an explicit
   `insufficient_velocity` skip
 
-Benchmarks (`python -m adaptx.benchmark [--detect|--track|--predict|--map]`) — all
+Benchmarks (`python -m adaptx.benchmark [--detect|--track|--predict|--map|--risk]`) — all
 synthetic, **speed only**: pipeline ~213 ms/100k points; detection ~3.4 ms at that size;
 tracking ~10.6 ms at 100 objects; prediction ~27 ms at 100 tracks (13 points each); mapping
 ~17 ms at 98k points and 1.0 m cells, rising to ~52 ms at 0.25 m; risk ~7.4 ms at 100
 objects (~74 µs each). Measured results in
 [`experiments/experiment-log.md`](experiments/experiment-log.md).
+
+### Architectural integrity checks
+
+Re-run these before and after any Phase 8 work. They encode the boundaries the project's
+central claim depends on, and all six passed at commit `a652622`:
+
+| Check | How to verify | Status at `a652622` |
+|---|---|---|
+| No `ResolutionController` leakage into risk | AST scan of `risk/`, `models/risk_assessment.py`, `services/risk_service.py`, `api/routes/risk.py` for `ResolutionController`/`ResolutionDecision`/`ResolutionLevel`/`MapSettings`/`AdaptiveMapper` | **clean** |
+| Risk does not decide resolution | No resolution/cell field on `RiskAssessment`, `RiskAssessmentResult`, `RiskConfiguration`; `GET /api/v1/risk/status` reports `decides_resolution: false` | **clean** |
+| `risk_score is None` for `UNKNOWN` | Assess a `LOST` track → `risk_level == UNKNOWN`, `risk_score is None` | **holds** |
+| Uncertainty separate from risk | Two tracks identical but for observability → **same** `risk_score`, different `uncertainty.score` | **holds** (0.5714 vs 0.5714; 0.25 vs 0.45) |
+| Unobserved cells never reduce risk | Same track with no map vs an empty-cell map → score never lower | **holds** (0.5714 → 0.5714) |
+| `FixedResolutionMapper` intact | `git diff origin/main -- src/adaptx/mapping/` | **identical** |
+
+The one legitimate exception: `risk/heuristic.py` reads `SpatialMap.resolution_m` to find
+which cell an object occupies. That is cell **lookup**, not resolution **selection**, and it
+lives in a `staticmethod` receiving only `(track, spatial_map)` — structurally unable to see
+a risk value.
 
 ## 15. Known limitations — do not hide these
 

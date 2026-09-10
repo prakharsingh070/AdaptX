@@ -431,4 +431,40 @@ than zero, and the Phase 8 boundary confirmed absent from every response.
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
-visible. No phase has added a dependency beyond the Phase 1 set - seven phases, zero new dependencies.
+visible. No phase has added a dependency beyond the Phase 1 set - seven phases, zero new
+dependencies.
+
+Three habits recur and are worth keeping:
+
+- **Unmeasured is never zero.** ADR-023 established it for velocity, ADR-031 for unobserved
+  height, ADR-032 for a missing risk factor. Each time, the tempting default would have made
+  the least-understood thing look the most benign.
+- **Every module reports what it declined and why.** Rejected clusters (ADR-022), unmatched
+  detections (ADR-024), skipped trajectories (ADR-027), out-of-bounds points (ADR-028),
+  unassessable tracks (ADR-032). "Saw nothing" and "saw something and turned it down" stay
+  distinguishable.
+- **A defect found is written down.** `min_points` re-applied to pipeline output, an
+  infinity serialising as `null`, `astype(int64)` overflow, a route helper mutating a
+  module-level router, eleven full-grid allocations where six sufficed. All fixed, all
+  recorded above rather than quietly patched.
+
+---
+
+## Where this leaves Phase 8
+
+Phases 6 and 7 were built to meet in Phase 8 and were deliberately kept from knowing about
+each other. Phase 6 applies a resolution it is handed and never chooses one (ADR-029).
+Phase 7 measures concern and is never handed a cell size (ADR-036). The controller between
+them does not exist: `ResolutionController` is an abstract contract with **zero
+implementations**, and `ResolutionSource.ADAPTIVE` has been reserved since Phase 6 and never
+produced.
+
+That makes Phase 8 the first phase that can test the project's central claim — that
+risk-aware resolution beats uniform resolution — and the first whose headline result could
+legitimately be negative. Experiment 005 measured the problem it must beat: occupancy falls
+to 1-16% at 0.25 m, so a uniform fine map spends most of its cells recording that nothing
+was observed.
+
+The handoff, its constraints and the one unresolved architectural question are in
+[`NEXT_PHASE.md`](NEXT_PHASE.md). **Phase 8 is not started.** Nothing in this file should
+be read as describing it.
