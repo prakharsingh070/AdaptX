@@ -544,3 +544,140 @@ No correctness claim is made or possible.
 **Conclusion:**
 
 **Artifacts:** Links or paths to configuration, raw measurements, logs, and plots.
+
+---
+
+## Experiment 007 - Phase 8 adaptive resolution versus the fixed baseline
+
+**Date:** 2026-09-11
+
+**Scenario:** Eight synthetic scenes over a 120 m square map, each built to differ in exactly
+one thing the resolution policy is supposed to notice: `open_empty`,
+`single_low_risk_object`, `single_high_risk_object`, `multiple_objects`, `high_uncertainty`,
+`predicted_trajectory`, `dense_scene` and `mixed_complexity`. Every scene is ground returns
+plus a block of returns per object.
+
+Risk, uncertainty and speed are **stated per object rather than derived**, so a scenario
+isolates the factor it is named for instead of depending on what the Phase 7 heuristic happens
+to produce for a given geometry. `high_uncertainty` includes two objects whose risk could not
+be scored at all (`risk_score = None`), which is the case the allocation must not read as
+quiet.
+
+Each scene is mapped twice from identical input: once by the Phase 6 `FixedResolutionMapper`
+at a uniform cell size, once by the Phase 8 controller and `TiledAdaptiveMapper`. Planning and
+mapping are timed separately, because they scale with different things.
+
+**Random seed:** 20260101, fixed. The scenes and the allocation are both deterministic; a
+repeat run reproduces the level distribution and the cell counts exactly.
+
+**Hardware and software:** Windows 11, 16 logical CPUs, Python 3.13.7, NumPy 2.5.3,
+adaptx 0.1.0. Single-threaded.
+
+**Configuration:** Defaults - 10 m regions, levels LOW/MEDIUM/HIGH/CRITICAL at 1.0 / 0.5 /
+0.2 / 0.1 m, thresholds 0.35 / 0.60 / 0.85, weights 0.35 risk / 0.20 uncertainty / 0.15
+proximity / 0.15 trajectory / 0.10 density / 0.05 motion, influence radius 8 m widened by up
+to 4 m with uncertainty, hysteresis margin 0.08, minimum dwell 3 frames. Budgets were set wide
+enough not to bind (4,096 regions, 4,000,000 cells, 64 fine regions); `demoted` is 0 in every
+case below, so these figures measure the policy and not the budget.
+
+**Measurement window:** 3 warm-up passes discarded, 9 timed repeats, median reported. A fresh
+controller is constructed for each repeat so stabilisation state cannot change what is
+measured. Peak memory measured in a separate dedicated `tracemalloc` run.
+
+### Cells: adaptive against three uniform baselines
+
+The map is 120 m square, so the uniform baselines are 14,400 cells at 1.0 m, 57,600 at 0.5 m
+and 230,400 at 0.25 m. Adaptive cell counts do not depend on the baseline - the same plan is
+compared against each.
+
+| Scene | Objects | Regions LOW/MED/HIGH/CRIT | Adaptive cells | vs 1.0 m | vs 0.5 m | vs 0.25 m | Cells on high-priority regions |
+|---|---|---|---|---|---|---|---|
+| open_empty | 0 | 144 / 0 / 0 / 0 | 14,400 | 1.000 | 0.250 | 0.062 | n/a |
+| single_low_risk_object | 1 | 144 / 0 / 0 / 0 | 14,400 | 1.000 | 0.250 | 0.062 | n/a |
+| single_high_risk_object | 1 | 140 / 3 / 1 / 0 | 17,700 | 1.229 | 0.307 | 0.077 | 14.1% |
+| multiple_objects | 4 | 132 / 10 / 2 / 0 | 22,200 | 1.542 | 0.385 | 0.096 | 22.5% |
+| high_uncertainty | 3 | 117 / 24 / 3 / 0 | 28,800 | 2.000 | 0.500 | 0.125 | 26.0% |
+| predicted_trajectory | 1 | 134 / 10 / 0 / 0 | 17,400 | 1.208 | 0.302 | 0.076 | n/a |
+| dense_scene | 45 | 44 / 88 / 12 / 0 | 69,600 | 4.833 | 1.208 | 0.302 | 43.1% |
+| mixed_complexity | 3 | 135 / 5 / 4 / 0 | 25,500 | 1.771 | 0.443 | 0.111 | 39.2% |
+
+### Latency, and the result that matters most
+
+| Scene | Planning ms | Adaptive mapping ms | Fixed mapping ms (0.5 m) | Adaptive total ms |
+|---|---|---|---|---|
+| open_empty | 6.80 | 26.01 | 6.32 | 32.81 |
+| single_high_risk_object | 7.93 | 26.92 | 6.52 | 34.85 |
+| multiple_objects | 9.47 | 30.05 | 6.59 | 39.52 |
+| high_uncertainty | 8.99 | 26.82 | 6.12 | 35.81 |
+| predicted_trajectory | 8.32 | 25.00 | 5.35 | 33.32 |
+| dense_scene | 13.03 | 32.21 | 8.20 | 45.24 |
+| mixed_complexity | 9.07 | 25.47 | 5.30 | 34.54 |
+
+### What drives adaptive mapping cost
+
+The latency above is dominated by neither cells nor points. Holding the cell count **exactly
+constant at 14,400** on the empty scene and varying only the tile size:
+
+| Tile size | Regions | Cells | Adaptive mapping ms | µs per region |
+|---|---|---|---|---|
+| 5 m | 576 | 14,400 | 77.20 | 134 |
+| 10 m | 144 | 14,400 | 26.69 | 185 |
+| 20 m | 36 | 14,400 | 13.50 | 375 |
+| 30 m | 16 | 14,400 | 10.16 | 635 |
+| 60 m | 4 | 14,400 | 8.94 | 2,234 |
+| 120 m | 1 | 14,400 | 10.43 | 10,426 |
+
+Same cells, same points, 8.6x the time. **Cost scales with region count, not cell count**, at
+roughly 120 µs of fixed overhead per region - three NaN array allocations, a reshape and a
+validated `MapTile` per region. A profile attributes about 78% of a pass to `_build_tile` and
+its model construction, the same "contract construction dominates the arithmetic" finding as
+Experiments 004 and 006.
+
+**Synthetic benchmark; not a real-world autonomous-driving performance claim.**
+
+**Findings, including the unflattering ones:**
+
+- **Adaptive costs more cells than a 1.0 m uniform map in every scene containing an object**
+  (1.21x to 4.83x). This is not a defect, it is arithmetic: the base level *is* 1.0 m, so
+  against that baseline the policy can only ever add cells. Adaptive resolution is a way of
+  affording a fine map, not a way of beating a coarse one.
+- **Against the finer baselines it wins clearly**: 0.30x at 0.5 m and 0.076x at 0.25 m on
+  `mixed_complexity`, and 0.062x at 0.25 m on an empty scene. Experiment 005 measured
+  occupancy falling to 1-16% at 0.25 m - a uniform fine map spending most of its cells
+  recording that nothing was observed. The adaptive map reaches comparable detail *where the
+  priority is* for a twelfth of the cells.
+- **Adaptive mapping is slower in wall-clock time than the fixed mapper in every scene**, even
+  where it allocates a quarter of the cells - 25-32 ms against 5-8 ms at 0.5 m. Detail is
+  bought with cells and paid for in per-region overhead, and at 144 regions the overhead wins.
+  A negative result, measured and reported as such.
+- **The lever is `tile_size_m`, not the resolution vocabulary.** The table above is the
+  evidence. Larger regions cost less and allocate detail more coarsely; that trade is now a
+  measured number rather than a guess.
+- **One small optimisation was applied and did not help.** The mapper was changed to reuse the
+  region extent the plan already carries instead of rebuilding it per region, which also let
+  it validate that the plan geometry matches the tiling. Measured before and after: no change
+  outside run-to-run noise (~27 ms either way). It is retained for the added validation, not
+  for speed. The remaining cost is the per-region array allocation and model construction, and
+  removing that would mean changing the representation - which is where a hierarchical grid
+  would earn its complexity (ADR-037).
+- **The policy differentiates as designed.** `open_empty` and `single_low_risk_object` stay
+  entirely at the base level; `high_uncertainty` refines 27 regions on uncertainty alone, with
+  two of its three objects carrying no risk score at all; `predicted_trajectory` refines 10
+  regions ahead of an object that has not arrived; `mixed_complexity` puts 39.2% of its cells
+  on the 4 regions that reached the HIGH threshold while 135 regions stay coarse.
+- **Peak tracked memory is ~2.0 MB per adaptive pass** across every scene, dominated by the
+  point arrays rather than the grid.
+
+**Not measured, and not measurable:**
+
+- **Map correctness.** No labelled reference map exists. Nothing here says either map is right.
+- **Whether the allocation is appropriate.** No labelled risk data exists, so nothing says the
+  priority ordering is correct - only that it is deterministic, explainable and produces the
+  spatial differentiation it was designed to produce.
+- **What the adaptive map loses.** Where a region sits at LOW the map is coarser than a 0.5 m
+  or 0.25 m uniform baseline would have been, and the structure inside those cells is not
+  recorded. The cell counts above quantify the saving; no measurement quantifies the cost in
+  represented detail, because that would need a reference map.
+- **Any real-world figure.** These are generated scenes with hand-specified risk on one
+  machine.
+

@@ -7,6 +7,8 @@ from fastapi import APIRouter, status
 from adaptx.api.dependencies import ContextDep, LiDARServiceDep
 from adaptx.api.schemas import (
     ErrorResponse,
+    LiDARAdaptiveMapRequest,
+    LiDARAdaptiveMapResponse,
     LiDARDetectionResponse,
     LiDARFrameRequest,
     LiDARFrameResponse,
@@ -425,4 +427,146 @@ def assess_risk(
         },
         map_summary=None if spatial_map is None else spatial_map.summary(),
         summary=processed.output_summary,
+    )
+
+
+@router.post(
+    "/adaptive-map",
+    response_model=LiDARAdaptiveMapResponse,
+    status_code=status.HTTP_200_OK,
+    responses={422: {"model": ErrorResponse, "description": "Malformed point cloud"}},
+    summary="Process, detect, track, predict, assess risk, and map at adaptive resolution",
+)
+def adaptive_map_frame(
+    payload: LiDARAdaptiveMapRequest, service: LiDARServiceDep, context: ContextDep
+) -> LiDARAdaptiveMapResponse:
+    """Run the whole chain, then allocate spatial detail by region.
+
+    **Stateful in two ways**, and both matter. It consumes tracks, so frames
+    must be posted in temporal order with explicit timestamps. It *also*
+    stabilises resolution across frames: each region remembers the level it
+    held and how long a coarser one has been proposed, so a region does not
+    give up detail the instant a score dips. Call
+    ``POST /api/v1/tracking/reset`` and
+    ``POST /api/v1/map/adaptive/reset`` between unrelated sequences, or a new
+    scene inherits the history of the old one.
+
+    **Resolution is decided per region, never per point.** The map extent is
+    partitioned into fixed-size regions and each is given its own cell size,
+    so one map genuinely holds several resolutions at once. Regions partition
+    the extent exactly: no point falls in two of them, and none falls in none.
+
+    **The detail priority is an engineering prioritisation score.** It combines
+    risk, uncertainty, predicted-motion relevance, object density, proximity
+    and measured motion as a weighted mean over the factors actually
+    available. A factor that cannot be computed is dropped and the remaining
+    weights renormalise; it is never treated as zero. The score is **not** a
+    probability of collision, not a safety margin, not calibrated, and has
+    never been validated against labelled data.
+
+    **Uncertainty raises detail on its own.** A quiet but badly observed region
+    can earn a finer level than a confidently quiet one, which is the whole
+    reason risk and uncertainty are kept apart.
+
+    **An object whose risk could not be scored does not make a region quiet.**
+    Its risk factor is dropped rather than counted as zero, and the region
+    takes a conservative floor level. Unknown is not low.
+
+    Occupancy is binary and an unobserved cell reports **null** height, not
+    zero. Every input point is accounted for as mapped or out of bounds.
+
+    Set ``include_fixed_comparison`` to build the Phase 6 fixed-resolution map
+    over the same frame and receive both workloads - what each spent, and where
+    the adaptive cells went. That is the measurement the adaptive claim rests
+    on, and it costs a second full map.
+
+    Returns 422 for the same malformed input as the other LiDAR endpoints, and
+    when the plan would exceed the configured cell ceiling.
+    """
+    try:
+        raw_frame = payload.to_raw_frame()
+    except ValueError as exc:
+        raise InvalidPointCloudError(str(exc)) from exc
+
+    processed = context.preprocessor.run(raw_frame)
+    detection = context.detector.detect(processed.frame)
+    tracking = context.tracking.update(
+        detection.objects,
+        processed.frame.timestamp,
+        frame_id=processed.frame.frame_id,
+        sensor_id=processed.frame.sensor_id,
+    )
+    prediction = context.prediction.predict_from_tracking(tracking)
+
+    # The fixed map is built whenever risk needs spatial context, and reused
+    # for the comparison rather than built twice.
+    spatial_map = (
+        context.mapping.build(processed.frame)
+        if payload.include_map_context or payload.include_fixed_comparison
+        else None
+    )
+    risk = context.risk.assess_from_pipeline(
+        tracking, prediction=prediction, spatial_map=spatial_map
+    )
+    adaptive_map = context.adaptive_mapping.run_from_pipeline(
+        processed.frame, risk, tracking, trajectories=prediction.trajectories
+    )
+
+    upstream_ms = (
+        processed.metrics.duration_ms
+        + detection.duration_ms
+        + tracking.duration_ms
+        + prediction.duration_ms
+        + risk.duration_ms
+        + adaptive_map.plan.duration_ms
+        + adaptive_map.duration_ms
+        + (0.0 if spatial_map is None else spatial_map.duration_ms)
+    )
+    service.ingest(processed.frame, pre_validated=True, upstream_duration_s=upstream_ms / 1000.0)
+
+    plan = adaptive_map.plan
+    decisions = None
+    decisions_truncated = False
+    if payload.include_decisions:
+        decisions = plan.decisions[: payload.max_decisions]
+        decisions_truncated = len(plan.decisions) > payload.max_decisions
+
+    cells = None
+    cells_truncated = False
+    if payload.include_cells:
+        cells, cells_truncated = adaptive_map.to_adaptive_map(max_cells=payload.max_cells)
+
+    comparison = (
+        context.adaptive_mapping.compare_with_fixed(adaptive_map, spatial_map)
+        if payload.include_fixed_comparison and spatial_map is not None
+        else None
+    )
+
+    return LiDARAdaptiveMapResponse(
+        accepted=True,
+        map=adaptive_map.summary(controller_duration_ms=plan.duration_ms),
+        plan_summary={
+            "controller": plan.controller,
+            "policy_model": plan.policy_model,
+            "is_baseline": plan.is_baseline,
+            "frame_index": plan.frame_index,
+            "tile_count": plan.tile_count,
+            "changed_tile_count": plan.changed_tile_count,
+            "considered_assessments": plan.considered_assessment_count,
+            "influencing_assessments": plan.influencing_assessment_count,
+            "excluded_assessments": len(plan.excluded),
+            "tiles_by_level": plan.counts_by_level(),
+            "cells_by_level": plan.cells_by_level(),
+            "highest_priority": plan.highest_priority,
+            "budget": plan.budget.model_dump(mode="json"),
+            "duration_ms": plan.duration_ms,
+        },
+        decisions=decisions,
+        decisions_truncated=decisions_truncated,
+        risk=risk,
+        processing=processed.metrics,
+        summary=processed.output_summary,
+        comparison=comparison,
+        cells=cells,
+        cells_truncated=cells_truncated,
     )

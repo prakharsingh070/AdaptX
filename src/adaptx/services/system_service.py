@@ -123,9 +123,11 @@ def _declared_components() -> list[ComponentStatus]:
                 "binary occupancy, point counts and min/max/mean height per "
                 "cell; an unobserved cell reports null height, never zero. "
                 "Every input point is accounted for as mapped or out of "
-                "bounds. ADAPTIVE RESOLUTION IS NOT IMPLEMENTED: the mapper "
-                "applies a resolution it is given and never chooses one, so no "
-                "region receives more detail than another. Nothing accumulates "
+                "bounds. This mapper applies a resolution it is given and "
+                "never chooses one, so every region receives the same detail; "
+                "risk-aware allocation is a separate component, reported as "
+                "adaptive_resolution, and this baseline is retained unchanged "
+                "for comparison against it. Nothing accumulates "
                 "between frames - this is not a persistent world map, not "
                 "SLAM, and there is no localisation, loop closure, sensor "
                 "fusion or semantic labelling. Occupancy is binary rather than "
@@ -152,11 +154,46 @@ def _declared_components() -> list[ComponentStatus]:
                 "number. No time-to-collision, no trajectory-map intersection, "
                 "no ego planned path, no object interaction, and no spatial "
                 "risk field. RISK DOES NOT DECIDE SPATIAL RESOLUTION - that is "
-                "a separate decision belonging to a resolution controller, "
-                "which is not implemented. The proximity-only baseline is "
-                "retained unchanged for comparison"
+                "a separate decision belonging to the resolution controller "
+                "reported as adaptive_resolution, which consumes these "
+                "assessments and is never consulted by this engine. The "
+                "proximity-only baseline is retained unchanged for comparison"
             ),
             phase=7,
+        ),
+        ComponentStatus(
+            name="adaptive_resolution",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "deterministic heuristic adaptive spatial resolution baseline. "
+                "The map extent is partitioned into fixed-size regions and a "
+                "controller gives each its own cell size, so one map genuinely "
+                "holds several resolutions; regions partition the extent "
+                "exactly, with no gap and no double coverage. The level comes "
+                "from a detail priority combining risk, uncertainty, "
+                "predicted-motion relevance, object density, proximity and "
+                "measured motion as a weighted mean over the factors actually "
+                "available - a factor that cannot be computed is dropped, "
+                "never treated as zero. THE DETAIL PRIORITY IS NOT A "
+                "PROBABILITY OF COLLISION and is not a safety margin: it is an "
+                "engineering prioritisation score, never calibrated and never "
+                "validated against labelled data, because none exists. "
+                "Uncertainty is consumed as an independent input, so a quiet "
+                "but poorly observed region can still earn detail. A region "
+                "influenced by an object whose risk could not be scored takes a "
+                "conservative floor rather than the coarsest level. Resolution "
+                "is stabilised by an asymmetric hysteresis margin plus a "
+                "minimum dwell time, so it does not oscillate between frames; "
+                "that level memory is the only mapping state that survives a "
+                "frame, and no occupancy accumulates. Region and cell budgets "
+                "are enforced by coarsening the lowest-priority regions first, "
+                "and the demotion is reported rather than hidden. No learned "
+                "policy, no reinforcement learning, no ego planned path, no "
+                "per-cell risk field, and no measurement of whether the "
+                "allocation is correct - only of what it costs"
+            ),
+            phase=8,
         ),
         ComponentStatus(
             name="prediction",

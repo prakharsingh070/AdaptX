@@ -1198,6 +1198,224 @@ separation should survive it.
 
 **Status:** Accepted
 
+## ADR-037: Region-Partitioned Tiles for Multi-Resolution Maps
+
+**Decision:** An adaptive map partitions the extent into fixed-size square **tiles**, each
+holding its own dense sub-grid at its own cell size. Tiles are anchored at the map lower
+corner, half-open on their upper edges, and the last row and column are clipped to the
+bounds. Resolution is decided per tile, never per point.
+
+`SpatialMap` is unchanged and remains the fixed-resolution baseline. The adaptive map is a
+new contract, `AdaptiveSpatialMap`, holding `MapTile` objects that carry the same per-cell
+quantities a Phase 6 cell carries, and reusing `MapBounds` and `MapAccounting` rather than
+restating them.
+
+**Reason:** A single dense NumPy grid has exactly one cell size, so an adaptive map cannot be
+one. Something had to give, and the question was what.
+
+Tiling keeps the two properties that matter most. **Lookup stays arithmetic**: the tile of a
+point is one floor division and the cell within it is another, so binning a frame is still
+two vectorised passes rather than a tree descent. **The partition is exact**: tiles cover the
+extent with no gap and no overlap, so a point lands in exactly one cell and point accounting
+survives unchanged - `input == mapped + out_of_bounds` still holds and is still
+model-enforced.
+
+It also keeps Phase 6 intact. The binning arithmetic is the same code path per tile, quantised
+through the same overflow-guarded `cell_indices`, so the adaptive mapper is not a second
+implementation that can drift from the first.
+
+**Alternatives considered:**
+
+*Multiple passes at several uniform resolutions, composed.* Simplest, and reuses the Phase 6
+mapper untouched - but it allocates several full grids to produce one map, which is the exact
+cost adaptive resolution exists to avoid. It also leaves the composition rule undefined where
+two passes disagree.
+
+*A quadtree or hierarchical grid.* The most cell-efficient option, and the most complex.
+Lookup becomes a tree descent, serialising it for a dashboard is awkward, and the refinement
+rule interacts with the stabilisation policy in ways that would be hard to test. Deferred
+rather than rejected: if per-region overhead ever stops dominating (Experiment 007), this is
+where to go next.
+
+*Sparse per-cell storage keyed by coordinate.* Flexible, but a dictionary of cells costs far
+more per cell than a dense array and makes the whole-grid operations trivial today.
+
+**Impact:** One map genuinely holds several resolutions, and `AdaptiveMapCell.resolution_m`
+and `resolution_level` - contracts that existed since Phase 1 and had only ever carried one
+value - now carry real varying ones. `tile_size_m` becomes the lever that trades spatial
+precision of the allocation against per-region overhead; Experiment 007 measures that cost
+directly. `AdaptiveMapper` gains a sibling contract, `RegionAdaptiveMapper`, because a single
+`ResolutionDecision` cannot describe a map at several resolutions.
+
+**Risks:** Allocation is quantised to the tile, so a small object refines a whole region
+around it - detail is spent on ground that did not ask for it. Region count, not cell count,
+drives cost, which is the opposite of the intuition Phase 6 built. A tile size much smaller
+than the objects would make both problems worse.
+
+**Status:** Accepted
+
+## ADR-038: Detail Priority is an Engineering Score, and Unknown is Not Low
+
+**Decision:** A region receives a **detail priority** in `[0, 1]`: a weighted mean over six
+normalised factors - risk, uncertainty, proximity, predicted-motion relevance, object density
+and measured motion - taken over the factors **actually available**. A factor that cannot be
+computed is dropped and the remaining weights renormalise; it is never scored zero.
+
+Two consequences are load-bearing:
+
+- `risk_score is None` removes the risk factor **and** raises a floor on the region level
+  (`unknown_risk_min_level`, MEDIUM by default). An unscored object may never leave its
+  region at the coarsest level.
+- A region no object influences has `detail_priority = None`, not `0.0`, and takes the
+  configured base level with `no_object_influence` recorded.
+
+**Reason:** This is ADR-032 one phase later, and the failure it prevents is worse here. In
+Phase 7 coercing an unknown risk to zero would have mis-ranked an object. In Phase 8 it would
+hand the **coarsest spatial representation** to precisely the objects the system understands
+least - a lost track, an unconfirmed one, an object whose velocity was never measured. The
+system would see least where it knows least.
+
+Priority is kept separate from risk for the same reason ADR-036 separates risk from
+resolution: they answer different questions. *How concerning is this object* is a perception
+judgement over an object. *How much detail does this region deserve* is a resource allocation
+over space, and it depends on things risk does not model - how many objects are nearby, how
+well observed they are, and what the compute budget allows.
+
+Uncertainty enters as an **independent factor**, never summed into risk (ADR-033). That is
+the whole payoff of having kept them apart: a region can be quiet and badly observed, and
+that is an argument for looking harder, not for looking less.
+
+**Alternatives considered:** Reusing the Phase 7 risk score directly as the priority (throws
+away uncertainty, density and predicted motion, and makes ADR-033 pointless); summing risk and
+uncertainty into one number (destroys the distinction the moment it is needed); treating a
+missing factor as zero (the inversion above); a learned policy (no labelled data exists to
+learn from, and it would make every decision unexplainable).
+
+**Impact:** Every decision carries its factors, their normalised values, the tracks that
+influenced it, which of those could not be scored, and a generated explanation. A parametrised
+test asserts the text never contains "probability", "calibrated", "validated", "guaranteed" or
+"safe".
+
+**Risks:** The weights and thresholds are baseline engineering values, never tuned against
+outcomes because no outcomes have been recorded. The priority orders regions; it measures
+nothing physical. Quality is bounded by Phase 7 risk, which is bounded by prediction, tracking
+and detection, all of which are baselines.
+
+**Status:** Accepted
+
+## ADR-039: Asymmetric Hysteresis Plus Minimum Dwell Time
+
+**Decision:** Resolution changes are stabilised by two mechanisms that pull in the same
+direction:
+
+- **Refinement is immediate.** A region proposed a finer level takes it on that frame.
+- **Coarsening is resisted twice.** The priority must first fall a configured
+  `hysteresis_margin` below the band the region currently holds before a coarser level is even
+  *proposed*; and a coarser level must then be proposed on `min_dwell_frames` consecutive
+  frames before it is *applied*.
+
+The controller therefore holds state: each region remembers its level and how long a coarser
+one has been proposed. That state lives on the application context and is cleared on shutdown
+and by `POST /api/v1/map/adaptive/reset` (ADR-025).
+
+**Reason:** A region whose priority sits on a threshold would otherwise flip every frame -
+0.61, 0.59, 0.61, 0.59 - rebuilding its grid each time. That is worse than a uniform map: it
+costs more, and it produces output no consumer can rely on.
+
+The asymmetry is the interesting half. Detail is cheap to gain and expensive to lose at the
+wrong moment: the cost of refining a region that turns out not to need it is some wasted
+cells, while the cost of coarsening one that did need it is missing structure in the region
+the system was most concerned about. The policy is deliberately biased towards keeping detail.
+
+Both mechanisms are needed. The margin alone still flips a region whose priority oscillates
+with a wide amplitude; the dwell time alone still flips one that hovers exactly on a boundary,
+because every frame proposes a genuine change.
+
+**Alternatives considered:** Exponential smoothing of the priority (delays refinement as much
+as coarsening, which is the wrong trade, and hides the raw value); a single symmetric
+hysteresis band (leaves the wide-amplitude case flickering); a fixed refresh interval
+(decouples resolution from the scene, which defeats the purpose); no stabilisation at all
+(measured to oscillate, and the knowledge base requires a documented mechanism).
+
+**Impact:** The controller is the only stateful component in the adaptive path, and the only
+mapping state that survives a frame. Occupancy still accumulates nowhere (ADR-030) - what
+persists is a policy decision, not a measurement. Frames must arrive in temporal order and
+unrelated sequences must be separated by a reset, the same contract `/track` and `/predict`
+already carry. Tests drive a region through threshold jitter, a sustained rise, a sustained
+fall and an object disappearing.
+
+**Risks:** A genuinely quiet region keeps its detail for up to `min_dwell_frames` after it
+stops needing it. A scene that changes faster than the dwell time will lag. The parameters are
+engineering values, never tuned against a real scene.
+
+**Status:** Accepted
+
+## ADR-040: Bounded Regions and Cells, with Demotion Reported
+
+**Decision:** An adaptive plan is bounded by three configured ceilings: `max_tiles` (checked
+before any per-region work), `max_fine_tiles` (regions at HIGH or CRITICAL) and
+`max_total_cells`. When a scene wants more detail than the budget allows, the controller
+**coarsens the lowest-priority regions first**, one level at a time, until the plan fits.
+
+Ordering is by priority ascending with `tile_index` breaking ties, and a region with no
+priority at all sorts first. Every demotion is recorded on the decision
+(`budget_demoted` / `fine_tile_limit`) and counted in the plan `ResolutionBudget`, which also
+reports `within_budget: false` when a ceiling could not be met even after demotion.
+
+**Reason:** Adaptive allocation without a ceiling is unbounded allocation. A dense scene, a
+tile size much smaller than the objects, or a configuration mistake would otherwise ask for an
+arbitrary amount of memory - and the failure would arrive as an allocation, not as a message.
+
+Giving up detail where it matters least is the only defensible way to fit a budget. The
+alternative - refusing the frame - turns a degraded map into no map, which is worse for a
+perception system that must produce something every frame.
+
+Reporting the demotion is what keeps it honest. A budget that silently coarsens the map would
+make a benchmark result describe the budget rather than the policy, and Experiment 007 would
+be measuring the wrong thing without knowing.
+
+**Alternatives considered:** Rejecting a plan that exceeds the budget (no map at all); scaling
+every region down uniformly (throws away the allocation the policy just computed); an
+unbounded map with a warning (the warning arrives after the memory does).
+
+**Risks:** Under a binding budget the map is coarser than the policy asked for, and a reader
+who ignores `demoted_tile_count` could mistake the result for the policy own choice. The
+ceilings are engineering values chosen to be generous; on the default configuration they do
+not bind, which is why the dense benchmark scenario exists.
+
+**Status:** Accepted
+
+## ADR-041: The Controller Reads Positions from Tracks, Not Assessments
+
+**Decision:** The resolution controller consumes `RiskAssessment` for concern and uncertainty,
+`PredictedTrajectory` for predicted-motion relevance, and `TrackedObject` **for position**. An
+assessment whose track is absent is excluded with `missing_position` rather than placed by
+guesswork.
+
+**Reason:** Spatial allocation needs to know *where* an object is, and a `RiskAssessment`
+deliberately does not say: it carries `distance_m`, a scalar, because Phase 7 was given no
+spatial vocabulary on purpose (ADR-036). A distance alone describes a circle around the ego,
+not a region.
+
+The alternative was to add a position to `RiskAssessment`. That was rejected: it would push a
+spatial concept into the layer ADR-036 exists to keep free of one, for the benefit of a single
+consumer, when the position is already available beside the assessment in every caller. Tracks
+and assessments are produced together and keyed by the same `track_id`.
+
+**Alternatives considered:** Adding `position` to `RiskAssessment` (erodes ADR-036 for one
+consumer); reconstructing a position from `distance_m` and a heading (fabricating a
+measurement); having the controller re-read detections (a second association path that could
+disagree with tracking).
+
+**Impact:** `AdaptiveMappingService.run_from_pipeline` takes the tracking result alongside the
+risk result. Neither Phase 6 nor Phase 7 changed for Phase 8 - the boundaries drawn in ADR-029
+and ADR-036 held, which is the outcome `NEXT_PHASE.md` asked to be reported either way.
+
+**Risks:** The controller joins two collections on `track_id` and must handle a mismatch;
+it does, by excluding and recording rather than skipping silently.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title

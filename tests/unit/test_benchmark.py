@@ -246,3 +246,90 @@ class TestEnvironment:
         assert environment.adaptx_version
         assert environment.python_version
         assert environment.numpy_version
+
+
+class TestAdaptiveBenchmark:
+    """The Phase 8 benchmark must measure both variants on identical input."""
+
+    def _report(self) -> object:
+        from adaptx.benchmark.adaptive import AdaptiveScenario, run_adaptive_benchmark
+
+        return run_adaptive_benchmark(
+            (AdaptiveScenario.OPEN_EMPTY, AdaptiveScenario.MIXED_COMPLEXITY),
+            baseline_resolutions_m=(0.5,),
+            repeats=1,
+            warmup=0,
+            measure_memory=False,
+        )
+
+    def test_every_scenario_is_defined(self) -> None:
+        from adaptx.benchmark.adaptive import AdaptiveScenario, build_scene
+
+        for scenario in AdaptiveScenario:
+            scene = build_scene(scenario)
+            assert scene.frame.points.shape[0] > 0
+
+    def test_scenes_are_deterministic(self) -> None:
+        from adaptx.benchmark.adaptive import AdaptiveScenario, build_scene
+
+        first = build_scene(AdaptiveScenario.MIXED_COMPLEXITY)
+        second = build_scene(AdaptiveScenario.MIXED_COMPLEXITY)
+        assert np.array_equal(first.frame.points, second.frame.points)
+
+    def test_both_variants_see_the_same_input(self) -> None:
+        report = self._report()
+        for case in report.cases:  # type: ignore[attr-defined]
+            assert case.comparison.fixed.mapped_point_count == (
+                case.comparison.adaptive.mapped_point_count
+            )
+
+    def test_planning_and_mapping_are_timed_separately(self) -> None:
+        """They scale with different things, so one number would hide both."""
+        report = self._report()
+        for case in report.cases:  # type: ignore[attr-defined]
+            assert case.controller_timing.median_ms >= 0.0
+            assert case.mapping_timing.median_ms >= 0.0
+            assert case.fixed_timing.median_ms >= 0.0
+
+    def test_an_empty_scene_costs_fewer_cells_than_a_finer_uniform_grid(self) -> None:
+        from adaptx.benchmark.adaptive import AdaptiveScenario
+
+        report = self._report()
+        empty = [
+            case
+            for case in report.cases  # type: ignore[attr-defined]
+            if case.scenario is AdaptiveScenario.OPEN_EMPTY
+        ]
+        assert empty
+        assert all(case.comparison.cell_ratio < 1.0 for case in empty)
+
+    def test_a_busier_scene_costs_more_cells_than_an_empty_one(self) -> None:
+        from adaptx.benchmark.adaptive import AdaptiveScenario
+
+        report = self._report()
+        by_scenario = {
+            case.scenario: case
+            for case in report.cases  # type: ignore[attr-defined]
+        }
+        empty = by_scenario[AdaptiveScenario.OPEN_EMPTY]
+        mixed = by_scenario[AdaptiveScenario.MIXED_COMPLEXITY]
+
+        assert (
+            mixed.comparison.adaptive.total_cell_count > empty.comparison.adaptive.total_cell_count
+        )
+
+    def test_the_report_states_what_it_cannot_measure(self) -> None:
+        report = self._report()
+
+        assert "no labels" in report.notes  # type: ignore[attr-defined]
+        for case in report.cases:  # type: ignore[attr-defined]
+            assert any("no labelled reference map" in note for note in case.unavailable)
+            assert any("no labelled risk data" in note for note in case.unavailable)
+
+    def test_it_renders_without_claiming_a_probability(self) -> None:
+        from adaptx.benchmark.adaptive import render
+
+        text = render(self._report())  # type: ignore[arg-type]
+
+        assert "SYNTHETIC SCENES" in text
+        assert "not a probability of collision" in text

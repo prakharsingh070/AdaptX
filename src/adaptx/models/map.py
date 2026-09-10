@@ -86,19 +86,78 @@ class ResolutionContext(AdaptXModel):
 
     This is the contract behind the central ADAPT-X question: *given the
     environment and risk around this region, how much spatial detail should it
-    receive?* The decision function is not implemented in Phase 1.
+    receive?* Consumed by
+    :class:`~adaptx.mapping.interfaces.ResolutionController`, implemented in
+    Phase 8.
+
+    Nothing here is invented
+    -----------------------
+    Every quantity a region may lack is nullable, and ``None`` means *not
+    computed* - never zero. ``risk_score`` in particular is ``None`` whenever
+    the influencing objects could not be scored, because coercing that to 0.0
+    would hand the coarsest representation to the objects the system
+    understands least (ADR-032, ADR-038).
     """
 
     x: float
     y: float
     distance_from_ego_m: float = Field(ge=0.0)
-    risk_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    predicted_risk_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    uncertainty: float = Field(default=0.0, ge=0.0, le=1.0)
-    object_density: float = Field(
-        default=0.0, ge=0.0, description="Objects per square metre near the region."
+    risk_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Strongest influencing risk score, or null when no influencing "
+            "object could be scored. Null is NOT low risk - never coerce it "
+            "to 0.0 (ADR-032)."
+        ),
     )
-    max_object_speed_mps: float = Field(default=0.0, ge=0.0)
+    predicted_risk_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Risk expected from predicted motion, or null when unavailable.",
+    )
+    uncertainty: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Strongest influencing heuristic uncertainty, or null when nothing "
+            "influenced the region. Reported beside risk, never summed into it "
+            "(ADR-033)."
+        ),
+    )
+    object_density: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Objects per square metre near the region; null when unknown.",
+    )
+    max_object_speed_mps: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Fastest measured influencing speed; null when no speed was ever measured.",
+    )
+    trajectory_relevance: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "How strongly a predicted path passes through this region, weighted "
+            "towards the near future. Null when no trajectory reaches it. This "
+            "is predicted-motion relevance, NOT a collision prediction."
+        ),
+    )
+    object_count: int = Field(
+        default=0, ge=0, description="Objects whose influence reaches this region."
+    )
+    has_unknown_risk: bool = Field(
+        default=False,
+        description=(
+            "True when at least one influencing object could not be scored. "
+            "Such a region is treated conservatively rather than as quiet."
+        ),
+    )
     in_ego_path: bool = False
     current_level: ResolutionLevel | None = Field(
         default=None, description="Level in force now, for hysteresis and dwell-time rules."

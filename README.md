@@ -7,7 +7,8 @@ instead of spending it uniformly.
 The intended behaviour: low-risk, open regions represented coarsely, while regions holding
 pedestrians, vehicles, obstacles or high uncertainty receive finer detail. **That allocation
 is not implemented yet** — see the implementation status below. Object-level risk and
-uncertainty exist as of Phase 7; the resolution policy that would act on them is Phase 8.
+uncertainty exist as of Phase 7, and the resolution policy that acts on them arrived in
+Phase 8.
 
 ---
 
@@ -17,8 +18,12 @@ uncertainty exist as of Phase 7; the resolution policy that would act on them is
 > benchmarking, geometric object detection, temporal tracking, trajectory prediction, 2.5D
 > spatial mapping, and object-level risk and uncertainty — each a deterministic, explainable
 > baseline, not a finished subsystem.
-> The **adaptive resolution algorithm** is **not implemented**. Phase 6 built the map and
-> Phase 7 measures concern; deciding how much spatial detail a region deserves is Phase 8.
+> The **adaptive resolution algorithm** exists as of Phase 8, as a deterministic heuristic
+> baseline. Its detail priority is an engineering prioritisation score — **not** a probability
+> of collision, not a safety margin, never calibrated and never validated, because no labelled
+> data exists. Whether the allocation is *appropriate* is unmeasured and unmeasurable; only
+> what it costs has been measured (Experiment 007), and that comparison is **not** a clean
+> win — see the entry rather than assuming one.
 > The repository provides its data contracts and interfaces so it can be added without
 > architectural rewrites.
 >
@@ -37,8 +42,8 @@ uncertainty exist as of Phase 7; the resolution policy that would act on them is
 | Object detection | **Partial** | Phase 3: geometric clustering and baseline size-based classification. No trained model, no oriented boxes, no velocity. |
 | Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle. No learned model, no re-identification. |
 | Trajectory prediction | **Partial** | Phase 5: deterministic constant-velocity baseline with heuristic uncertainty. No acceleration model, no Kalman filter, no learned model, no map conditioning. Accuracy unmeasured. |
-| 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution grid with binary occupancy and per-cell height statistics. One cell size everywhere; no adaptive resolution, no temporal fusion, no SLAM. |
-| Adaptive resolution | Planned | Phase 8 |
+| 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution grid with binary occupancy and per-cell height statistics. One cell size everywhere — deliberately, because it is the baseline the adaptive mapper is measured against. No temporal fusion, no occlusion, no SLAM. |
+| Adaptive resolution | **Partial** | Phase 8: a controller allocates a cell size per **region** from risk, uncertainty, predicted-motion relevance, density, proximity and motion, and a tiled mapper applies it — so one map holds several resolutions. Stabilised against oscillation by asymmetric hysteresis plus a minimum dwell time. **Not** a probability; no learned policy, no ego planned path, no per-cell risk field. The fixed-resolution mapper is retained unchanged as the baseline. |
 
 The running system reports this itself at `GET /api/v1/system/status`; each component
 carries a readiness (`READY` / `NOT_READY`) **and** an implementation status

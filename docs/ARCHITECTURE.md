@@ -16,22 +16,22 @@ an abstract interface.
 | Configuration | **Implemented** | Typed, environment-driven settings with validation (`config/settings.py`) |
 | Logging | **Implemented** | Structured text/JSON logging with contextual fields (`core/logging.py`) |
 | Data contracts | **Implemented** | Point cloud, vehicle, object, track, trajectory, map, risk, system models (`models/`) |
-| API | **Implemented** | 15 HTTP endpoints + OpenAPI (`api/`) |
-| Telemetry (WebSocket) | **Implemented** | `/ws/telemetry`, carrying system status, measured metrics and detection/tracking/prediction **summaries**. No per-frame geometry, no trajectory points |
+| API | **Implemented** | 17 HTTP endpoints + OpenAPI (`api/`) |
+| Telemetry (WebSocket) | **Implemented** | `/ws/telemetry`, carrying system status, measured metrics and detection/tracking/prediction/mapping/risk/adaptive **summaries**. No per-frame geometry, no trajectory points, no map cells, no tiles |
 | Metrics | **Implemented** | Measured ingest FPS/latency and process CPU/memory; unmeasured values are `null` |
 | LiDAR ingest | **Partial** | Structural validation, point count, bounds, provenance |
 | LiDAR pipeline | **Partial** | Phase 2A: input validation, NaN/Inf removal, ROI and range filtering. Phase 2B (opt-in): voxel downsampling, baseline ground segmentation, baseline noise filtering. Phase 2C: `LiDARProcessingPipeline` orchestration, per-stage timing, configuration snapshot. **No** clustering, no coordinate transforms, no exact radius/statistical outlier removal |
-| Benchmarking (pipeline, detection, tracking, prediction) | **Implemented** | Deterministic synthetic datasets, fixed-resolution baseline profile, measured timing/throughput/memory (`adaptx.benchmark`, flags `--detect` / `--track` / `--predict`). Scope is **speed only** - not the Phase 11 ADAPT-X evaluation, and never perception accuracy |
+| Benchmarking (pipeline, detection, tracking, prediction, mapping, risk, adaptive) | **Implemented** | Deterministic synthetic datasets, fixed-resolution baseline profile, measured timing/throughput/memory (`adaptx.benchmark`, flags `--detect` / `--track` / `--predict` / `--map` / `--risk` / `--adaptive`). Scope is **speed and workload only** - not the Phase 11 ADAPT-X evaluation, and never perception accuracy |
 | Risk | **Partial** | Phase 7: deterministic heuristic object-level risk and uncertainty (`risk/heuristic.py`) - proximity, rate of approach, predicted approach, with uncertainty reported separately. **Not** a probability of collision, not calibrated, never validated - no labelled risk data exists. **No** time-to-collision, no trajectory-map intersection, no spatial risk field. The proximity-only baseline is retained for comparison |
 | CARLA | **Boundary only** | Interface, real client (connect + world info), deterministic mock, status service. Sensor and actor operations raise explicitly |
 | Object detection | **Partial** | Phase 3: grid clustering, size filtering and baseline classification by dimension bands (`perception/{clustering,classification,detector}.py`). **No** trained model, no oriented boxes, no velocity, no camera fusion, no semantic segmentation |
 | Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle, stateful service (`tracking/`). **No** learned motion model, no appearance features, no re-identification |
-| 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution mapper - bounded dense grid, binary occupancy, per-cell height statistics (`mapping/grid_mapper.py`). **No** adaptive resolution, no temporal fusion, no probabilistic occupancy, no SLAM, no localisation. Correctness unmeasured - no labelled reference map exists |
-| Adaptive resolution | *Planned* | `ResolutionController` contract + `ResolutionContext` model only |
+| 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution mapper - bounded dense grid, binary occupancy, per-cell height statistics (`mapping/grid_mapper.py`). Retained unchanged as the baseline (ADR-003). **No** temporal fusion, no probabilistic occupancy, no occlusion, no SLAM, no localisation. Correctness unmeasured - no labelled reference map exists |
+| Adaptive resolution | **Partial** | Phase 8: deterministic heuristic controller allocating a cell size per **region**, and a tiled mapper applying it (`mapping/{controller,adaptive_mapper,tiles}.py`). Detail priority combines risk, uncertainty, predicted-motion relevance, density, proximity and motion over the factors available. Stabilised by asymmetric hysteresis plus a minimum dwell time. **Not** a probability, not calibrated, never validated. **No** learned policy, no ego planned path, no per-cell risk field. Whether the allocation is *appropriate* is unmeasured |
 | Trajectory prediction | **Partial** | Phase 5: deterministic constant-velocity baseline with heuristic uncertainty (`prediction/constant_velocity.py`). **No** acceleration model, no Kalman filter, no learned model, no map or lane conditioning, no interaction between objects. Accuracy unmeasured - no labelled trajectories exist |
 | Uncertainty engine | **Partial** | Phase 7: a heuristic per-object uncertainty scalar with its contributing reasons, reported beside risk rather than folded into it (ADR-033). Not a variance, not calibrated. `AdaptiveMapCell.uncertainty` is still unpopulated - that needs a per-cell formulation |
-| Fixed-resolution baseline | **Implemented** | Phase 6 shipped the baseline half of ADR-003 (`FixedResolutionMapper`, `is_adaptive: false`). The **adaptive** variant it is meant to be compared against does not exist yet, so no comparison has been made |
-| Scenario generation, event replay, benchmarking | *Planned* | Not started |
+| Fixed-resolution baseline | **Implemented** | Both halves of ADR-003 now exist: `FixedResolutionMapper` (`is_adaptive: false`) and `TiledAdaptiveMapper` (`is_adaptive: true`). Experiment 007 is the first comparison over identical input, and it is **not a clean win** - see the entry before quoting it |
+| Scenario generation, event replay, scenario benchmarking | *Planned* | Not started |
 | Dashboard | *Planned* | Not started (`dashboard/README.md`) |
 
 The running backend reports this itself at `GET /api/v1/system/status`. Each component
@@ -243,24 +243,28 @@ range"), not malformed input, so it is accepted and reported with its metrics.
 segmentation, baseline noise filtering, pipeline orchestration with per-stage measurement,
 the fixed-resolution benchmark, geometric object detection with baseline classification,
 baseline temporal tracking with persistent ids and measured velocity, deterministic
-constant-velocity trajectory prediction with heuristic uncertainty, and deterministic
-frame-local fixed-resolution 2.5D mapping.
+constant-velocity trajectory prediction with heuristic uncertainty, deterministic
+frame-local fixed-resolution 2.5D mapping, heuristic object-level risk and uncertainty, and
+deterministic region-adaptive spatial resolution.
 
 **Not implemented:** ML object detection, learned tracking, appearance-based
 re-identification, camera fusion, semantic segmentation, production-grade classification,
-learned or map-aware trajectory prediction, collision prediction, the ADAPT-X risk engine,
-**adaptive resolution**, risk-aware refinement, predictive perception, temporal occupancy
-fusion, SLAM or localisation, and the dashboard. Their contracts exist; nothing computes
-them.
+learned or map-aware trajectory prediction, collision prediction, a learned resolution
+policy, a per-cell spatial risk field, an ego planned path, temporal occupancy fusion,
+occlusion modelling, SLAM or localisation, CARLA sensor and actor operations, scenario
+generation, event replay, and the dashboard. Their contracts exist where relevant; nothing
+computes them.
 
-**A 2.5D map exists; an *adaptive* one does not.** Phase 6 applies one uniform cell size
-everywhere. Deciding how much detail a region deserves is Phase 8, and the mapper is never
-given the risk or motion data such a decision would need (ADR-029).
+**Both mapping variants now exist.** Phase 6 applies one uniform cell size everywhere and is
+retained as the baseline; Phase 8 partitions the extent into regions and gives each its own
+cell size. Neither mapper chooses its own resolution — deciding belongs to the controller,
+applying belongs to the mapper (ADR-029, ADR-037).
 
-**Measured for speed only.** Detection, tracking, prediction and map correctness are all
-unmeasured and currently unmeasurable: no labelled data exists. Every benchmark figure in
-[`experiments/experiment-log.md`](experiments/experiment-log.md) is a timing or a workload
-count.
+**Measured for speed and workload only.** Detection, tracking, prediction, map correctness
+and whether the resolution allocation is *appropriate* are all unmeasured and currently
+unmeasurable: no labelled data exists. Every benchmark figure in
+[`experiments/experiment-log.md`](experiments/experiment-log.md) is a timing, a cell count or
+a byte count.
 
 ### Object detection (Phase 3)
 
@@ -416,13 +420,66 @@ explanation but is not a score multiplier — that would encode an unmeasured ju
 
 **Risk does not decide resolution** (ADR-036). The engine imports no resolution type,
 produces no `ResolutionDecision`, and `RiskAssessment` carries no cell size. Phase 8 consumes
-these assessments and decides spatial detail.
+these assessments and decides spatial detail — and did so without this engine changing, which
+is the outcome the boundary was drawn for.
 
 **Limitations.** The score orders objects by concern; it measures nothing physical. It is not
 a probability of collision, is not calibrated, and has never been validated — no labelled
 risk data exists. Weights and thresholds are baseline engineering values that have never been
 tuned against outcomes. Quality is bounded by tracking and prediction, which are themselves
 baselines.
+
+### Adaptive spatial resolution (Phase 8)
+
+*How much spatial detail should this region receive?* — the question the project is named
+for, and the only one that spans risk, uncertainty, motion and the compute budget at once.
+
+```
+RiskAssessment[] + TrackedObject[] + PredictedTrajectory[]
+    -> spatial influence -> per-region ResolutionContext
+    -> detail priority   -> thresholds -> unknown-risk floor
+    -> hysteresis + dwell -> budget
+    -> ResolutionPlan -> TiledAdaptiveMapper -> AdaptiveSpatialMap
+```
+
+**Regions, not points (ADR-037).** The map extent is partitioned into fixed-size square
+regions, each holding its own dense sub-grid at its own cell size — which is how one map holds
+several resolutions when a NumPy array can only hold one. Regions are half-open on their upper
+edges and clipped at the map bounds, so they partition the extent **exactly**: a point lands
+in one region and one cell of it, and `input == mapped + out_of_bounds` is unchanged from
+Phase 6.
+
+**The detail priority (ADR-038).** Six normalised factors — risk, uncertainty,
+predicted-motion relevance, proximity, object density, measured motion — combined as a
+weighted mean **over the factors actually available**. A factor that cannot be computed is
+dropped and the remaining weights renormalise; it is never scored zero.
+
+**Unknown is not low.** `risk_score is None` drops the risk factor *and* floors the region
+level. Coercing it to zero would hand the coarsest representation to the objects the system
+understands least — the ADR-032 inversion, one phase later and with worse consequences.
+
+**Uncertainty is an independent input**, never summed into risk (ADR-033). A quiet, badly
+observed region can earn detail on uncertainty alone. That is why Phase 7 kept them apart.
+
+**Stabilisation (ADR-039).** Refinement applies on the frame it is asked for. Coarsening must
+clear a hysteresis margin *and* be proposed on `min_dwell_frames` consecutive frames. The
+asymmetry is deliberate: wasted cells are cheaper than missing structure. This makes the
+controller the only stateful component in the adaptive path — but the **map** stays
+frame-local, because what persists is a policy decision, not occupancy (ADR-030 intact).
+
+**Budgets (ADR-040).** Region, cell and fine-region ceilings are enforced by coarsening the
+**lowest-priority** regions first, deterministically, with every demotion recorded on the
+decision and counted in the plan.
+
+**Positions come from tracks, not assessments (ADR-041).** A `RiskAssessment` carries a
+distance, not a location; adding one would have pushed a spatial concept into the layer
+ADR-036 keeps free of it.
+
+**Limitations.** The priority orders regions; it measures nothing physical. It is not a
+probability of collision, not a safety margin, not calibrated, never validated — no labelled
+data exists. Whether the allocation is appropriate is unmeasured and unmeasurable. Allocation
+is quantised to the region. Cost is dominated by **region count, not cell count**
+(Experiment 007), and adaptive mapping measured slower than the fixed mapper in every scene.
 
 ### Phase 2B stage semantics
 

@@ -12,6 +12,11 @@ from typing import Any
 
 from pydantic import Field
 
+from adaptx.models.adaptive_map import (
+    AdaptiveSpatialMapSummary,
+    MappingComparison,
+)
+from adaptx.models.adaptive_resolution import TileResolutionDecision
 from adaptx.models.common import (
     AdaptXModel,
     CoordinateFrame,
@@ -308,11 +313,12 @@ class LiDARMapResponse(AdaptXModel):
     detail: str = Field(
         default=(
             "Mapping is a deterministic, frame-local, fixed-resolution baseline. "
-            "One cell size applies everywhere; adaptive resolution is not "
-            "implemented. Occupancy is binary (a cell holds a point or it does "
-            "not), and an unobserved cell reports null height rather than zero. "
-            "Nothing accumulates between frames: this is not a persistent world "
-            "map."
+            "One cell size applies everywhere and this mapper never chooses it; "
+            "risk-aware allocation is a separate endpoint, and this baseline is "
+            "retained unchanged so the two can be compared. Occupancy is binary "
+            "(a cell holds a point or it does not), and an unobserved cell "
+            "reports null height rather than zero. Nothing accumulates between "
+            "frames: this is not a persistent world map."
         )
     )
 
@@ -361,6 +367,125 @@ class LiDARRiskResponse(AdaptXModel):
             "object that could not be assessed is reported UNKNOWN with a null "
             "score rather than a fabricated number. Risk does not decide spatial "
             "resolution - that is a separate decision, not implemented."
+        )
+    )
+
+
+#: Ceiling on region decisions returned in one response. A plan can cover
+#: thousands of regions; returning every one by default would make the response
+#: mostly bookkeeping.
+DEFAULT_MAX_RETURNED_DECISIONS = 256
+
+
+class LiDARAdaptiveMapRequest(LiDARRiskRequest):
+    """A frame to be processed, tracked, predicted, assessed and mapped adaptively.
+
+    Extends the risk request rather than replacing it, so a caller that can
+    post to ``/risk`` can post here unchanged and keeps ``include_map_context``
+    with the same meaning.
+    """
+
+    include_decisions: bool = Field(
+        default=True,
+        description=(
+            "Include the per-region resolution decisions. On by default because "
+            "they are the point of this endpoint, but capped by max_decisions."
+        ),
+    )
+    max_decisions: int = Field(
+        default=DEFAULT_MAX_RETURNED_DECISIONS,
+        ge=1,
+        le=DEFAULT_MAX_RETURNED_DECISIONS,
+        description="Upper bound on returned decisions. Truncation is reported, never silent.",
+    )
+    include_cells: bool = Field(
+        default=False,
+        description=(
+            "Include occupied cells in the response. Off by default: a single "
+            "region at the finest level can hold ten thousand cells, and the "
+            "empty ones would say nothing at great length."
+        ),
+    )
+    max_cells: int = Field(
+        default=DEFAULT_MAX_PROJECTED_CELLS,
+        ge=1,
+        le=DEFAULT_MAX_PROJECTED_CELLS,
+        description="Upper bound on returned cells. Truncation is reported, never silent.",
+    )
+    include_fixed_comparison: bool = Field(
+        default=False,
+        description=(
+            "Also build the Phase 6 fixed-resolution map over the same frame and "
+            "return both workloads. This is what makes the adaptive claim "
+            "checkable rather than asserted - and it costs a second full map."
+        ),
+    )
+
+
+class LiDARAdaptiveMapResponse(AdaptXModel):
+    """Result of planning resolution per region and mapping a frame with it.
+
+    The tiled grid is **not** returned as dense arrays. ``map`` carries the
+    tiling, the level distribution and the full point accounting; ``decisions``
+    carries the region decisions; ``cells`` carries occupied cells only, and
+    only when asked for.
+    """
+
+    accepted: bool
+    map: AdaptiveSpatialMapSummary
+    plan_summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Counts and budget from the controller pass, not the decisions themselves.",
+    )
+    decisions: list[TileResolutionDecision] | None = Field(
+        default=None, description="Per-region decisions, when requested."
+    )
+    decisions_truncated: bool = Field(
+        default=False, description="True when the decision list hit the requested limit."
+    )
+    risk: RiskAssessmentResult
+    processing: ProcessingMetrics
+    summary: PointCloudSummary = Field(
+        description="Metadata of the processed frame the mapper consumed."
+    )
+    comparison: MappingComparison | None = Field(
+        default=None, description="Fixed versus adaptive workload, when requested."
+    )
+    cells: AdaptiveMap | None = Field(
+        default=None,
+        description="Occupied cells only, when requested. Empty cells are omitted.",
+    )
+    cells_truncated: bool = Field(
+        default=False, description="True when the cell projection hit the requested limit."
+    )
+    detail: str = Field(
+        default=(
+            "Resolution is chosen per region by a deterministic heuristic "
+            "controller from risk, uncertainty, predicted-motion relevance, "
+            "object density, proximity and motion. The detail priority is an "
+            "engineering prioritisation score: it is NOT a probability of "
+            "collision, not a safety margin, not calibrated, and has never been "
+            "validated against labelled data because none exists. A region "
+            "influenced by an object whose risk could not be scored keeps a "
+            "conservative floor rather than being treated as quiet. Occupancy is "
+            "binary and an unobserved cell reports null height, never zero. "
+            "Nothing accumulates between frames except the resolution levels "
+            "themselves, which are stabilised to stop them oscillating."
+        )
+    )
+
+
+class AdaptiveResolutionResetResponse(AdaptXModel):
+    """Confirmation that the resolution stabilisation state was cleared."""
+
+    reset: bool = True
+    cleared_region_count: int = Field(
+        ge=0, description="Regions that held a remembered level immediately before the reset."
+    )
+    detail: str = Field(
+        default=(
+            "Every region forgot the level it held and how long it had been "
+            "quiet. The next frame decides from evidence alone."
         )
     )
 
@@ -434,6 +559,38 @@ class MapStatusResponse(ModuleStatusResponse):
     )
     summary: dict[str, Any] = Field(
         default_factory=dict, description="Counts from the most recent map, if any."
+    )
+
+    # -- Phase 8 additions, all additive ----------------------------------
+    adaptive_mapper: str | None = Field(
+        default=None,
+        description="Identifier of the region-adaptive mapper; null when none is configured.",
+    )
+    adaptive_controller: str | None = Field(
+        default=None,
+        description="Identifier of the resolution controller; null when none is configured.",
+    )
+    adaptive_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether adaptation is switched on. False means every region takes the base level."
+        ),
+    )
+    adaptive_is_baseline: bool = Field(
+        default=True,
+        description=(
+            "True while the resolution policy is a deterministic heuristic, not a learned one."
+        ),
+    )
+    tile_size_m: float | None = Field(
+        default=None, gt=0.0, description="Edge length of one adaptive region."
+    )
+    tile_count: int | None = Field(
+        default=None, ge=1, description="Regions the adaptive map is partitioned into."
+    )
+    adaptive_summary: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Counts and level distribution from the most recent adaptive map, if any.",
     )
 
 

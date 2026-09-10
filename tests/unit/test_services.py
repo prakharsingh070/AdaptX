@@ -189,19 +189,42 @@ class TestSystemService:
     def test_mapping_is_partial_because_it_is_a_fixed_resolution_baseline(
         self, context: ApplicationContext
     ) -> None:
-        """Phase 6 implemented a fixed-resolution mapper, not an adaptive one.
+        """Phase 6 implemented a fixed-resolution mapper; it is still fixed.
 
-        Retargeted in Phase 6: mapping was previously asserted PLANNED here.
-        The guarantee that matters now is that a fixed-resolution baseline
-        never reports IMPLEMENTED and never implies adaptive behaviour.
+        Retargeted in Phase 6 (mapping was asserted PLANNED) and again in
+        Phase 8, where the literal sentence "ADAPTIVE RESOLUTION IS NOT
+        IMPLEMENTED" stopped being true: a controller now exists as its own
+        component. The guarantee underneath is unchanged and is what is
+        asserted here - *this* component is the uniform-resolution baseline,
+        it never reports IMPLEMENTED, it never claims to choose its own
+        resolution, and it stays available to be measured against.
         """
         components = {c.name: c for c in context.system.status().components}
         mapping = components["mapping"]
 
         assert mapping.implementation is ImplementationStatus.PARTIAL
         assert "fixed-resolution" in mapping.detail
-        assert "ADAPTIVE RESOLUTION IS NOT IMPLEMENTED" in mapping.detail
+        assert "never chooses one" in mapping.detail
+        assert "retained unchanged for comparison" in mapping.detail
         assert "frame-local" in mapping.detail
+
+    def test_adaptive_resolution_is_partial_and_never_claims_a_probability(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 8 added a controller, and it is a heuristic baseline too.
+
+        The replacement guarantee for the sentence removed above: the adaptive
+        component exists, is never IMPLEMENTED, and states plainly that its
+        priority is not a collision probability.
+        """
+        components = {c.name: c for c in context.system.status().components}
+        adaptive = components["adaptive_resolution"]
+
+        assert adaptive.implementation is ImplementationStatus.PARTIAL
+        assert adaptive.implementation is not ImplementationStatus.IMPLEMENTED
+        assert adaptive.phase == 8
+        assert "NOT A PROBABILITY OF COLLISION" in adaptive.detail
+        assert "never validated against labelled data" in adaptive.detail
 
     def test_prediction_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext

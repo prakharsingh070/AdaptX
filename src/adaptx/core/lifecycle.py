@@ -15,6 +15,7 @@ from adaptx.perception.detector import GeometricObjectDetector
 from adaptx.perception.lidar import FrameValidationProcessor
 from adaptx.perception.pipeline import LiDARProcessingPipeline
 from adaptx.risk.baseline import BaselineProximityRiskEngine
+from adaptx.services.adaptive_mapping_service import AdaptiveMappingService
 from adaptx.services.carla_service import CarlaService
 from adaptx.services.lidar_service import LiDARIngestService
 from adaptx.services.mapping_service import MappingService
@@ -43,6 +44,7 @@ class ApplicationContext:
     prediction: PredictionService
     mapping: MappingService
     risk: RiskService
+    adaptive_mapping: AdaptiveMappingService
 
 
 def build_context(settings: Settings | None = None) -> ApplicationContext:
@@ -70,6 +72,7 @@ def build_context(settings: Settings | None = None) -> ApplicationContext:
         prediction=PredictionService(resolved.prediction),
         mapping=MappingService(resolved.map),
         risk=RiskService(resolved.risk),
+        adaptive_mapping=AdaptiveMappingService(resolved.map, resolved.adaptive),
     )
 
 
@@ -97,9 +100,14 @@ def startup(context: ApplicationContext) -> None:
 def shutdown(context: ApplicationContext) -> None:
     """Release resources held by the context.
 
-    Tracking state is dropped explicitly: it is the only accumulated perception
+    Tracking state is dropped explicitly: it is the accumulated perception
     state in the process, and leaving it behind would let a restarted context
     inherit tracks from frames it never saw.
+
+    Adaptive mapping is dropped for the same reason as tracking: its resolution
+    controller remembers what level each region held and how long it has been
+    quiet, and a restarted context must not inherit the stabilisation history
+    of a scene it never saw (ADR-039).
 
     Prediction, mapping and risk are reset too, though none carries perception
     state - only the counters behind their status summaries, which would
@@ -109,5 +117,6 @@ def shutdown(context: ApplicationContext) -> None:
     context.prediction.reset()
     context.mapping.reset()
     context.risk.reset()
+    context.adaptive_mapping.reset()
     context.carla.disconnect()
     logger.info("ADAPT-X stopped")

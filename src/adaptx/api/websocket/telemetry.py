@@ -3,7 +3,7 @@
 ``/ws/telemetry`` is the foundation of the dashboard's live feed. It carries
 only what the backend actually knows: the aggregated system status, the
 measured runtime metrics, and **summaries** of detection, tracking,
-prediction, mapping and risk. The payload's ``provides`` and
+prediction, mapping, risk and adaptive mapping. The payload's ``provides`` and
 ``not_yet_available`` fields say what exists, and a stream is removed from
 ``not_yet_available`` only once something genuinely produces it.
 
@@ -13,9 +13,12 @@ horizon, model and the ids that received a trajectory, never the trajectory
 points themselves. Mapping follows it too: dimensions, counts and an
 occupancy ratio, never the grid - a 0.5 m map over the default bounds is
 57,600 cells. Risk carries scene counts and a handful of the most concerning
-objects, never every assessment. Full trajectories, map cells and assessments
-are returned by ``POST /api/v1/lidar/predict``, ``/map`` and ``/risk``; putting
-them on every tick would push frame geometry down a status channel.
+objects, never every assessment. Adaptive mapping follows it too: the region
+count, the level distribution and how many regions changed, never the tiles -
+a single region at the finest level holds ten thousand cells. Full
+trajectories, map cells, assessments and region decisions are returned by
+``POST /api/v1/lidar/predict``, ``/map``, ``/risk`` and ``/adaptive-map``;
+putting them on every tick would push frame geometry down a status channel.
 
 Message envelope::
 
@@ -52,11 +55,13 @@ _NOT_YET_AVAILABLE = [
     # Object-level risk exists (Phase 7) and is summarised as "risk". What does
     # not exist is a spatial risk *field*: no per-cell risk formulation is
     # implemented, so that stream stays listed as unavailable.
+    #
+    # "adaptive_map" was removed in Phase 8: a resolution controller now
+    # allocates detail by region, and the stream is summarised as
+    # "adaptive_mapping". Note what is summarised and what is not - the region
+    # decisions and level distribution travel here; the tiles themselves never
+    # do.
     "risk_field",
-    # The 2.5D map exists (Phase 6) and is summarised as "mapping". What does
-    # not exist is the *adaptive* map: no resolution controller allocates
-    # detail by risk, so the adaptive stream stays listed as unavailable.
-    "adaptive_map",
 ]
 
 
@@ -81,6 +86,7 @@ def build_telemetry_payload(context: ApplicationContext) -> dict[str, Any]:
         "prediction": context.prediction.summary(),
         "mapping": context.mapping.summary(),
         "risk": context.risk.summary(),
+        "adaptive_mapping": context.adaptive_mapping.summary(),
         "provides": [
             "system",
             "metrics",
@@ -89,6 +95,7 @@ def build_telemetry_payload(context: ApplicationContext) -> dict[str, Any]:
             "prediction",
             "mapping",
             "risk",
+            "adaptive_mapping",
         ],
         "not_yet_available": _NOT_YET_AVAILABLE,
     }

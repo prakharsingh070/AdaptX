@@ -243,19 +243,59 @@ engineering values, not safety-certified limits.
 - References: [`knowledge-base/06_risk-engine.md`](knowledge-base/06_risk-engine.md),
   [`knowledge-base/07_uncertainty.md`](knowledge-base/07_uncertainty.md).
 
-## Phase 8 — Adaptive resolution · **To do**
+## Phase 8 — Adaptive resolution · **Done (heuristic baseline)**
 
-- **This is where the ADAPT-X claim gets tested.** Phase 6 built the fixed-resolution
-  mapper; Phase 7 produced risk and uncertainty. Phase 8 connects them and must show that
-  risk-aware allocation beats uniform allocation on measured workload.
-- Implement `mapping.interfaces.ResolutionController` consuming `ResolutionContext`, fed
-  from Phase 7 `RiskAssessment` values, and producing a `ResolutionDecision` the existing
-  mapper already applies unchanged (ADR-029, ADR-036).
-- Consume **uncertainty as well as risk**: a poorly observed region may deserve finer
-  perception even when its computed risk is low. That is the whole reason the two are kept
-  separate (ADR-033).
-- Include a documented stabilisation mechanism (hysteresis, smoothing or minimum dwell
-  time) so resolution does not oscillate between frames.
+**This is where the ADAPT-X claim finally got tested**, and the answer is more interesting
+than a yes.
+
+- `HeuristicResolutionController` — the map extent is partitioned into fixed-size regions
+  and each is given its own cell size, so one map genuinely holds several resolutions
+  (ADR-037). Resolution is decided per region, never per point.
+- `TiledAdaptiveMapper` — builds one dense sub-grid per region. Regions partition the
+  extent exactly: half-open on their upper edges, clipped at the map bounds, so a point
+  lands in exactly one cell and `input == mapped + out_of_bounds` still holds.
+- A **detail priority** combines risk, uncertainty, predicted-motion relevance, object
+  density, proximity and measured motion as a weighted mean **over the factors actually
+  available** (ADR-038). A factor that cannot be computed is dropped and the weights
+  renormalise — the ADR-032 rule, one phase later.
+- **Unknown is not low.** `risk_score is None` drops the risk factor *and* floors the
+  region level. Coercing it to zero would hand the coarsest representation to the objects
+  the system understands least.
+- **Uncertainty is an independent input**, never summed into risk: a quiet, badly observed
+  region can earn detail on uncertainty alone. That is the ADR-033 payoff.
+- Resolution is stabilised by an **asymmetric hysteresis margin plus a minimum dwell time**
+  (ADR-039): refinement is immediate, coarsening must be earned twice over. The controller
+  is the only stateful component in the adaptive path.
+- Region and cell budgets coarsen the **lowest-priority** regions first, and every demotion
+  is reported rather than silently absorbed (ADR-040).
+- `POST /api/v1/lidar/adaptive-map`, `POST /api/v1/map/adaptive/reset`, extended
+  `GET /api/v1/map/status`; adaptive summary on `/ws/telemetry`; benchmark via `--adaptive`.
+- The Phase 6 fixed-resolution mapper is **retained unchanged** as the baseline (ADR-003).
+- No ML framework, no SciPy, no new dependencies.
+
+**The detail priority is not a probability of collision** and is not a safety margin. It is
+an engineering prioritisation score: never calibrated, never validated against labelled
+data, because none exists. It orders regions; it measures nothing physical.
+
+**Measured (Experiment 007), including the unflattering results:** adaptive uses 0.06–0.30x
+the cells of a uniform 0.25 m map and 0.25–0.50x of a 0.5 m one, but **more** cells than a
+1.0 m map in every scene containing an object — the base level *is* 1.0 m, so against that
+baseline the policy can only add cells. Adaptive mapping is also **slower in wall-clock
+time than the fixed mapper in every scene**, even where it allocates a quarter of the
+cells. Cost scales with **region count, not cell count** (~120 µs per region); the lever is
+`tile_size_m`, not the resolution vocabulary.
+
+### Phase 8B — deferred adaptive-resolution work · **To do**
+
+- A hierarchical or quadtree representation, which is where the per-region overhead measured
+  in Experiment 007 would be attacked. ADR-037 records why it was not the first choice.
+- A per-cell risk field, so `RiskCell` and `AdaptiveMapCell.risk_score` can finally be
+  populated. Phase 7 is object-level only.
+- An ego planned path: `ResolutionContext.in_ego_path` exists and is never set true,
+  because no planner exists to set it.
+- Predicted **risk** as a distinct input. `ResolutionContext.predicted_risk_score` stays
+  null: Phase 7 folds predicted approach into its score rather than publishing a second one.
+- Tuning the weights and thresholds against outcomes, which needs outcomes to be recorded.
 - Reference: [`knowledge-base/10_adaptive-resolution.md`](knowledge-base/10_adaptive-resolution.md).
 
 ## Phase 9 — CARLA · **To do**
@@ -274,6 +314,9 @@ engineering values, not safety-certified limits.
 
 ## Phase 11 — Benchmarking · **To do**
 
+- Phase 8 delivered the first fixed-versus-adaptive comparison (Experiment 007) over
+  synthetic scenes with hand-specified risk. Phase 11 is the same comparison over *scenario*
+  input, with the whole chain in the loop.
 - Run identical scenarios through fixed-resolution and adaptive perception; record
   measured performance, workload and perception metrics into
   [`experiments/experiment-log.md`](experiments/experiment-log.md).

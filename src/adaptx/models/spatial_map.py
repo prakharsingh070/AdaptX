@@ -423,7 +423,9 @@ def _nearest_level(resolution_m: float) -> ResolutionLevel:
 
     A label for display only. Phase 6 applies one uniform size, so this
     describes the size that was used - it is not a resolution *decision*, which
-    belongs to a controller that does not exist (ADR-029).
+    belongs to the controller (ADR-029). A genuinely adaptive map carries the
+    level its controller chose per region and never needs this inference; see
+    :meth:`adaptx.models.adaptive_map.AdaptiveSpatialMap.to_adaptive_map`.
     """
     return min(
         _DEFAULT_LEVEL_SIZES,
