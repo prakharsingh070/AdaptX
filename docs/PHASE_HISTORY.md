@@ -590,13 +590,87 @@ unchanged, zero regressions.
 
 ---
 
+## Phase 10 — Scenario framework · verified (no live run) · replay deferred
+
+From one hard-coded scene to a way of describing scenes. The framework sits above the
+Phase 9 boundary and did not change it.
+
+**A scenario is data (ADR-046).** `ScenarioDefinition` holds actors, ego-relative placement,
+timed constant-velocity motion segments, duration, timestep and an explicit seed. It is
+validated at construction, survives a JSON round-trip, and its models import nothing from
+the CARLA boundary - a source-level test guards that, because an import-based one is vacuous
+when a package `__init__` pulls in the runner. The handoff's trap was named precisely: the
+moment scenarios are functions, they are reproducible from a commit, not a description.
+
+**The seed is explicit, consumed, and reported (ADR-046).** Every randomised value is drawn
+from `random.Random(seed)` once, before any simulator is opened, into a `ResolvedScenario`
+recorded on the result. A test asserts the draw never touches the global generator. The
+only randomised element is placement jitter; the catalogue uses none, so every catalogue
+scenario is exact - and still reports its seed. `CarlaSettings.seed`, declared in Phase 9
+and consumed by nothing, is now set from the scenario.
+
+**Motion is placed, not simulated (ADR-047).** An actor's position at any scenario time is
+a closed-form sum over its segments, and the runner places it there every frame. Frame *n*
+is therefore a function of the definition, the seed and *n*. The consequence that matters
+most: the scenario can state where every actor *should* be without a simulator running,
+so every frame records the **commanded** pose beside the **reported** one. That is the
+third leg of a comparison Phase 11 will make and Phase 10 does not.
+
+**The runner drives a protocol extracted from the boundary (ADR-048).** `ScenarioSimulator`
+is exactly the surface `CarlaSimulationSession` already had; no Phase 9 code changed to
+satisfy it. A runner is single-use, which is the isolation guarantee - a test runs two
+scenarios against one world and asserts the second inherits nothing. Cleanup runs in a
+`finally` on every path; a test breaks the second of two spawns and asserts the first was
+destroyed.
+
+**Two failure modes, kept apart.** The first version of the runner returned a `FAILED`
+result for a malformed definition and crashed inside its own failure path trying to embed
+the invalid definition in that result. The distinction was drawn from the bug: a malformed
+definition is a misuse and **raises** before any simulator contact; a run-time failure
+**returns** `FAILED` with the frames stepped so far, so a batch survives one bad run.
+
+**Ground truth stays out, again.** The processor callback receives the sensor frame and
+nothing else, by signature. An integration test runs the chain by hand without ever calling
+`ground_truth()` and asserts identical stage counts to the runner's. The result contracts
+carry no accuracy, precision, recall, error or match field, and a test asserts that too.
+
+**`carla/smoke.py` was deleted, not grown.** Its three constants became the
+`vehicle_approach` definition; its two orphaned settings were removed; its seven tests were
+retargeted onto the framework with intent preserved.
+
+**Three things the boundary tests caught.** A lazy `import carla` for a version string in
+generic runner code (moved into the boundary as `carla_package_version()`); the cyclist
+scenario failing against the stand-in because the fake did not know the bicycle blueprint -
+which exercised the partial-spawn cleanup path exactly as designed, with zero leaked actors;
+and my own smoke script producing an invalid definition through `model_copy`, which is what
+surfaced the failure-path crash above.
+
+**No live CARLA run was executed.** The package is still absent. Every catalogue scenario has
+run only against the stand-in, the catalogue's blueprints have not been confirmed on any
+real server, and a real server settles spawned vehicles onto the road in a way the fake does
+not. Experiment 009 measures orchestration cost alone: ~35 µs to resolve, ~7 µs per actor per
+frame - negligible, and the only figure this phase can honestly report.
+
+**Event replay is deferred, not done.** The `ScenarioRunResult` is the recording a replay
+would need, but no playback path exists and `DataSource.REPLAY` is still produced by nothing.
+The open question - re-run the simulation or re-play a recording - is still open.
+
+**Limitations:** no live validation; placed motion has no physics; the ego is stationary in
+every scenario; four scenarios, no traffic, no weather; ground-truth contracts still live in
+`adaptx.carla` though they are simulator-generic.
+
+**Status:** 1442 tests (1327 before), 7 deselected live, ruff and mypy clean, 17 endpoints
+unchanged, zero regressions, no new dependencies.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
 visible. Phase 9 declared `carla` as an **optional extra** rather than a dependency: the
 backend, the endpoints and the whole test suite still run without it, so the required set is
-unchanged after nine phases.
+unchanged after ten phases.
 
 Phase 8 added a second pattern worth naming: **the honest negative**. The phase the project
 is named for produced a result that is partly unflattering — slower than the baseline, and

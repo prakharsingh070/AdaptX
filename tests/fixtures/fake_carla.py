@@ -220,9 +220,13 @@ class FakeWorld:
         self._frame = 100  # A server that has been up a while, like a real one.
         self._elapsed = 0.0
         self._dt = fixed_delta_seconds
+        # The blueprints the scenario catalogue uses, plus the sensor. A
+        # catalogue scenario asking for anything else fails the same way it
+        # would against a real server missing that asset.
         self._known = known_blueprints or {
             "vehicle.tesla.model3",
             "vehicle.audi.tt",
+            "vehicle.diamondback.century",
             "walker.pedestrian.0001",
             "sensor.lidar.ray_cast",
         }

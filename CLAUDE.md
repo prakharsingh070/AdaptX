@@ -15,8 +15,9 @@ The central innovation is risk-aware adaptive perception: low-risk regions use c
 LiDAR / CARLA -> point-cloud processing -> ground and noise filtering -> object detection -> object tracking -> trajectory prediction -> 2.5D occupancy mapping -> risk and uncertainty estimation -> predictive risk -> adaptive resolution controller -> adaptive 2.5D map -> benchmarking -> dashboard.
 
 Stages up to and including the adaptive resolution controller are implemented as
-deterministic, explainable baselines, and CARLA can now feed them simulated LiDAR.
-Nothing after that is implemented.
+deterministic, explainable baselines; CARLA can feed them simulated LiDAR, and a
+scenario framework describes, seeds and runs controlled scenes against it. Nothing
+after that is implemented - no evaluation, no replay, no dashboard.
 
 ## Core Modules
 
@@ -168,14 +169,32 @@ every component in `services/system_service.py` agree with the list below.
   clock - so frame intervals are exactly `fixed_delta_seconds`; frames are labelled
   `source=simulation` and enter the existing Phase 2 ingest path unchanged; ground truth is
   published on a SEPARATE path and never reaches detection, tracking, prediction, risk or
-  adaptive resolution; one hard-coded smoke scenario via `python -m adaptx.carla.smoke`;
+  adaptive resolution; one hard-coded smoke scenario in `carla/smoke.py` (replaced by the
+  Phase 10 scenario framework and deleted);
   ADR-042/043/044/045). NO LIVE CARLA RUN HAS BEEN EXECUTED: the `carla` package is not
   installed here, so the live smoke test skips and Experiment 008 records only the
   conversion cost of ADAPT-X's own code. Phases 1-8 were not modified to accommodate CARLA.
   Ground truth now exists, which makes accuracy measurable for the first time - but nothing
   measures it yet; that is Phase 11.
-- Phase 10: Scenario generation and replay - TODO (next)
-- Phase 11: Benchmarking - TODO
+- Phase 10: Scenario generation - DONE as a deterministic scenario framework (a
+  `ScenarioDefinition` is DATA - actors, ego-relative placement, timed constant-velocity
+  motion segments, duration, timestep and an explicit seed - validated before any
+  simulator is touched and reproducible from the definition alone; the definition models
+  import nothing from the CARLA boundary; every randomised value is drawn once from
+  `random.Random(seed)` into a `ResolvedScenario` recorded on the result; the runner drives
+  the Phase 9 boundary through a protocol extracted from it, PLACES each actor at its
+  closed-form scripted pose every frame rather than simulating physics, records ground
+  truth beside every sensor frame and feeds it to NO pipeline stage, and destroys every
+  actor on completion or failure; four catalogue scenarios; `python -m adaptx.scenarios
+  run <id>`; `carla/smoke.py` deleted and replaced; ADR-046/047/048). THE RUN RESULT IS RAW
+  EVIDENCE - frame identities, scripted poses, ground truth, stage counts - AND CARRIES NO
+  ACCURACY OR EVALUATION FIGURE. NO LIVE CARLA RUN HAS BEEN EXECUTED: the package is still
+  absent here, so the framework has been exercised only against a stand-in (Experiment
+  009 measures orchestration cost alone). EVENT REPLAY IS DEFERRED, not done: the result is
+  the recording a replay would need, but no playback path exists and `DataSource.REPLAY`
+  is still produced by nothing. Ego motion, traffic, weather and the Traffic Manager are
+  not implemented.
+- Phase 11: Benchmarking - TODO (next)
 - Phase 12: Dashboard and final integration - TODO
 
 ## Start Here

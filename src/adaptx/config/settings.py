@@ -122,11 +122,13 @@ class CarlaSettings(BaseModel):
     )
 
     # -- actors ------------------------------------------------------------
-    ego_blueprint: str = Field(default="vehicle.tesla.model3", min_length=1)
-    target_blueprint: str = Field(
-        default="vehicle.audi.tt",
+    ego_blueprint: str = Field(
+        default="vehicle.tesla.model3",
         min_length=1,
-        description="The second actor in the smoke scenario, moved on a scripted path.",
+        description=(
+            "Default sensor vehicle. A scenario definition overrides it; other "
+            "actors are described by the scenario, never by configuration."
+        ),
     )
 
     # -- LiDAR sensor ------------------------------------------------------
@@ -169,16 +171,6 @@ class CarlaSettings(BaseModel):
             "Keep CARLA's per-point intensity as a fourth column. The frame "
             "contract already supports XYZI and every processing stage slices "
             "the first three columns, so this costs downstream nothing."
-        ),
-    )
-
-    # -- smoke scenario ----------------------------------------------------
-    smoke_frames: int = Field(
-        default=20,
-        ge=2,
-        description=(
-            "Frames the Phase 9 smoke run steps through. At least 2, because a "
-            "single frame cannot produce a measured velocity."
         ),
     )
 

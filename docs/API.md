@@ -208,8 +208,8 @@ frame. **Counts only** — never point data, never ground truth, never an actor 
 
 > **Phase 9 adds no endpoint that starts or steps a simulation.** Spawning actors and
 > ticking a simulator from an unauthenticated HTTP surface is not something this API should
-> offer (ADR-042), so the simulation is driven by `python -m adaptx.carla.smoke` and this
-> endpoint only *reports* what a session is doing.
+> offer (ADR-042), so simulations are driven by `python -m adaptx.scenarios run <id>` and
+> this endpoint only *reports* what a session is doing. Phase 10 added no endpoint.
 
 **200 OK**
 

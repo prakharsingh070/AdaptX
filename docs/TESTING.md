@@ -254,6 +254,34 @@ never becomes a false failure:
 What the stand-in **cannot** prove: anything about CARLA itself - its API compatibility, its
 sensor model or its performance. No figure produced against it is a CARLA measurement.
 
+### Scenario framework (Phase 10)
+
+- **Definitions** (`test_scenario_models.py`) - every validation rule with an explicit
+  error: duration, timestep, the two-frame minimum, seed, machine-name ids, duplicate ids,
+  the reserved `ego` id, segment ordering and overlap, segments beyond the duration, a
+  moving ego. Scripted motion is checked by hand-derived arithmetic: timed start holds,
+  timed stop freezes, diagonal moves on both axes, an L-shaped path sums its legs. A
+  definition round-trips through JSON.
+- **Runner** (`test_scenario_runner.py`) - lifecycle transitions; a malformed definition
+  raises before any simulator contact while a run-time failure returns `FAILED` with the
+  frames stepped; cleanup on every failure path including a second actor failing after the
+  first spawned; same seed resolves identically and a different seed moves a jittered
+  placement; resolution never touches the global `random` state; actors land where asked;
+  ground truth and sensor frames share identity; the processor receives only the sensor
+  frame; scenario B inherits nothing from scenario A; the result carries no evaluation field.
+- **Catalogue and pipeline** (`test_scenario_pipeline.py`) - every catalogue scenario is
+  valid, exact, runs to completion through the real Phase 2-8 chain, and its ground truth
+  sees every scripted actor. The chain run by hand without ever calling `ground_truth()`
+  produces identical stage counts to the runner. Source-level checks that the definition
+  layer imports nothing from the CARLA boundary and the package never imports `carla`. The
+  CLI lists the catalogue, fails honestly without a simulator, and exits with a usage code
+  for an unknown id.
+- **Live** (`test_carla_live.py`) - `vehicle_approach` and every catalogue scenario against a
+  real server. Deselected by default and self-skipping; **never executed here**.
+
+What none of this proves: that the catalogue's blueprints exist on a real server, that a
+real simulator places actors where the script says, or anything about perception accuracy.
+
 ## Conventions for new tests
 
 - **Never weaken or delete a test to make the suite green.** If a test fails, either the

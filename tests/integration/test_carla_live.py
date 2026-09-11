@@ -29,7 +29,6 @@ import pytest
 
 from adaptx.carla.client import carla_package_available
 from adaptx.carla.session import CarlaSimulationSession
-from adaptx.carla.smoke import run_smoke
 from adaptx.config.settings import CarlaSettings, Settings
 from adaptx.core.exceptions import SimulatorUnavailableError
 from adaptx.core.lifecycle import build_context
@@ -41,7 +40,7 @@ pytestmark = pytest.mark.carla
 
 def live_settings() -> Settings:
     """Settings pointed at a real server, with a short run."""
-    carla = CarlaSettings(enabled=True, smoke_frames=6, sensor_timeout_s=20.0)
+    carla = CarlaSettings(enabled=True, sensor_timeout_s=20.0)
     return Settings(
         app={"environment": "development", "debug": True},
         logging={"level": "WARNING"},
@@ -109,15 +108,43 @@ class TestLiveCarla:
         assert truth.source is DataSource.SIMULATION
         assert truth.ego_actor_id is not None
 
-    def test_the_live_smoke_run_completes(self) -> None:
-        """The whole Phase 9 claim, against a real simulator."""
-        settings = require_live_server()
-        result = run_smoke(settings, context=build_context(settings), frames=6)
+    def test_a_live_catalogue_scenario_completes(self) -> None:
+        """The whole Phase 9 claim, against a real simulator - now as a scenario.
 
-        assert result.frame_count == 6
+        Retargeted in Phase 10 when the smoke run became ``vehicle_approach``.
+        """
+        from adaptx.scenarios import load, run_scenario
+
+        settings = require_live_server()
+        result = run_scenario(
+            load("vehicle_approach"), settings=settings, context=build_context(settings)
+        )
+
+        assert result.completed, result.error
+        assert result.frame_count == result.planned_frame_count
         assert result.timestamps_are_monotonic()
         assert all(record.point_count > 0 for record in result.frames)
-        assert all(record.adaptive_cells > 0 for record in result.frames)
+        assert all(
+            record.pipeline is not None and record.pipeline.adaptive_cells > 0
+            for record in result.frames
+        )
+
+    def test_every_catalogue_scenario_runs_live(self) -> None:
+        """Phase 10 against a real simulator: each definition, start to finish.
+
+        The blueprints a scenario asks for must exist on the server; a missing
+        one is a real finding about the catalogue, not a test bug, and is
+        reported as such through the FAILED result.
+        """
+        from adaptx.scenarios import load, run_scenario, scenario_ids
+
+        settings = require_live_server()
+        for scenario_id in scenario_ids():
+            result = run_scenario(load(scenario_id), settings=settings, process=False)
+            assert result.completed, f"{scenario_id}: {result.error}"
+            assert result.frame_count == result.planned_frame_count
+            assert len(result.ground_truth) == result.frame_count
+            assert all(truth.others() for truth in result.ground_truth), scenario_id
 
     def test_the_live_run_leaves_no_actors_behind(self) -> None:
         """A leaked actor persists in the server for every later run."""
@@ -126,7 +153,7 @@ class TestLiveCarla:
         session.open()
         world = session._require_world()
         before = len(world.get_actors())
-        session.spawn_ahead_of_ego(settings.carla.target_blueprint, forward_m=25.0)
+        session.spawn_ahead_of_ego("vehicle.audi.tt", forward_m=25.0)
         session.step()
         session.close()
 

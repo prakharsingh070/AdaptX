@@ -319,7 +319,8 @@ CARLA became an upstream **data source**, not a second perception stack.
 - **Ground truth is a separate path** (ADR-045). `GroundTruthFrame` shares the LiDAR frame's
   id and timestamp so the two join later, and reaches no perception stage. A test runs the
   chain with and without reading it and asserts identical output.
-- One hard-coded smoke scenario: `python -m adaptx.carla.smoke`. Not a scenario framework.
+- One hard-coded smoke scenario, `carla/smoke.py` — **replaced in Phase 10** by the
+  `vehicle_approach` catalogue scenario and deleted.
 - CARLA remains **optional**: the backend starts, all 17 endpoints respond and the suite
   passes with the package absent.
 
@@ -340,9 +341,57 @@ against that ground truth is Phase 11.
 - A recorded dataset, so perception can be exercised without a live server.
 - Reference: [`knowledge-base/11_carla.md`](knowledge-base/11_carla.md).
 
-## Phase 10 — Scenario generation and event replay · **To do**
+## Phase 10 — Scenario generation · **Done (scenario framework)** · replay **deferred**
 
-- Seeded, reproducible scenario configurations; the event record and replay path.
+From "CARLA can provide one hard-coded scripted simulation" to "ADAPT-X can describe, seed,
+run and reproduce controlled scenarios."
+
+- `ScenarioDefinition` — **data, not code** (ADR-046). Actors, ego-relative placement,
+  timed constant-velocity motion segments, duration, timestep, an explicit seed. Validated at
+  construction; survives a JSON round-trip; the definition models import nothing from the
+  CARLA boundary.
+- `resolve(seed)` — every randomised value drawn once from `random.Random(seed)` into a
+  `ResolvedScenario` recorded on the result. The only randomised element is placement
+  jitter; the catalogue uses none. The seed is reported regardless.
+- Scripted motion (ADR-047) — timed segments summed in closed form. The runner **places**
+  each actor at its expected pose every frame; nothing integrates physics. So every frame
+  carries the *commanded* pose beside the simulator's *reported* one.
+- `ScenarioRunner` (ADR-048) — drives the Phase 9 session through a protocol extracted from
+  it; single-use, so runs share nothing; `CREATED → VALIDATING → READY → RUNNING →
+  COMPLETED | FAILED`; cleanup in a `finally` on every path. A malformed definition raises
+  before any simulator contact; a run-time failure returns `FAILED` with the frames stepped.
+- Ground truth recorded beside every frame, joined by simulator frame id, fed to **no**
+  pipeline stage (ADR-045). The processor callback receives the sensor frame and nothing
+  else, by signature.
+- Four catalogue scenarios: `stationary_vehicle`, `vehicle_approach` (the Phase 9 smoke
+  scene as a definition), `pedestrian_crossing` (timed start and stop), `cyclist_crossing`
+  (two classes, diagonal motion, a close pass).
+- `python -m adaptx.scenarios list | run <id> [--seed] [--json]`. **No HTTP endpoint** starts
+  a scenario (ADR-042).
+- `carla/smoke.py` and its two orphaned settings **deleted**; its seven tests retargeted onto
+  the framework with intent preserved.
+- No new dependencies.
+
+**The run result is raw evidence, not a conclusion.** Frame identities, scripted poses,
+ground truth and stage counts - and no accuracy, precision, error or match figure anywhere.
+Computing one is Phase 11, and a test asserts the result contracts carry no such field.
+
+**No live CARLA run has been executed.** The package is still absent here; the framework
+has been exercised only against a stand-in. Experiment 009 measures orchestration cost alone
+(~35 µs to resolve, ~7 µs per actor per frame). The catalogue's blueprints have not been
+confirmed to exist on any real server.
+
+### Deferred from Phase 10
+
+- **Event replay.** The `ScenarioRunResult` is the recording a replay would need, but no
+  playback path exists and `DataSource.REPLAY` is still produced by nothing. The open design
+  question from the handoff - re-run the simulation or re-play a recording - is still open.
+- **Ego motion.** `EgoDefinition.stationary` is validated `True`; every catalogue scenario
+  moves the targets instead.
+- Traffic, weather, time of day, the Traffic Manager, and any scene with more than a handful
+  of actors.
+- Moving the ground-truth contracts out of `adaptx.carla`, which a second simulator would
+  trigger.
 - References: [`knowledge-base/12_scenario-generation.md`](knowledge-base/12_scenario-generation.md),
   [`knowledge-base/14_event-replay.md`](knowledge-base/14_event-replay.md).
 

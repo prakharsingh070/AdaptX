@@ -22,7 +22,7 @@ imports no simulator at all, which is what makes the part where a sign error
 would silently mirror the world testable without CARLA installed.
 """
 
-from adaptx.carla.client import CarlaClient, carla_package_available
+from adaptx.carla.client import CarlaClient, carla_package_available, carla_package_version
 from adaptx.carla.conversion import (
     SIMULATION_EPOCH,
     build_raw_frame,
@@ -56,6 +56,7 @@ __all__ = [
     "MockCarlaSimulatorClient",
     "build_raw_frame",
     "carla_package_available",
+    "carla_package_version",
     "carla_points_to_adaptx",
     "carla_world_to_ego",
     "carla_yaw_to_heading_rad",

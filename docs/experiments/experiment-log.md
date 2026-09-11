@@ -695,8 +695,9 @@ and no CARLA server was reachable, so the live smoke test
 
 Nothing below is a CARLA measurement. In particular this entry contains **no** figure for
 simulator throughput, sensor delivery latency, frame rate, actor capacity or ground-truth
-accuracy, because none was measured. When a server is available, `python -m adaptx.carla.smoke
---json <path>` records a live run and its output is labelled as such.
+accuracy, because none was measured. When a server is available, a live run is recorded by
+`python -m adaptx.scenarios run vehicle_approach --json <path>` (the Phase 10 replacement
+for the `carla.smoke` command this entry originally named) and its output is labelled as such.
 
 The lifecycle tests that did run exercise the adapter against
 `tests/fixtures/fake_carla.py`, a hand-written stand-in. It does no physics, no rendering and
@@ -762,4 +763,67 @@ adaptx 0.1.0. Single-threaded.
 - **Detection, tracking or prediction accuracy.** Ground truth is now recorded beside every
   frame, which makes accuracy measurable **for the first time** - but measuring it is
   Phase 11, and nothing here attempts it.
+
+---
+
+## Experiment 009 - Phase 10 scenario orchestration cost
+
+**Date:** 2026-09-11
+
+### What was NOT executed
+
+**No live CARLA run took place.** The `carla` package remains uninstalled in this environment,
+so every catalogue scenario has been executed only against `tests/fixtures/fake_carla.py`, a
+stand-in with no physics and no real ray casting. `pytest -m carla` reports **7 skipped**.
+
+Nothing below is a CARLA measurement, a pipeline measurement, or an accuracy figure.
+
+### What was measured
+
+The cost of the scenario framework's **own** work, isolated from both the simulator and the
+pipeline: resolving a definition from its seed, computing every actor's closed-form scripted
+pose for every frame, and building the per-frame record. This is the orchestration overhead
+Phase 10 adds on top of whatever the simulator and the pipeline cost.
+
+**Scenario:** The four catalogue definitions. `resolve()` timed over 200 repeats;
+`expected_pose()` for every actor on every frame over 20 repeats; a full `ScenarioRunner.run()`
+with no processor over 3 repeats against the fake simulator.
+
+**Random seed:** 20260101 (the catalogue seed). No catalogue scenario has a randomised element.
+
+**Hardware and software:** Windows 11, 16 logical CPUs, Python 3.13.7, NumPy 2.5.3,
+adaptx 0.1.0. Single-threaded.
+
+**Results (medians):**
+
+| Scenario | Frames | Actors | resolve µs | pose µs / frame | run ms (fake) | ms / frame |
+|---|---|---|---|---|---|---|
+| stationary_vehicle | 40 | 1 | 34 | 6.7 | 317 | 7.9 |
+| vehicle_approach | 60 | 1 | 35 | 7.7 | 462 | 7.7 |
+| pedestrian_crossing | 120 | 1 | 35 | 7.4 | 908 | 7.6 |
+| cyclist_crossing | 80 | 2 | 44 | 14.4 | 731 | 9.1 |
+
+**Synthetic; fake simulator; not a CARLA or pipeline performance claim.**
+
+**Findings:**
+
+- **The framework's own cost is negligible.** Resolving a scenario is ~35 µs once; scripted
+  poses are ~7 µs per actor per frame. Both scale linearly with actor count, as the
+  closed-form arithmetic predicts, and neither is worth optimising.
+- **The run column measures the fake, not the runner.** ~7.6 ms/frame is almost entirely the
+  stand-in generating a ground plane and vehicle shells on every tick; the runner contributes
+  the two figures to its left plus record construction. Against a real CARLA server this
+  column would be dominated by the simulator instead, and would say nothing about ADAPT-X.
+- No pipeline stage was run, so no pipeline figure is reported; Experiments 002-007 cover those.
+
+**Not measured, and not measurable here:**
+
+- **Anything about CARLA.** No server ran. The catalogue's blueprints have not been confirmed
+  to exist on any real server.
+- **Whether the scripted poses match what a real simulator reports.** Against the fake they
+  match to rounding, because the fake places actors exactly where it is told. A real server
+  settles a spawned vehicle onto the road and may reject a placement; that gap is what the
+  live tests exist to find.
+- **Anything about perception accuracy.** Ground truth and scripted poses are now recorded
+  beside every frame, which is the precondition for measuring it. Measuring it is Phase 11.
 

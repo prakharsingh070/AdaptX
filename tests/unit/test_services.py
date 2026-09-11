@@ -245,6 +245,26 @@ class TestSystemService:
         assert "never reaches detection" in carla.detail
         assert "DATA SOURCE" in carla.detail
 
+    def test_scenarios_are_partial_and_carry_no_evaluation_claim(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 10 added the scenario framework; it evaluates nothing.
+
+        A framework that records ground truth is one step from claiming
+        accuracy. The component must say plainly that the step has not been
+        taken, and must never report IMPLEMENTED.
+        """
+        components = {c.name: c for c in context.system.status().components}
+        scenarios = components["scenarios"]
+
+        assert scenarios.implementation is ImplementationStatus.PARTIAL
+        assert scenarios.implementation is not ImplementationStatus.IMPLEMENTED
+        assert scenarios.phase == 10
+        assert scenarios.required is False
+        assert "NO accuracy" in scenarios.detail
+        assert "NO pipeline stage" in scenarios.detail
+        assert "No live CARLA run" in scenarios.detail
+
     def test_prediction_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext
     ) -> None:

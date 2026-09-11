@@ -224,6 +224,30 @@ def _declared_components() -> list[ComponentStatus]:
             phase=9,
         ),
         ComponentStatus(
+            name="scenarios",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "deterministic scenario framework. A scenario is a declarative "
+                "definition - actors, ego-relative placement, timed "
+                "constant-velocity motion segments, duration, timestep and an "
+                "explicit seed - validated before any simulator is touched and "
+                "reproducible from the definition alone. A runner drives the "
+                "CARLA boundary through a narrow protocol, places every actor "
+                "at its closed-form scripted pose each frame, records ground "
+                "truth beside every sensor frame and feeds it to NO pipeline "
+                "stage, and destroys every actor on completion or failure. "
+                "The run result is raw evidence - frame identities, scripted "
+                "poses, ground truth, stage counts - and carries NO accuracy "
+                "or evaluation figure; comparing perception against ground "
+                "truth is Phase 11 and has not been done. Four catalogue "
+                "scenarios. No live CARLA run has been executed; the framework "
+                "has been exercised only against a stand-in. Ego motion, event "
+                "replay, traffic and weather are not implemented"
+            ),
+            phase=10,
+        ),
+        ComponentStatus(
             name="prediction",
             readiness=ComponentReadiness.READY,
             implementation=ImplementationStatus.PARTIAL,
