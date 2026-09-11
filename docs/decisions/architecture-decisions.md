@@ -1573,6 +1573,179 @@ The conversion tests are the mitigation.
 
 **Status:** Accepted
 
+## ADR-046: Scenarios Are Generic Declarative Contracts, Resolved by an Explicit Seed
+
+**Decision:** A scenario is **data**: a `ScenarioDefinition` holding actors, their ego-relative
+placement, their scripted motion, the duration, the timestep and an explicit seed. The
+definition models (`adaptx.scenarios.models`, `catalogue`) import nothing from the CARLA
+boundary and nothing from the simulator package. Every randomised value is drawn from
+`random.Random(seed)` - an explicit instance - exactly once, before any simulator is
+touched, into a `ResolvedScenario` that is recorded on the result.
+
+The seed is retained and reported even when a scenario has nothing to randomise. The only
+randomised element Phase 10 defines is placement jitter; the catalogue uses none, so every
+catalogue scenario is exact.
+
+**Reason:** The handoff named the trap: the moment scenarios are Python functions, they are
+reproducible from a git commit rather than from a description. A definition that survives a
+JSON round-trip and rebuilds the same scene is the property that makes `random seed +
+scenario configuration = reproducible experiment` (`12_scenario-generation.md`) actually true.
+
+Keeping the definition layer free of CARLA is what makes the same definition usable by a
+second simulator, and it is asserted by a source-level test rather than assumed - importing
+a submodule runs the package `__init__`, so an import-based check would be vacuous.
+
+Drawing from an explicit generator rather than the module-level one means nothing else in
+the process can perturb a draw, and a resolution never disturbs anyone else's randomness.
+Drawing once, up front, means a run's placements are fixed before the first frame and cannot
+drift with the order in which frames happen to be processed.
+
+**Alternatives considered:** Scenario classes with a `run()` method (reproducible from code,
+not data); seeding the global `random` module (any import that consumes randomness would
+silently change the draw); deriving randomness from CARLA's own RNG (ties reproducibility to
+a server version); omitting the seed when nothing is randomised (a run would then not record
+what it would have used, and adding jitter later would change every result's shape).
+
+**Impact:** `ScenarioRunResult` embeds the full `ResolvedScenario`, so a run is reproducible
+from its result without the catalogue. `CarlaSettings.seed` - declared in Phase 9 and consumed
+by nothing - is now set from the scenario, so the boundary and the definition agree.
+
+**Risks:** Ground-truth contracts still live in `adaptx.carla` although they are
+simulator-generic; the runner and result layers import them from there. A second simulator
+would be the trigger to move them, and doing it now would be Phase 9 refactoring for style.
+
+**Status:** Accepted
+
+## ADR-047: Scripted Motion as Timed Constant-Velocity Segments, Placed Not Simulated
+
+**Decision:** An actor's motion is an ordered list of non-overlapping `MotionSegment`s, each
+a constant ego-frame velocity over `[start_s, stop_s)`. An actor with no segments is
+stationary. The position at scenario time *t* is the base placement plus the sum of every
+segment's displacement up to *t* - a closed form. The runner **places** each actor at that
+pose every frame with `place_ahead_of_ego`; it never applies a velocity and lets physics
+integrate.
+
+**Reason:** Three phases depend on frame timing being exact, and physics is not
+frame-reproducible. Placing an actor at a computed pose makes frame *n* a function of the
+definition, the seed and *n* alone, which is the determinism the phase exists to provide.
+
+The closed form has a second consequence that matters more than it looks: the scenario can
+state where every actor **should** be on every frame without a simulator running. That
+expected pose is recorded beside what the simulator reported, and it is the third leg of the
+comparison Phase 11 will make - commanded, reported, inferred. A physics-driven actor has no
+"commanded pose" to record.
+
+Segments rather than a single velocity because a timed start, a timed stop and a simple
+multi-leg path are the cases the catalogue needs (a pedestrian who waits, crosses, and
+stops), and a list of segments expresses all three with one representation.
+
+**Alternatives considered:** A single constant velocity per actor (no timed start or stop);
+waypoints with arrival times (more general, and harder to validate; segments cover the
+catalogue and can be extended); CARLA autopilot or the Traffic Manager (non-deterministic
+without seeding, and explicitly out of scope); applying velocity through physics (loses the
+commanded pose and the frame-exact determinism).
+
+**Impact:** Tests assert the arithmetic by hand - a timed start holds position until it
+begins, a timed stop freezes it after, a diagonal moves on both axes, an L-shaped path sums
+its legs - and that the simulator's reported ground truth matches the commanded pose to
+within the fake's rounding.
+
+**Risks:** Placed motion has no physics: no acceleration, no turning radius, no collision
+response, and an actor placed into a wall will sit in the wall. Scenario authors carry that.
+Ego motion is not supported - `EgoDefinition.stationary` is validated `True` so the
+limitation is visible in every definition rather than silently assumed.
+
+**Status:** Accepted
+
+## ADR-048: The Runner Drives a Protocol Extracted From the Boundary, and Runs Once
+
+**Decision:** `ScenarioRunner` drives the simulator through `ScenarioSimulator`, a structural
+protocol of exactly the methods `CarlaSimulationSession` already exposes - `open`, `close`,
+`step`, `ground_truth`, `status`, `spawn_ahead_of_ego`, `place_ahead_of_ego`. No adapter code
+changed to satisfy it. A runner is single-use: it holds the lifecycle of one run
+(`CREATED → VALIDATING → READY → RUNNING → COMPLETED | FAILED`), and a second scenario gets a
+second runner.
+
+Two failure modes are kept distinct. A **malformed definition** raises `ScenarioError` before
+any simulator is contacted. A **run-time failure** - a refused spawn, a sensor timeout, an
+exception inside processing - returns a `FAILED` result with the reason, after `close()` has
+run in a `finally`.
+
+**Reason:** Extracting the protocol from the boundary rather than imposing one on it kept
+Phase 9 untouched, which the handoff required, and it is what lets the test suite drive the
+runner against a stand-in - and what would let a second simulator plug in without touching
+the scenario layer.
+
+Single-use runners are the isolation guarantee. Actor handles, spawn records and lifecycle
+state live on the instance; a fresh instance per run means scenario B cannot inherit scenario
+A's actors, and a test asserts exactly that with two runs against one world.
+
+The two failure modes are different in kind. A definition that fails validation is a
+programming error and should be loud, immediately, and never reach a simulator. A run that
+fails part-way is an event worth recording - which frames were stepped, what the error was -
+so a batch of runs survives one bad one and the evidence is kept. The first version of the
+runner conflated them and crashed inside its own failure path; the distinction was drawn from
+that bug.
+
+**Alternatives considered:** Making the runner hold a session and re-run definitions (state
+leaks between runs; the isolation test would have been the first thing to fail); returning
+`FAILED` for a malformed definition (swallows a programming error into a result that looks
+like data); raising for run-time failures (loses the frames stepped so far and stops a batch).
+
+**Impact:** The processor callback receives the sensor frame and nothing else, by signature.
+Ground truth is fetched by the runner, recorded on the result, and passed to no stage; an
+integration test runs the chain by hand without ever calling `ground_truth()` and asserts
+identical stage counts. `carla/smoke.py` is deleted; its constants became the
+`vehicle_approach` definition and its seven tests were retargeted onto the framework.
+
+**Risks:** The protocol pins the boundary's method names. Renaming one is now a two-place
+change, which is the point.
+
+**Status:** Accepted
+
+## ADR-049: The Ego's Spawn Transform Is the Placement Reference Until the First Tick
+
+**Decision:** `CarlaSimulationSession` keeps the transform the ego was spawned with and uses
+it - not `actor.get_transform()` - as the reference frame for every ego-relative placement
+(`spawn_ahead_of_ego`, `place_ahead_of_ego`), for `ego_state()` and for ground truth, until
+the session has stepped its first frame. From the first tick on it uses the simulator's
+reported transform. The spawn points are walked in order and the first that accepts the ego
+is used; its index is recorded as `ego_spawn_index` on the session status.
+
+**Reason:** Found by the first live run (Experiment 010). In synchronous mode, CARLA 0.9.16
+does not report a freshly spawned actor's pose until the server has ticked: `get_transform()`
+answers the world origin with zero yaw. The session read it immediately after spawning, so
+"45 m ahead and 3.5 m left" was computed from `(0, 0, 0)` and landed off-road, 70 m from the
+ego, and the target spawn was refused. The stand-in never caught this because its ego *is*
+at the origin.
+
+Before the first tick, the spawn transform is the only truthful statement of where the ego
+is. After it, the simulator's answer is - and the two agree to a centimetre of settling
+because the ego is never driven (ADR-047). Switching to the live pose after the first tick
+rather than using the spawn transform forever keeps the door open for a moving ego without
+another change here.
+
+Walking the spawn points is the same kind of finding: index 0 on Town10HD_Opt refuses every
+spawn while 1-11 accept. Taking the first accepting index is still deterministic per map,
+and recording it keeps a run reproducible from what it reports.
+
+**Alternatives considered:** Ticking once inside `open()` (would enqueue a sensor frame
+before any `step()`, and the frame-matching in `step()` would then have to discard it -
+more moving parts to be wrong); always using the spawn transform (correct today, wrong the
+day the ego moves); leaving it and telling scenarios to step once before spawning (pushes a
+simulator quirk into every scenario author's head).
+
+**Impact:** `SimulationSessionStatus` gains `ego_spawn_index` and `server_version` (both
+additive, null when unknown). The fake simulator now reports the origin until ticked, like
+the server, so the regression cannot pass against the stand-in and fail live again. Three
+placement tests read a pose only after stepping.
+
+**Risks:** A server that *does* report the pose before the first tick is handled identically -
+the spawn transform and the reported one agree. A scenario that moves the ego before the
+first tick would see the spawn transform; no such scenario exists (ADR-047, stationary ego).
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title

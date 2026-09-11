@@ -50,6 +50,19 @@ def carla_package_available() -> bool:
         return False
 
 
+def carla_package_version() -> str:
+    """The installed CARLA version, or a plain statement that it is absent.
+
+    Lives here so that nothing outside the boundary has to import ``carla``
+    to describe a run (ADR-042).
+    """
+    if not carla_package_available():
+        return "not installed"
+    import carla
+
+    return str(getattr(carla, "__version__", "unknown"))
+
+
 class CarlaClient(CarlaSimulatorClient):
     """Connects ADAPT-X to a running CARLA server."""
 

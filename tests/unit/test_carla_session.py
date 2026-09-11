@@ -29,7 +29,14 @@ from adaptx.config.settings import CarlaSettings
 from adaptx.core.exceptions import SimulatorUnavailableError
 from adaptx.models.common import DataSource
 from adaptx.models.system import SimulationState
-from tests.fixtures.fake_carla import FakeCarlaModule, FakeSensor, FakeWorld
+from tests.fixtures.fake_carla import (
+    FakeCarlaModule,
+    FakeSensor,
+    FakeWorld,
+    Location,
+    Rotation,
+    Transform,
+)
 
 
 def settings(**overrides: object) -> CarlaSettings:
@@ -187,6 +194,42 @@ class TestActorCleanup:
         with pytest.raises(SimulatorUnavailableError, match=r"vehicle\.tesla\.model3"):
             instance.open()
 
+    def test_a_refused_first_spawn_point_falls_through_to_the_next(self) -> None:
+        """Found live: Town10HD_Opt refuses spawn point 0 on CARLA 0.9.16.
+
+        The session must not be wedded to index 0. Taking the first point that
+        accepts the vehicle is still deterministic for a given map, and the
+        index used is recorded so the run stays reproducible from its report.
+        """
+        world = FakeWorld()
+        world.refuse_spawn_point_indices.add(0)
+        instance = session(world)
+        instance.open()
+
+        assert instance.ego_actor_id is not None
+        assert instance.ego_spawn_index == 1
+        assert instance.status().ego_spawn_index == 1
+        instance.close()
+
+    def test_the_first_spawn_point_is_used_when_it_accepts(self) -> None:
+        instance = session()
+        instance.open()
+        assert instance.ego_spawn_index == 0
+        instance.close()
+
+    def test_every_spawn_point_refusing_is_reported_with_the_count(self) -> None:
+        world = FakeWorld()
+        world.refuse_spawn_point_indices.update({0, 1})
+        with pytest.raises(SimulatorUnavailableError, match="any of the 2 spawn points"):
+            session(world).open()
+        assert world.actors == {}
+
+    def test_the_spawn_index_is_forgotten_on_close(self) -> None:
+        instance = session()
+        instance.open()
+        instance.close()
+        assert instance.ego_spawn_index is None
+
     def test_a_map_without_spawn_points_is_reported(self) -> None:
         instance = session(FakeWorld(spawn_points=False))
         with pytest.raises(SimulatorUnavailableError, match="spawn points"):
@@ -315,6 +358,10 @@ class TestSessionStatus:
         assert status.simulation_frame == frame.frame_id
         assert status.last_point_count == frame.point_count
         assert status.map_name == "FakeTown"
+        assert status.server_version == "fake-0.0"
+
+    def test_status_before_connecting_reports_no_server_version(self) -> None:
+        assert session().status().server_version is None
 
     def test_status_carries_counts_and_never_point_data(self) -> None:
         instance = session()
@@ -338,6 +385,7 @@ class TestScenarioPlacement:
         target = instance.spawn_ahead_of_ego(
             "vehicle.audi.tt", forward_m=30.0, left_m=4.0, up_m=0.5
         )
+        instance.step()  # A pose is only reported once the server has ticked.
         location = target.get_transform().location
         instance.close()
 
@@ -350,9 +398,55 @@ class TestScenarioPlacement:
         instance.open()
         target = instance.spawn_ahead_of_ego("vehicle.audi.tt", forward_m=40.0)
         instance.place_ahead_of_ego(target, forward_m=20.0)
+        instance.step()
         location = target.get_transform().location
         instance.close()
         assert location.x == pytest.approx(20.0)
+
+    def test_placement_before_the_first_tick_offsets_from_the_spawn_point(self) -> None:
+        """Regression for the first live run: CARLA reports a fresh actor at
+        the origin until it has ticked, so "45 m ahead" computed from that
+        landed far from the ego and off-road. The spawn transform is the
+        reference until the server has ticked."""
+        world = FakeWorld()
+        world.get_map().spawn_points[0] = Transform(
+            Location(-67.25, 27.96, 0.60), Rotation(yaw=90.0)
+        )
+        instance = session(world)
+        instance.open()
+        target = instance.spawn_ahead_of_ego("vehicle.audi.tt", forward_m=45.0, left_m=3.5)
+        # Nothing has ticked: the fake, like the server, still reports origin.
+        assert instance._ego.get_transform().location.x == 0.0
+        requested = target._transform  # The pose the spawn asked for.
+        instance.close()
+
+        # Facing CARLA +y (yaw 90): "ahead" is +y and ADAPT-X "left" is CARLA +x.
+        assert requested.location.x == pytest.approx(-67.25 + 3.5)
+        assert requested.location.y == pytest.approx(27.96 + 45.0)
+        assert requested.rotation.yaw == pytest.approx(90.0)
+
+    def test_placement_after_a_tick_offsets_from_the_live_pose(self) -> None:
+        world = FakeWorld()
+        world.get_map().spawn_points[0] = Transform(Location(10.0, 5.0, 0.6), Rotation())
+        instance = session(world)
+        instance.open()
+        instance.step()
+        target = instance.spawn_ahead_of_ego("vehicle.audi.tt", forward_m=20.0)
+        instance.step()
+        location = target.get_transform().location
+        instance.close()
+        assert location.x == pytest.approx(30.0)
+        assert location.y == pytest.approx(5.0)
+
+    def test_ego_state_before_the_first_tick_is_the_spawn_pose_not_the_origin(self) -> None:
+        world = FakeWorld()
+        world.get_map().spawn_points[0] = Transform(Location(10.0, 5.0, 0.6), Rotation())
+        instance = session(world)
+        instance.open()
+        state = instance.ego_state()
+        instance.close()
+        assert state.position.x == pytest.approx(10.0)
+        assert state.position.y == pytest.approx(-5.0)  # CARLA +y is ADAPT-X -y
 
     def test_spawning_before_an_ego_exists_is_refused(self) -> None:
         with pytest.raises(SimulatorUnavailableError, match="no ego"):

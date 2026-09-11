@@ -25,7 +25,6 @@ from itertools import pairwise
 import pytest
 
 from adaptx.carla.session import CarlaSimulationSession
-from adaptx.carla.smoke import APPROACH_LEFT_M, run_smoke
 from adaptx.config.settings import CarlaSettings, LiDARSettings, MapSettings, Settings
 from adaptx.core.lifecycle import ApplicationContext, build_context
 from adaptx.models.common import DataSource
@@ -61,7 +60,6 @@ def sim_settings(**overrides: object) -> Settings:
         fixed_delta_seconds=0.05,
         lidar_rotation_frequency_hz=20.0,
         sensor_timeout_s=1.0,
-        smoke_frames=4,
         **overrides,  # type: ignore[arg-type]
     )
     return Settings(
@@ -460,10 +458,16 @@ class TestCarlaStaysBehindTheBoundary:
         assert offenders == []
 
     def test_importing_adaptx_never_requires_carla(self) -> None:
-        """INVARIANT 6: CARLA is optional for the test suite and the backend."""
-        import sys
+        """INVARIANT 6: CARLA is optional for the test suite and the backend.
 
-        assert "carla" not in sys.modules
+        Retargeted during the first live validation. This asserted
+        ``"carla" not in sys.modules`` in-process, which only held while the
+        package was absent from every environment the suite had run in. Once
+        it is installed, other tests in the same process import it
+        legitimately. The invariant is about what ``adaptx`` *requires*, and a
+        fresh interpreter is the only place that can be observed.
+        """
+        assert _leaked_modules(["adaptx"], forbidden="carla") == []
 
     def test_the_whole_application_imports_without_the_carla_package(self) -> None:
         """The app may import the *boundary*; it must not require the simulator.
@@ -489,88 +493,63 @@ class TestCarlaStaysBehindTheBoundary:
         assert type(frame).__module__.startswith("adaptx.models")
 
 
-class TestSmokeRunner:
-    """The scripted scenario, driven against the fake simulator."""
+class TestTheApproachScenarioReplacesTheSmokeRun:
+    """Retargeted in Phase 10: the hard-coded smoke run became a catalogue scenario.
 
-    def test_the_smoke_run_completes_every_frame(self, settings: Settings) -> None:
-        result = run_smoke(
-            settings,
-            context=build_context(settings),
-            session=CarlaSimulationSession(
-                settings.carla, carla_module=FakeCarlaModule(FakeWorld())
-            ),
-            frames=4,
+    Phase 9 proved the integration with three constants and a loop in
+    ``carla/smoke.py``; Phase 10 replaced that with ``vehicle_approach``, the
+    same scene as a validated definition. Every guarantee the smoke tests
+    made is asserted here against the framework that superseded them - the
+    intent is unchanged, only the thing under test has grown up.
+    """
+
+    def _run(self, settings: Settings, world: FakeWorld | None = None):  # type: ignore[no-untyped-def]
+        from adaptx.scenarios import load, run_scenario
+
+        definition = load("vehicle_approach")
+        simulator = CarlaSimulationSession(
+            settings.carla, carla_module=FakeCarlaModule(world or FakeWorld())
         )
-        assert result.frame_count == 4
+        return run_scenario(
+            definition, settings=settings, context=build_context(settings), simulator=simulator
+        )
+
+    def test_the_run_completes_every_frame(self, settings: Settings) -> None:
+        result = self._run(settings)
+        assert result.completed
+        assert result.frame_count == result.planned_frame_count == 60
         assert result.timestamps_are_monotonic()
 
-    def test_the_smoke_run_produces_perception_output(self, settings: Settings) -> None:
-        result = run_smoke(
-            settings,
-            context=build_context(settings),
-            session=CarlaSimulationSession(
-                settings.carla, carla_module=FakeCarlaModule(FakeWorld())
-            ),
-            frames=4,
-        )
+    def test_the_run_produces_perception_output(self, settings: Settings) -> None:
+        result = self._run(settings)
+        counts = [record.pipeline for record in result.frames]
         assert all(record.point_count > 0 for record in result.frames)
-        assert any(record.detections > 0 for record in result.frames)
-        assert all(record.adaptive_cells > 0 for record in result.frames)
+        assert any(c is not None and c.detections > 0 for c in counts)
+        assert all(c is not None and c.adaptive_cells > 0 for c in counts)
 
-    def test_the_smoke_run_records_ground_truth_for_every_frame(self, settings: Settings) -> None:
-        result = run_smoke(
-            settings,
-            context=build_context(settings),
-            session=CarlaSimulationSession(
-                settings.carla, carla_module=FakeCarlaModule(FakeWorld())
-            ),
-            frames=3,
-        )
-        assert len(result.ground_truth) == 3
+    def test_the_run_records_ground_truth_for_every_frame(self, settings: Settings) -> None:
+        result = self._run(settings)
+        assert len(result.ground_truth) == result.frame_count
         assert all(truth.others() for truth in result.ground_truth)
 
     def test_the_target_approaches_over_the_run(self, settings: Settings) -> None:
         """Ground truth should show the scripted approach, monotonically."""
-        result = run_smoke(
-            settings,
-            context=build_context(settings),
-            session=CarlaSimulationSession(
-                settings.carla, carla_module=FakeCarlaModule(FakeWorld())
-            ),
-            frames=5,
-        )
-        distances = [
-            record.nearest_ground_truth_m
-            for record in result.frames
-            if record.nearest_ground_truth_m is not None
-        ]
-        assert len(distances) >= 2
+        result = self._run(settings)
+        distances = [truth.nearest().distance_m for truth in result.ground_truth]  # type: ignore[union-attr]
         assert distances[-1] < distances[0]
-        assert APPROACH_LEFT_M > 0.0
+        assert all(later <= earlier + 1e-6 for earlier, later in pairwise(distances))
 
     def test_the_run_cleans_up_after_itself(self, settings: Settings) -> None:
         world = FakeWorld()
-        run_smoke(
-            settings,
-            context=build_context(settings),
-            session=CarlaSimulationSession(settings.carla, carla_module=FakeCarlaModule(world)),
-            frames=3,
-        )
-        assert world.actors == {}, "the smoke run must leave no actors behind"
+        self._run(settings, world)
+        assert world.actors == {}, "the run must leave no actors behind"
 
     def test_two_runs_produce_identical_records(self, settings: Settings) -> None:
-        def run() -> list[tuple[int, int, int]]:
-            result = run_smoke(
-                settings,
-                context=build_context(settings),
-                session=CarlaSimulationSession(
-                    settings.carla, carla_module=FakeCarlaModule(FakeWorld())
-                ),
-                frames=3,
-            )
+        def signature(settings: Settings) -> list[tuple[int, int, int]]:
+            result = self._run(settings)
             return [
-                (record.frame_id, record.point_count, record.adaptive_cells)
-                for record in result.frames
+                (r.simulator_frame_id, r.point_count, r.pipeline.adaptive_cells)  # type: ignore[union-attr]
+                for r in result.frames
             ]
 
-        assert run() == run()
+        assert signature(settings) == signature(settings)

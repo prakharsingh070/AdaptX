@@ -31,7 +31,8 @@ an abstract interface.
 | Trajectory prediction | **Partial** | Phase 5: deterministic constant-velocity baseline with heuristic uncertainty (`prediction/constant_velocity.py`). **No** acceleration model, no Kalman filter, no learned model, no map or lane conditioning, no interaction between objects. Accuracy unmeasured - no labelled trajectories exist |
 | Uncertainty engine | **Partial** | Phase 7: a heuristic per-object uncertainty scalar with its contributing reasons, reported beside risk rather than folded into it (ADR-033). Not a variance, not calibrated. `AdaptiveMapCell.uncertainty` is still unpopulated - that needs a per-cell formulation |
 | Fixed-resolution baseline | **Implemented** | Both halves of ADR-003 now exist: `FixedResolutionMapper` (`is_adaptive: false`) and `TiledAdaptiveMapper` (`is_adaptive: true`). Experiment 007 is the first comparison over identical input, and it is **not a clean win** - see the entry before quoting it |
-| Scenario generation, event replay, scenario benchmarking | *Planned* | Not started |
+| Scenario framework | **Partial** | Phase 10: `ScenarioDefinition` as data (ADR-046), timed constant-velocity motion placed rather than simulated (ADR-047), a single-use runner driving the Phase 9 boundary through an extracted protocol (ADR-048). Ground truth recorded per frame, never fed to perception. Four catalogue scenarios. Result is raw evidence with **no accuracy figure**. **No live run executed here.** Event replay deferred; `DataSource.REPLAY` still unproduced |
+| Event replay, scenario benchmarking | *Planned* | Not started. Replay was deferred from Phase 10 with the design question open |
 | Dashboard | *Planned* | Not started (`dashboard/README.md`) |
 
 The running backend reports this itself at `GET /api/v1/system/status`. Each component

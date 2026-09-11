@@ -590,13 +590,130 @@ unchanged, zero regressions.
 
 ---
 
+## Phase 10 — Scenario framework · verified (no live run) · replay deferred
+
+From one hard-coded scene to a way of describing scenes. The framework sits above the
+Phase 9 boundary and did not change it.
+
+**A scenario is data (ADR-046).** `ScenarioDefinition` holds actors, ego-relative placement,
+timed constant-velocity motion segments, duration, timestep and an explicit seed. It is
+validated at construction, survives a JSON round-trip, and its models import nothing from
+the CARLA boundary - a source-level test guards that, because an import-based one is vacuous
+when a package `__init__` pulls in the runner. The handoff's trap was named precisely: the
+moment scenarios are functions, they are reproducible from a commit, not a description.
+
+**The seed is explicit, consumed, and reported (ADR-046).** Every randomised value is drawn
+from `random.Random(seed)` once, before any simulator is opened, into a `ResolvedScenario`
+recorded on the result. A test asserts the draw never touches the global generator. The
+only randomised element is placement jitter; the catalogue uses none, so every catalogue
+scenario is exact - and still reports its seed. `CarlaSettings.seed`, declared in Phase 9
+and consumed by nothing, is now set from the scenario.
+
+**Motion is placed, not simulated (ADR-047).** An actor's position at any scenario time is
+a closed-form sum over its segments, and the runner places it there every frame. Frame *n*
+is therefore a function of the definition, the seed and *n*. The consequence that matters
+most: the scenario can state where every actor *should* be without a simulator running,
+so every frame records the **commanded** pose beside the **reported** one. That is the
+third leg of a comparison Phase 11 will make and Phase 10 does not.
+
+**The runner drives a protocol extracted from the boundary (ADR-048).** `ScenarioSimulator`
+is exactly the surface `CarlaSimulationSession` already had; no Phase 9 code changed to
+satisfy it. A runner is single-use, which is the isolation guarantee - a test runs two
+scenarios against one world and asserts the second inherits nothing. Cleanup runs in a
+`finally` on every path; a test breaks the second of two spawns and asserts the first was
+destroyed.
+
+**Two failure modes, kept apart.** The first version of the runner returned a `FAILED`
+result for a malformed definition and crashed inside its own failure path trying to embed
+the invalid definition in that result. The distinction was drawn from the bug: a malformed
+definition is a misuse and **raises** before any simulator contact; a run-time failure
+**returns** `FAILED` with the frames stepped so far, so a batch survives one bad run.
+
+**Ground truth stays out, again.** The processor callback receives the sensor frame and
+nothing else, by signature. An integration test runs the chain by hand without ever calling
+`ground_truth()` and asserts identical stage counts to the runner's. The result contracts
+carry no accuracy, precision, recall, error or match field, and a test asserts that too.
+
+**`carla/smoke.py` was deleted, not grown.** Its three constants became the
+`vehicle_approach` definition; its two orphaned settings were removed; its seven tests were
+retargeted onto the framework with intent preserved.
+
+**Three things the boundary tests caught.** A lazy `import carla` for a version string in
+generic runner code (moved into the boundary as `carla_package_version()`); the cyclist
+scenario failing against the stand-in because the fake did not know the bicycle blueprint -
+which exercised the partial-spawn cleanup path exactly as designed, with zero leaked actors;
+and my own smoke script producing an invalid definition through `model_copy`, which is what
+surfaced the failure-path crash above.
+
+**No live CARLA run was executed.** The package is still absent. Every catalogue scenario has
+run only against the stand-in, the catalogue's blueprints have not been confirmed on any
+real server, and a real server settles spawned vehicles onto the road in a way the fake does
+not. Experiment 009 measures orchestration cost alone: ~35 µs to resolve, ~7 µs per actor per
+frame - negligible, and the only figure this phase can honestly report.
+
+**Event replay is deferred, not done.** The `ScenarioRunResult` is the recording a replay
+would need, but no playback path exists and `DataSource.REPLAY` is still produced by nothing.
+The open question - re-run the simulation or re-play a recording - is still open.
+
+**Limitations:** no live validation; placed motion has no physics; the ego is stationary in
+every scenario; four scenarios, no traffic, no weather; ground-truth contracts still live in
+`adaptx.carla` though they are simulator-generic.
+
+**Status:** 1442 tests (1327 before), 7 deselected live, ruff and mypy clean, 17 endpoints
+unchanged, zero regressions, no new dependencies.
+
+---
+
+## Live CARLA validation of Phases 9 and 10 · 2026-09-11 · 7/7 live tests pass
+
+The "no live run" caveats on the two sections above were retired by running everything
+against a real CARLA 0.9.16 server on Town10HD_Opt (Experiment 010). The 3.13 environment
+cannot hold the client - the 0.9.16 wheel is built for CPython 3.12 only and PyPI's `carla`
+is 0.9.5 - so a second, Python 3.12 environment was created for it; the primary environment
+and the default suite are unchanged.
+
+**What the stand-in could not show, and the server did.** Three real behaviours, each fixed
+in the boundary with a fake-backed regression so it cannot recur silently:
+
+- A freshly spawned actor's `get_transform()` returns the world origin until the server has
+  ticked. Every ego-relative placement was computed from that origin, so the first live
+  scenario put its target 70 m from the ego, off-road, and the spawn was refused. The session
+  now uses the spawn transform as the reference until the first tick (ADR-049), and the fake
+  reports the origin until ticked so this cannot pass against the stand-in again.
+- Spawn point 0 of Town10HD_Opt refuses the ego every time; 1-11 accept. The session walks
+  the spawn points in order and records the index it used.
+- The `carla` module has no `__version__`; the server's `get_server_version()` is recorded.
+
+**One Phase 1 defect surfaced only because of the interpreter change.** `MetricsService`
+measured `fps` with `time.monotonic()`, which on Windows Python 3.12 ticks every 15.6 ms;
+frames within one tick shared a timestamp and `fps` was never computed. `perf_counter` now,
+with a mocked-clock test. On 3.13 it had been fine by accident.
+
+**Two tests assumed the absence of CARLA rather than testing for it.** A "no simulator"
+CLI test ran against the default port and, with a server there, *succeeded* and failed; it
+now targets a closed port. An import-isolation test ran in-process after other tests had
+legitimately imported `carla`; it now checks in a subprocess.
+
+**Result.** `pytest -m carla`: 7 passed. `python -m adaptx.scenarios run` for all four
+catalogue scenarios: COMPLETED, contiguous simulator frame ids, dt exactly 0.05 s,
+26,982-27,038 points per frame, ~92 ms of ADAPT-X pipeline per frame on this machine, and
+zero vehicle, walker or sensor actors left on the server, checked with a fresh client.
+Detections ran 8-16 per frame - most of them the map's static geometry. **No accuracy figure
+was computed**; the ground truth to compute one is in every run record, and that is Phase 11.
+
+**Status:** 1452 tests on 3.13 (1442 before), 1451 + 1 skipped on 3.12, 7 live tests
+passing against the server, ruff and mypy clean, 17 endpoints unchanged, no new
+dependencies. The fixes are uncommitted on `phase-10-scenario-framework` on top of `2a4ce2d`.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
 visible. Phase 9 declared `carla` as an **optional extra** rather than a dependency: the
 backend, the endpoints and the whole test suite still run without it, so the required set is
-unchanged after nine phases.
+unchanged after ten phases.
 
 Phase 8 added a second pattern worth naming: **the honest negative**. The phase the project
 is named for produced a result that is partly unflattering — slower than the baseline, and

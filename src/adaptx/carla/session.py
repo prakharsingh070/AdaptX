@@ -107,6 +107,8 @@ class CarlaSimulationSession:
         self._original_settings: Any | None = None
 
         self._ego: Any | None = None
+        self._ego_spawn_index: int | None = None
+        self._ego_spawn_transform: Any | None = None
         self._sensor: Any | None = None
         self._actors: list[Any] = []
         self._queue: queue.Queue[Any] = queue.Queue()
@@ -118,6 +120,7 @@ class CarlaSimulationSession:
         self._sim_time: float | None = None
         self._last_point_count: int | None = None
         self._map_name: str | None = None
+        self._server_version: str | None = None
 
     # -- state -------------------------------------------------------------
     @property
@@ -135,6 +138,11 @@ class CarlaSimulationSession:
         """Actor id of the ego vehicle, or ``None`` before it is spawned."""
         return None if self._ego is None else int(self._ego.id)
 
+    @property
+    def ego_spawn_index(self) -> int | None:
+        """Index into the map's spawn points the ego was placed at, once spawned."""
+        return self._ego_spawn_index
+
     def status(self) -> SimulationSessionStatus:
         """Compact, bounded description of the session."""
         return SimulationSessionStatus(
@@ -146,6 +154,8 @@ class CarlaSimulationSession:
             simulation_frame=self._sim_frame,
             simulation_time_s=self._sim_time,
             ego_actor_id=self.ego_actor_id,
+            ego_spawn_index=self._ego_spawn_index,
+            server_version=self._server_version,
             sensor_actor_id=None if self._sensor is None else int(self._sensor.id),
             actor_count=len(self._actors),
             last_point_count=self._last_point_count,
@@ -221,6 +231,8 @@ class CarlaSimulationSession:
             self._safely(actor.destroy, f"destroy actor {getattr(actor, 'id', '?')}")
         self._actors.clear()
         self._ego = None
+        self._ego_spawn_index = None
+        self._ego_spawn_transform = None
 
         # Restoring settings matters more than it looks: a server left in
         # synchronous mode blocks on a client that no longer exists, and looks
@@ -314,7 +326,7 @@ class CarlaSimulationSession:
                 details={"state": self._state.value},
             )
 
-        ego_transform = None if self._ego is None else self._ego.get_transform()
+        ego_transform = None if self._ego is None else self._ego_transform()
         ego_xyz = (0.0, 0.0, 0.0)
         ego_yaw = 0.0
         if ego_transform is not None:
@@ -347,7 +359,7 @@ class CarlaSimulationSession:
         """
         if self._ego is None:
             raise SimulatorUnavailableError("no ego vehicle has been spawned")
-        transform = self._ego.get_transform()
+        transform = self._ego_transform()
         velocity = self._ego.get_velocity()
         return VehicleState(
             timestamp=simulation_timestamp(self._sim_time or 0.0),
@@ -415,7 +427,25 @@ class CarlaSimulationSession:
         """Ego yaw in CARLA degrees, or 0.0 before an ego exists."""
         if self._ego is None:
             return 0.0
-        return float(self._ego.get_transform().rotation.yaw)
+        return float(self._ego_transform().rotation.yaw)
+
+    def _ego_transform(self) -> Any:
+        """The ego's pose, in CARLA's frame, as the reference for placement.
+
+        CARLA does not report a freshly spawned actor's pose until the server
+        has ticked once: in synchronous mode ``get_transform()`` returns the
+        world origin with zero yaw, not the spawn point (observed on 0.9.16,
+        first live run). Offsetting from that put every scripted actor
+        kilometres from the ego and off the road, so the spawn refused. Until
+        the first tick the transform the ego was spawned with is the only
+        truthful pose; after it the simulator's own answer is, and the two
+        agree because the ego is never driven (ADR-047).
+        """
+        if self._ego is None:
+            raise SimulatorUnavailableError("no ego vehicle has been spawned")
+        if self._frames_stepped == 0 and self._ego_spawn_transform is not None:
+            return self._ego_spawn_transform
+        return self._ego.get_transform()
 
     def _world_position_for(
         self, forward_m: float, left_m: float, up_m: float
@@ -425,7 +455,7 @@ class CarlaSimulationSession:
             raise SimulatorUnavailableError(
                 "no ego vehicle has been spawned, so there is no frame to offset from"
             )
-        transform = self._ego.get_transform()
+        transform = self._ego_transform()
         ego_xyz = (
             float(transform.location.x),
             float(transform.location.y),
@@ -456,6 +486,14 @@ class CarlaSimulationSession:
         self._client = client
         self._world = world
         self._map_name = str(world.get_map().name)
+        # The server's own answer. The ``carla`` package exposes no
+        # ``__version__`` (0.9.16), so this is the only version a run can
+        # truthfully record; kept None rather than guessed if the call fails.
+        try:
+            self._server_version = str(client.get_server_version())
+        except Exception:  # pragma: no cover - older or unusual server builds
+            logger.warning("CARLA server version unavailable", exc_info=True)
+            self._server_version = None
 
     def _configure_world(self) -> None:
         world = self._require_world()
@@ -490,13 +528,33 @@ class CarlaSimulationSession:
                 f"map '{self._map_name}' offers no spawn points",
                 details={"map": self._map_name},
             )
-        # Deterministic: always the same spawn point for the same map.
-        actor = world.try_spawn_actor(blueprint, spawn_points[0])
+        # Walk the map's spawn points in order and take the first that accepts
+        # the vehicle. Still deterministic - a given map always yields the same
+        # first-accepting index - but no longer wedded to index 0, which the
+        # first live run showed is refused on Town10HD_Opt while every later
+        # point succeeds (CARLA 0.9.16). The index used is recorded on the
+        # status so a run remains reproducible from what it reports.
+        actor = None
+        for index, transform in enumerate(spawn_points):
+            actor = world.try_spawn_actor(blueprint, transform)
+            if actor is not None:
+                self._ego_spawn_index = index
+                self._ego_spawn_transform = transform
+                break
         if actor is None:
             raise SimulatorUnavailableError(
-                f"could not spawn the ego vehicle '{self._settings.ego_blueprint}' "
-                f"at the first spawn point of '{self._map_name}'",
-                details={"blueprint": self._settings.ego_blueprint},
+                f"could not spawn the ego vehicle '{self._settings.ego_blueprint}' at any "
+                f"of the {len(spawn_points)} spawn points of '{self._map_name}'; every "
+                "location is occupied or colliding",
+                details={
+                    "blueprint": self._settings.ego_blueprint,
+                    "spawn_points": len(spawn_points),
+                },
+            )
+        if self._ego_spawn_index:
+            logger.info(
+                "ego spawned at a later spawn point; earlier ones refused",
+                extra={"context": {"spawn_index": self._ego_spawn_index}},
             )
         self._ego = actor
         self._actors.append(actor)

@@ -4,7 +4,7 @@
 [`PHASE_HISTORY.md`](PHASE_HISTORY.md) for how it got here and
 [`NEXT_PHASE.md`](NEXT_PHASE.md) for what to build next.
 
-Snapshot taken 2026-09-11 (Phase 9). The repository is the source of truth; if this file
+Snapshot taken 2026-09-11 (Phase 10). The repository is the source of truth; if this file
 disagrees with the code, the code wins and this file needs fixing.
 
 ---
@@ -21,8 +21,8 @@ Rules that govern all work are in [`../CLAUDE.md`](../CLAUDE.md) and
 
 ## 2. Current phase
 
-**Phase 9 COMPLETE.** Phases 1, 2 (A/B/C), 3, 4, 5, 6, 7, 8 and 9 are implemented and
-verified.
+**Phase 10 COMPLETE** (scenario framework; event replay deferred). Phases 1 through 10 are
+implemented and verified.
 Adaptive resolution — the thing the project is named for — now exists as a deterministic
 heuristic baseline, and has been measured against the fixed baseline (Experiment 007).
 
@@ -35,10 +35,12 @@ were deliberately left as originally written.
 
 ## 3. Branch and status
 
-- Branch: `phase-9-carla-integration`, branched from `origin/main`
-- Phases 1 through 8 are committed **and merged into `origin/main`** (PR #1 through PR #5).
-  Phase 8 is commit `b76ae1f`, merged as PR #5 in `5272f68`
-- Phase 9 is in the working tree on this branch, **not committed and not pushed**
+- Branch: `phase-10-scenario-framework`, branched from `origin/main`
+- Phases 1 through 9 are committed **and merged into `origin/main`** (PR #1 through PR #6).
+  Phase 9 is commit `efc935c`, merged as PR #6 in `9092c69`
+- Phase 10 is committed on this branch as `2a4ce2d`, **not pushed**. The live-validation
+  fixes of 2026-09-11 (ADR-049, Experiment 010) are in the working tree on top of it,
+  **not committed**
 
 > Local `main` was stale at `5f68a5e` (the Phase 7 merge) when Phase 9 began, two commits
 > behind `origin/main`. Branching from it would have silently dropped Phase 8. **Check
@@ -52,6 +54,9 @@ were deliberately left as originally written.
 ## 4. Architecture implemented
 
 ```
+ScenarioDefinition (data: actors, placement, motion, seed)   (Phase 10)
+  → resolve(seed) → ScenarioRunner: place actors at scripted pose per frame
+        ↓
 CARLA simulation                                        (Phase 9, optional)
   → session: sync mode, fixed timestep, ego + LiDAR
   → one coordinate conversion (left-handed → right-handed)
@@ -113,7 +118,8 @@ configuration snapshot so a record is self-describing.
 | `adaptx.prediction` | `constant_velocity`, `interfaces` |
 | `adaptx.mapping` | `grid_mapper` (fixed baseline), `controller` (Phase 8 policy), `adaptive_mapper` (tiled), `tiles` (shared geometry), `comparison`, `interfaces` |
 | `adaptx.risk` | `heuristic` (Phase 7 engine), `baseline` (proximity-only comparison reference), `interfaces` |
-| `adaptx.carla` | Boundary: `client` (connection), `session` (deterministic simulation lifecycle), `conversion` (the single coordinate/time boundary, imports no simulator), `ground_truth`, `smoke` (one scenario), `interfaces`, `mock`. Optional dependency |
+| `adaptx.scenarios` | `models` (definition, motion, resolution - imports nothing from `adaptx.carla`), `result` (raw evidence, no metrics), `interfaces` (`ScenarioSimulator` protocol), `runner`, `catalogue` (4 scenarios), `__main__` (CLI) |
+| `adaptx.carla` | Boundary: `client` (connection), `session` (deterministic simulation lifecycle), `conversion` (the single coordinate/time boundary, imports no simulator), `ground_truth`, `interfaces`, `mock`. Optional dependency. `smoke.py` was deleted in Phase 10 |
 | `adaptx.services` | `lidar_service`, `metrics_service`, `carla_service`, `system_service`, `tracking_service`, `prediction_service`, `mapping_service`, `risk_service`, `adaptive_mapping_service` |
 | `adaptx.api` | `app`, `schemas`, `dependencies`, `routes/`, `websocket/` |
 | `adaptx.benchmark` | `datasets`, `baseline`, `runner`, `detection`, `tracking`, `prediction`, `mapping`, `risk`, `adaptive`, `models` |
@@ -148,12 +154,15 @@ configuration snapshot so a record is self-describing.
 | `RiskField`, `RiskCell`, `ObjectRisk` | Phase 1 contracts. `ObjectRisk` is now populated via `evaluate()`; `RiskCell` is still unused - Phase 7 is object-level only |
 | `SystemStatus`, `ComponentStatus`, `SystemMetrics` | Readiness **and** implementation status (ADR-005) |
 | `SimulationState`, `SimulationSessionStatus` | Phase 9 session lifecycle, reported **beside** `CarlaStatus` because "package installed", "server connected" and "simulation running" are three independent facts |
+| `ScenarioDefinition`, `ScenarioActor`, `MotionSegment`, `Placement`, `EgoDefinition` | Phase 10 scenario as **data**: ego-relative placement, timed constant-velocity segments, explicit seed. Validated at construction; JSON round-trips |
+| `ResolvedScenario`, `ResolvedActor` | The definition with every seeded value drawn, recorded on the result so a run reproduces without the catalogue |
+| `ScenarioRunResult`, `ScenarioFrameRecord`, `ExpectedPose`, `StageCounts` | Raw evidence: frame identities, commanded poses, ground truth, stage counts. **No accuracy or evaluation field**, asserted by test |
 | `GroundTruthActor`, `GroundTruthFrame` | What the simulator *knows*. Deliberately **not** a perception contract and carries no confidence - the simulator is not estimating (ADR-045) |
 
 Shared rules: `schema_version`, tz-aware UTC timestamps, `coordinate_frame`, `source`
 (`live_sensor`/`simulation`/`replay`/`synthetic_test`/`unavailable`), `extra="forbid"`.
 
-## 7. API endpoints (17, unchanged in Phase 9)
+## 7. API endpoints (17, unchanged in Phases 9 and 10)
 
 | Method | Path |
 |---|---|
@@ -235,14 +244,19 @@ Optional extras declared but **not installed**: `open3d` (`[pointcloud]`), `carl
 
 ## 12–14. Verification status
 
-- **1326 tests pass**, 6 deselected (`pytest`). The 6 are the live CARLA tests
+- **1452 tests pass**, 7 deselected (`pytest`, Python 3.13; 1451 + 1 skipped on 3.12). The 7 are the live CARLA tests
 - `ruff check .` — All checks passed
-- `ruff format --check .` — 183 files formatted
-- `mypy src` — no issues in 103 source files
+- `ruff format --check .` — 192 files formatted
+- `mypy src` — no issues in 109 source files
 - Backend starts; all 17 endpoints respond; no tracebacks
-- **No live CARLA run has been executed.** The `carla` package is not installed here, so
-  `pytest -m carla` reports 6 skipped with the reason. Nothing in this repository reports a
-  CARLA performance or accuracy figure
+- **Live CARLA run executed on 2026-09-11** (Experiment 010): CARLA 0.9.16 server on
+  `127.0.0.1:2000`, Town10HD_Opt. `pytest -m carla` **7 passed** from a Python 3.12
+  environment (`.venv312`) holding the 0.9.16 wheel; every catalogue scenario COMPLETED via
+  the CLI; zero actors left on the server. In the primary Python 3.13 environment the
+  package cannot be installed (no wheel), so `pytest -m carla` there still reports 7 skipped
+  and the default suite is unchanged. Nothing in this repository reports a CARLA accuracy
+  figure; the only live performance figures are the per-frame stage timings in
+  Experiment 010, measured on this machine
 - Live temporal check: a vehicle advancing 1 m per 0.5 s measured 2.000 m/s, and its
   trajectory advanced +1 m at t+0.5, +2 m at t+1, +4 m at t+2 and +6 m at t+3; uncertainty
   rose 0.5 → 2.0 m; the track's first frame produced **no trajectory** and an explicit
@@ -308,6 +322,17 @@ so `tile_size_m` is the lever. Read the entry before quoting any of it.
   score multiplier.
 - Map context contributes nothing to the score by design (ADR-034): an empty cell is
   unobserved, not free, so it can only raise uncertainty.
+- **The scenario framework records evidence and computes nothing about it.** Every run
+  carries commanded poses, reported ground truth and pipeline counts side by side, and
+  no field compares them. Doing so is Phase 11.
+- **Scripted motion has no physics.** Actors are placed, not driven: no acceleration, no
+  turning radius, no collision response. An actor scripted into a wall sits in the wall.
+- **The ego is stationary in every scenario.** `EgoDefinition.stationary` is validated
+  `True`; only targets move.
+- **The catalogue's blueprints have not been confirmed on any real server.** A missing one
+  fails the run honestly, but it has not been tried.
+- **Event replay is deferred.** The run result is the recording a replay would need;
+  `DataSource.REPLAY` is still produced by nothing.
 - **CARLA is integrated but unexercised against a real server here.** The adapter, the
   conversion and the lifecycle are tested against a stand-in; nothing has confirmed API
   compatibility with a running CARLA, and no simulator figure is claimed.
@@ -342,7 +367,7 @@ so `tile_size_m` is the lever. Read the entry before quoting any of it.
 
 ## 16. Architecture decisions
 
-ADR-001 … ADR-045 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
+ADR-001 … ADR-048 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
 Most load-bearing for future work:
 
 - **ADR-009** — coordinate convention: **+x forward, +y left, +z up**, metres, right-handed
@@ -372,6 +397,9 @@ Most load-bearing for future work:
 - **ADR-043** — one coordinate conversion, at the boundary, in a module that imports no CARLA
 - **ADR-044** — synchronous simulation and simulation-authoritative time
 - **ADR-045** — ground truth is a separate path and never enters perception
+- **ADR-046** — scenarios are generic declarative contracts, resolved once by an explicit seed
+- **ADR-047** — scripted motion is timed constant-velocity segments, placed not simulated
+- **ADR-048** — the runner drives a protocol extracted from the boundary, and runs once
 
 ## 17. What MUST NOT change
 
@@ -418,30 +446,39 @@ Most load-bearing for future work:
     (ADR-045). It is for evaluation, and it stops being useful the moment it is an input.
 26. A simulated frame is labelled `source=simulation` and is never presentable as
     `live_sensor`.
+27. A scenario is **data**: `adaptx.scenarios.models` and `catalogue` import nothing from
+    `adaptx.carla`, and a definition round-trips through JSON (ADR-046).
+28. Every randomised scenario value comes from `random.Random(definition.seed)`, drawn once.
+    Never the module-level generator, never a wall clock, never a UUID.
+29. Actors are **placed** at their closed-form scripted pose each frame. Nothing integrates
+    physics (ADR-047).
+30. A `ScenarioRunResult` carries **no accuracy, precision, recall, error or match field**.
+    It is evidence for Phase 11, not a Phase 11 result.
+31. `carla/smoke.py` stays deleted. The scenario framework is the way to run a scene.
 
-## 18–19. Next step — scenario generation and replay (Phase 10)
+## 18–19. Next step — benchmarking and evaluation (Phase 11)
 
-Phase 9 made CARLA a usable data source and proved one hard-coded scene runs through the
-pipeline. What it deliberately did **not** build is a way to describe scenes: the smoke
-scenario is a scripted straight line with two actors, hard-coded in `carla/smoke.py`.
+Everything Phase 11 needs now exists and has been kept apart on purpose. A scenario run
+records, per frame, three things that have never been compared: what the scenario
+**commanded** (`ExpectedPose`), what the simulator **reported** (`GroundTruthFrame`), and
+what the pipeline **counted** (`StageCounts`). Phase 11 is the first phase allowed to put a
+number between them.
 
-Phase 10 is the framework that replaces it — seeded, reproducible scenario configurations,
-and the event record and replay path. Phase 11 then needs those scenarios to have anything
-worth benchmarking over.
+That also makes it the first phase where an honest negative is likely. Every "unmeasured
+and unmeasurable" limitation in §15 becomes measurable, and the baselines were built to be
+replaced.
 
 Objective and full handoff: [`NEXT_PHASE.md`](NEXT_PHASE.md).
 
 ## 20. Not yet
 
-Do **not** start benchmarking (Phase 11) or the dashboard (Phase 12).
+Do **not** start the dashboard (Phase 12), and do not start Phase 11 without a live CARLA
+run first - see [`NEXT_PHASE.md`](NEXT_PHASE.md). Evaluating perception against ground truth
+that has only ever come from a stand-in would measure the stand-in.
 
-Phase 11 is no longer blocked on an adaptive mapper — Experiment 007 delivered the first
-fixed-versus-adaptive comparison over synthetic scenes — nor on ground truth, which Phase 9
-now records. What it is still blocked on is **scenarios**: something to run the comparison
-over, which is Phase 10.
-
-Do not grow `carla/smoke.py` into that framework. It is one hard-coded scene that exists to
-prove the integration, and it should be replaced rather than extended.
+Event replay was **deferred** from Phase 10, not done. If it is picked up, the design
+question from the Phase 9 handoff is still open: re-run the simulation, or re-play a
+recording. They have different costs and different guarantees.
 
 The dashboard design target is captured in [`UI_UX.md`](UI_UX.md) with a panel-by-panel
 audit of what can actually be fed today. Phase 8 added the region decisions, level

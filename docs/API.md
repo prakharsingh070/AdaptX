@@ -208,8 +208,8 @@ frame. **Counts only** — never point data, never ground truth, never an actor 
 
 > **Phase 9 adds no endpoint that starts or steps a simulation.** Spawning actors and
 > ticking a simulator from an unauthenticated HTTP surface is not something this API should
-> offer (ADR-042), so the simulation is driven by `python -m adaptx.carla.smoke` and this
-> endpoint only *reports* what a session is doing.
+> offer (ADR-042), so simulations are driven by `python -m adaptx.scenarios run <id>` and
+> this endpoint only *reports* what a session is doing. Phase 10 added no endpoint.
 
 **200 OK**
 
@@ -232,6 +232,8 @@ frame. **Counts only** — never point data, never ground truth, never an actor 
     "simulation_frame": null,
     "simulation_time_s": null,
     "ego_actor_id": null,
+    "ego_spawn_index": null,
+    "server_version": null,
     "sensor_actor_id": null,
     "actor_count": 0,
     "last_point_count": null,
@@ -241,6 +243,9 @@ frame. **Counts only** — never point data, never ground truth, never an actor 
 ```
 
 `client_available` reports whether the optional `carla` Python package is importable.
+`ego_spawn_index` is the map spawn point the ego took (the first that accepted it; index 0
+is refused on Town10HD_Opt) and `server_version` is what the server reported at connect -
+both null until a session is open (ADR-049).
 `is_mock` is `true` only when `ADAPTX_CARLA__USE_MOCK=true`, in which case nothing the
 simulator returns is sensor data. A disabled or unreachable simulator is a 200 response
 describing `DISCONNECTED`, not an error.

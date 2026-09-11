@@ -83,11 +83,19 @@ class FakeActor:
         self.id = actor_id
         self.type_id = type_id
         self._transform = transform
+        # A real server does not report a spawned actor's pose until it has
+        # ticked once: ``get_transform()`` answers the world origin with zero
+        # yaw in the meantime (CARLA 0.9.16, synchronous mode, first live
+        # run). The fake reproduces that so code offsetting from a fresh
+        # ego cannot pass here and fail on the simulator.
+        self.settled = False
         self.bounding_box = BoundingBox()
         self.destroyed = False
         self.velocity = Vector3D()
 
     def get_transform(self) -> Transform:
+        if not self.settled:
+            return Transform()
         return self._transform
 
     def set_transform(self, transform: Transform) -> None:
@@ -182,11 +190,19 @@ class FakeBlueprintLibrary:
 class FakeMap:
     def __init__(self, name: str) -> None:
         self.name = name
+        # The first point is the world origin facing +x, which keeps the
+        # fake's arithmetic inspectable: an ego-relative offset is then also a
+        # world offset. A second point (also at the origin, so placement
+        # arithmetic is unchanged) exists so a test can refuse the first, as
+        # Town10HD_Opt does on a real CARLA 0.9.16 server. Held as one stable
+        # list so a world can identify which point a spawn request used.
+        self.spawn_points: list[Transform] = [
+            Transform(Location(0.0, 0.0, 0.0), Rotation()),
+            Transform(Location(0.0, 0.0, 0.0), Rotation()),
+        ]
 
     def get_spawn_points(self) -> list[Transform]:
-        # Ego at the world origin facing +x keeps the fake's arithmetic
-        # inspectable: an ego-relative offset is then also a world offset.
-        return [Transform(Location(0.0, 0.0, 0.0), Rotation())]
+        return list(self.spawn_points)
 
 
 @dataclass
@@ -220,13 +236,18 @@ class FakeWorld:
         self._frame = 100  # A server that has been up a while, like a real one.
         self._elapsed = 0.0
         self._dt = fixed_delta_seconds
+        # The blueprints the scenario catalogue uses, plus the sensor. A
+        # catalogue scenario asking for anything else fails the same way it
+        # would against a real server missing that asset.
         self._known = known_blueprints or {
             "vehicle.tesla.model3",
             "vehicle.audi.tt",
+            "vehicle.diamondback.century",
             "walker.pedestrian.0001",
             "sensor.lidar.ray_cast",
         }
         self.refuse_spawn: set[str] = set()
+        self.refuse_spawn_point_indices: set[int] = set()
         self.tick_error: Exception | None = None
         self.deliver_frames = True
 
@@ -260,6 +281,9 @@ class FakeWorld:
     ) -> FakeActor | None:
         if blueprint.id in self.refuse_spawn:
             return None
+        for index in self.refuse_spawn_point_indices:
+            if index < len(self._map.spawn_points) and transform is self._map.spawn_points[index]:
+                return None
         actor_id = self._next_id
         self._next_id += 1
         if blueprint.id.startswith("sensor."):
@@ -275,6 +299,8 @@ class FakeWorld:
             raise self.tick_error
         self._frame += 1
         self._elapsed += self._dt
+        for actor in self.actors.values():
+            actor.settled = True
         if self.deliver_frames:
             for actor in list(self.actors.values()):
                 if isinstance(actor, FakeSensor):
@@ -357,6 +383,9 @@ class FakeClient:
 
     def set_timeout(self, timeout: float) -> None:
         self.timeout = timeout
+
+    def get_server_version(self) -> str:
+        return "fake-0.0"
 
     def get_world(self) -> FakeWorld:
         if self.connect_error is not None:

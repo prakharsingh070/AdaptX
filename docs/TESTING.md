@@ -12,7 +12,7 @@ CARLA is optional and the default run never needs it:
 
 ```bash
 pytest                 # everything except the live CARLA tests
-pytest -m carla        # live tests; skip cleanly without a server
+pytest -m carla        # live tests; skip cleanly without a server or the package
 ```
 
 
@@ -229,8 +229,8 @@ enforced by CI rather than by review:
 
 ### CARLA simulation boundary (Phase 9)
 
-CARLA is optional and is **not installed** in this environment. The suite is split so that
-never becomes a false failure:
+CARLA is optional and is **not installed** in the primary (Python 3.13) environment - no
+`carla` wheel exists for 3.13. The suite is split so that never becomes a false failure:
 
 - **Conversion** (`test_carla_conversion.py`) needs no simulator at all, because
   `adaptx.carla.conversion` imports none. Axis flips, handedness (a cross product check),
@@ -251,8 +251,54 @@ never becomes a false failure:
   deselected by default (`-m "not carla"`) *and* skips itself when the package or server is
   absent. Run it with `pytest -m carla`.
 
+**Running the live tests for real** (done on 2026-09-11, 7/7 passed - Experiment 010):
+
+```bash
+# Python 3.12 only: the CARLA 0.9.16 wheel ships for cp312 and PyPI's "carla" is 0.9.5.
+py -3.12 -m venv .venv312
+.venv312\Scripts\python -m pip install -e ".[dev]"      # from THIS checkout, see below
+.venv312\Scripts\python -m pip install <path-to>\carla-0.9.16-cp312-cp312-win_amd64.whl
+ADAPTX_CARLA__HOST=127.0.0.1 .venv312\Scripts\python -m pytest -m carla -v
+```
+
+Two things that cost time: an editable install points at the checkout it was run from,
+so a worktree must reinstall or set `PYTHONPATH` to its own `src`; and CARLA's client
+prints `INFO: streaming client: connection failed ...` lines at sensor stop and process
+exit, which come from inside the CARLA library and are not ADAPT-X errors. The fake
+simulator reproduces two server behaviours the live run found - an actor reports the world
+origin until the first tick, and a spawn point can refuse - so those regressions fail
+without a server.
+
 What the stand-in **cannot** prove: anything about CARLA itself - its API compatibility, its
 sensor model or its performance. No figure produced against it is a CARLA measurement.
+
+### Scenario framework (Phase 10)
+
+- **Definitions** (`test_scenario_models.py`) - every validation rule with an explicit
+  error: duration, timestep, the two-frame minimum, seed, machine-name ids, duplicate ids,
+  the reserved `ego` id, segment ordering and overlap, segments beyond the duration, a
+  moving ego. Scripted motion is checked by hand-derived arithmetic: timed start holds,
+  timed stop freezes, diagonal moves on both axes, an L-shaped path sums its legs. A
+  definition round-trips through JSON.
+- **Runner** (`test_scenario_runner.py`) - lifecycle transitions; a malformed definition
+  raises before any simulator contact while a run-time failure returns `FAILED` with the
+  frames stepped; cleanup on every failure path including a second actor failing after the
+  first spawned; same seed resolves identically and a different seed moves a jittered
+  placement; resolution never touches the global `random` state; actors land where asked;
+  ground truth and sensor frames share identity; the processor receives only the sensor
+  frame; scenario B inherits nothing from scenario A; the result carries no evaluation field.
+- **Catalogue and pipeline** (`test_scenario_pipeline.py`) - every catalogue scenario is
+  valid, exact, runs to completion through the real Phase 2-8 chain, and its ground truth
+  sees every scripted actor. The chain run by hand without ever calling `ground_truth()`
+  produces identical stage counts to the runner. Source-level checks that the definition
+  layer imports nothing from the CARLA boundary and the package never imports `carla`. The
+  CLI lists the catalogue, fails honestly without a simulator, and exits with a usage code
+  for an unknown id.
+- **Live** (`test_carla_live.py`) - `vehicle_approach` and every catalogue scenario against a
+  real server. Deselected by default and self-skipping; **never executed here**.
+
+What none of this proves: that the catalogue's blueprints exist on a real server, that a
+real simulator places actors where the script says, or anything about perception accuracy.
 
 ## Conventions for new tests
 

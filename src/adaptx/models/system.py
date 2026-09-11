@@ -103,6 +103,18 @@ class SimulationSessionStatus(AdaptXModel):
         default=None, ge=0.0, description="Simulator clock at the most recent tick."
     )
     ego_actor_id: int | None = None
+    ego_spawn_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Index into the map spawn points the ego took: the first that accepted "
+            "it. Recorded because index 0 is refused on some maps."
+        ),
+    )
+    server_version: str | None = Field(
+        default=None,
+        description="Version the CARLA server reported at connect; null when it did not.",
+    )
     sensor_actor_id: int | None = None
     actor_count: int = Field(default=0, ge=0, description="Actors this session spawned.")
     last_point_count: int | None = Field(
