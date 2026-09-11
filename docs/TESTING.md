@@ -74,6 +74,14 @@ tests/
                             determinism, edge cases, Phase 8 boundary
     test_services.py        metrics, LiDAR ingest, system status aggregation
     test_carla_mock.py      CARLA boundary: real client without CARLA, mock, service
+    test_carla_conversion.py, test_carla_ground_truth.py, test_carla_session.py
+                            Phase 9 boundary: conversion, ground truth, lifecycle (fake)
+    test_scenario_models.py, test_scenario_runner.py
+                            Phase 10 definitions and runner (fake simulator)
+    test_evaluation_metrics.py
+                            Phase 11 primitives: statistics, matching, alignment, ordering
+    test_evaluation_sections.py
+                            Phase 11 sections on hand-built runs with known answers
   integration/
     test_api.py             startup, routing, all seven endpoints, error paths
     test_websocket.py       /ws/telemetry envelope, sequencing, connection registry
@@ -94,6 +102,18 @@ tests/
     test_prediction_pipeline.py
                             raw frame -> processing -> detection -> tracking ->
                             prediction, plus the predict/status APIs and telemetry
+    test_adaptive_mapping_pipeline.py
+                            Phase 8 chain and the adaptive-map APIs
+    test_carla_pipeline.py  simulated frames through the chain; boundary invariants
+    test_scenario_pipeline.py
+                            catalogue -> runner -> pipeline; CLI; isolation
+    test_evaluation_pipeline.py
+                            record -> disk -> offline report; CLI; ground-truth boundary
+    test_carla_live.py      real server only (marker `carla`, deselected by default)
+  fixtures/
+    point_clouds.py, scenes.py, sequences.py, assessments.py, fake_carla.py,
+    evaluation.py           deterministic builders: clouds, scenes, tracks, assessments,
+                            the CARLA stand-in, hand-built run records
 ```
 
 ---
@@ -258,8 +278,12 @@ CARLA is optional and is **not installed** in the primary (Python 3.13) environm
 py -3.12 -m venv .venv312
 .venv312\Scripts\python -m pip install -e ".[dev]"      # from THIS checkout, see below
 .venv312\Scripts\python -m pip install <path-to>\carla-0.9.16-cp312-cp312-win_amd64.whl
-ADAPTX_CARLA__HOST=127.0.0.1 .venv312\Scripts\python -m pytest -m carla -v
+ADAPTX_CARLA__HOST=127.0.0.1 ADAPTX_CARLA__EGO_SPAWN_INDEX=1 .venv312\Scripts\python -m pytest -m carla -v
 ```
+
+The `carla` settings section is read from the environment by the live tests. On Town10HD_Opt
+the catalogue's ego-relative placements are on the road only from spawn point 1, hence the
+pin above (Experiment 011); on another map, choose the point whose road runs 45 m ahead.
 
 Two things that cost time: an editable install points at the checkout it was run from,
 so a worktree must reinstall or set `PYTHONPATH` to its own `src`; and CARLA's client
@@ -295,10 +319,55 @@ sensor model or its performance. No figure produced against it is a CARLA measur
   CLI lists the catalogue, fails honestly without a simulator, and exits with a usage code
   for an unknown id.
 - **Live** (`test_carla_live.py`) - `vehicle_approach` and every catalogue scenario against a
-  real server. Deselected by default and self-skipping; **never executed here**.
+  real server. Deselected by default and self-skipping; executed on 2026-09-11, 7/7 passed
+  (Experiment 010).
 
-What none of this proves: that the catalogue's blueprints exist on a real server, that a
-real simulator places actors where the script says, or anything about perception accuracy.
+What none of this proves: anything about perception accuracy. That is the next section.
+
+### Evaluation (Phase 11)
+
+Every metric is asserted on a hand-built run whose right answer is known exactly, built by
+`tests/fixtures/evaluation.py` (`RunBuilder`) from short per-frame specifications with the
+configuration snapshots of real services, ground truth in the ego frame and outputs in the
+sensor frame so the mount conversion is exercised, not bypassed.
+
+- **Primitives** (`test_evaluation_metrics.py`) - `Distribution` (empty is null, not zero;
+  p95 only from 20 samples; non-finite refused), configuration validation (gates sorted,
+  distinct, positive; primary must be a gate), greedy matching (nearest wins, each side once,
+  ties break on id so input order does not matter, class disagreement recorded not refused,
+  3-D distance), ordering concordance (inverse 1.0, direct 0.0, ties dropped, one pair
+  null), alerting (UNKNOWN never alerts), frame alignment (whole frames only, no rounding),
+  fragment counting, the sensor-frame translation, tile lookup on interior points,
+  boundaries and the map edge.
+- **Sections** (`test_evaluation_sections.py`) - the reference velocity is the finite
+  difference, not the record's; a perfect track scores perfectly and a 0.3 m offset scores
+  0.3 m; the 1 m and 2 m gates disagree on a 1.5 m offset and both are reported; a null
+  velocity is counted and never scored; identity switches and gaps; an empty pipeline scores
+  zero while no ground truth is unavailable; an unmatched track is unlabelled and no
+  precision or false-positive field exists; an exact prediction has zero ADE and a 1 m
+  error measures 1 m; only trajectories with future ground truth count, the t+0 point is
+  not prediction error, off-grid offsets are skipped not interpolated; alert recall, lead
+  time in both signs, UNKNOWN preserved, concordance, no event is partial with a reason;
+  map accuracy unavailable with its reason; detail at the actor tile, refinement lead in
+  both signs and never, churn and reversals inside and outside the window, holds and
+  budget read from the plan, a flickering actor enters each tile once, duration ratios
+  paired per frame; timings summarised and memory unavailable; the report round-trips
+  JSON, is deterministic, carries its limitations, flags an incomplete run, and prints
+  reasons rather than zeros.
+- **Pipeline and boundary** (`test_evaluation_pipeline.py`) - a fake-simulator catalogue run
+  carries outputs that reduce to the Phase 10 counts and still no evaluation figure; every
+  catalogue scenario evaluates; a record written to disk evaluates identically with no
+  simulator; two runs of one scenario agree on deterministic content; the CLI evaluates,
+  writes, refuses malformed input and counts-only records with exit code 2, compares, and
+  fails honestly without a server. **Boundary:** no production package imports
+  `adaptx.evaluation` (subprocess with a clean module table) and no production source
+  mentions the evaluation layer or ground truth (source inspection); the evaluation package
+  never requires `carla`; evaluating a record does not modify it; a run evaluated and a
+  fresh identical run produce the same stage counts.
+
+What none of this proves: anything about CARLA. The fake places actors exactly where told,
+so the fake-simulator figures are near-perfect by construction and are never reported as
+results. The live figures are in Experiment 011.
 
 ## Conventions for new tests
 

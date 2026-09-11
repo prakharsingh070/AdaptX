@@ -15,9 +15,10 @@ The central innovation is risk-aware adaptive perception: low-risk regions use c
 LiDAR / CARLA -> point-cloud processing -> ground and noise filtering -> object detection -> object tracking -> trajectory prediction -> 2.5D occupancy mapping -> risk and uncertainty estimation -> predictive risk -> adaptive resolution controller -> adaptive 2.5D map -> benchmarking -> dashboard.
 
 Stages up to and including the adaptive resolution controller are implemented as
-deterministic, explainable baselines; CARLA can feed them simulated LiDAR, and a
-scenario framework describes, seeds and runs controlled scenes against it. Nothing
-after that is implemented - no evaluation, no replay, no dashboard.
+deterministic, explainable baselines; CARLA can feed them simulated LiDAR, a scenario
+framework describes, seeds and runs controlled scenes against it, and an offline
+evaluation layer measures the recorded runs against simulator ground truth. Nothing after
+that is implemented - no replay, no dashboard.
 
 ## Core Modules
 
@@ -175,9 +176,12 @@ every component in `services/system_service.py` agree with the list below.
   (Experiment 010): `pytest -m carla` 7/7 pass from a Python 3.12 environment holding the
   0.9.16 wheel (no wheel exists for 3.13, the primary environment, which stays without
   CARLA). The live run found and fixed: a spawned actor reports the world origin until the
-  first tick (ADR-049 - spawn transform is the reference until then); spawn point 0 of that
-  map refuses every spawn (points are walked in order; `ego_spawn_index` recorded); the
-  package has no `__version__` (the server's `get_server_version()` is recorded instead).
+  first tick (ADR-049 - spawn transform is the reference until then); an occupied spawn
+  point is walked past (points are tried in order unless `ego_spawn_index` pins one; the
+  index used is recorded - the point 0 refusal of Experiment 010 was a stale actor from a
+  killed run, corrected in Experiment 011); the package has no `__version__` (the server's
+  `get_server_version()` is recorded instead); the LiDAR's `noise_seed` is set from
+  `carla.seed`, which was previously applied to nothing (Experiment 011).
   Phases 1-8 were not modified to accommodate CARLA beyond one clock fix in
   `MetricsService` (`perf_counter`, because `monotonic()` is 15.6 ms-coarse on Windows
   Python 3.12).
@@ -192,7 +196,9 @@ every component in `services/system_service.py` agree with the list below.
   the Phase 9 boundary through a protocol extracted from it, PLACES each actor at its
   closed-form scripted pose every frame rather than simulating physics, records ground
   truth beside every sensor frame and feeds it to NO pipeline stage, and destroys every
-  actor on completion or failure; four catalogue scenarios; `python -m adaptx.scenarios
+  actor on completion or failure; since Phase 11 placed actors do not simulate physics and
+  stand on the road with `up_m` measured to the bottom of the bounding box (ADR-054); four
+  catalogue scenarios; `python -m adaptx.scenarios
   run <id>`; `carla/smoke.py` deleted and replaced; ADR-046/047/048). THE RUN RESULT IS RAW
   EVIDENCE - frame identities, scripted poses, ground truth, stage counts - AND CARRIES NO
   ACCURACY OR EVALUATION FIGURE. LIVE-VALIDATED on 2026-09-11: all four catalogue scenarios
@@ -202,8 +208,39 @@ every component in `services/system_service.py` agree with the list below.
   the recording a replay would need, but no playback path exists and `DataSource.REPLAY`
   is still produced by nothing. Ego motion, traffic, weather and the Traffic Manager are
   not implemented.
-- Phase 11: Benchmarking - TODO (next)
-- Phase 12: Dashboard and final integration - TODO
+- Phase 11: Evaluation and benchmarking - DONE as an offline evaluation layer
+  (`adaptx.evaluation` reads a recorded `ScenarioRunResult` - which since Phase 11 carries
+  the pipeline's own result contracts per frame, additively (ADR-050) - and produces an
+  `EvaluationReport`; ground truth reaches this package and NO other, asserted by subprocess
+  and source-inspection tests; greedy gated matching reported at 1/2/4 m gates with no
+  precision figure because unlabelled static geometry is not a false positive (ADR-052);
+  position and velocity error, continuity, ADE/FDE with no interpolation, risk against
+  proximity events with UNKNOWN preserved, map workload with ACCURACY EXPLICITLY NOT
+  EVALUATED, adaptive resolution paired against the fixed map within one run (ADR-053),
+  churn, reversals, refinement lead; every missing metric is null with a reason, never zero
+  (ADR-051); `python -m adaptx.evaluation evaluate|compare|run`; no new endpoint, no
+  telemetry, no dependency). FIRST MEASURED RESULTS (Experiment 011, CARLA 0.9.16, Town10HD_Opt,
+  simulation evidence only): vehicle detection recall 0.00-0.06 at 1 m and 0.23-0.61 at 2 m
+  with a consistent ~1.5-1.7 m planar offset; the detector NEVER labelled the Audi a vehicle;
+  1-3 identity switches per moving actor; ADE 1.5-3.4 m mean growing to 5-12 m at 1.5-3 s
+  horizons; the risk score orders proximity for moving actors (concordance 0.80-0.86); the
+  adaptive map uses 0.48-0.56 of the fixed 0.5 m map's cells, takes 5x longer to build (8x
+  with the controller), and puts finer cells under the perceived actor (0.41-0.58 m) than
+  elsewhere (0.92-0.93 m); the pedestrian was detected on 1 frame in 120 BECAUSE A PLACED
+  WALKER FALLS THROUGH THE ROAD (a Phase 10 placement defect, not fixed, confounds that
+  scenario); live runs are near- but NOT bit-repeatable even with the sensor seeded.
+  Nothing was tuned. NOT real-world validation, NOT safety validation, NOT a collision
+  probability. See `docs/EVALUATION.md`.
+  RE-MEASURED after the placement fix (ADR-054, Experiment 012): placed actors no longer
+  simulate physics and stand on the road, the ego is grounded, the walker defect is gone and
+  a static scene is now bit-repeatable. With the PROCESS DEFAULTS (ground segmentation OFF)
+  a car parked 20 m ahead and a pedestrian 15 m ahead are detected on 0 frames - their
+  returns are clustered with the road; with ground segmentation ON (a disclosed post-hoc
+  variation) both are detected on every frame (pedestrian error 0.10 m; the parked car at a
+  CONSTANT 1.70 m centroid-to-origin offset), no identity switch occurs in any scenario, and
+  the pipeline runs at 80 ms/frame instead of 140. WHICH DEFAULT IS RIGHT IS AN OPEN PHASE 2/3
+  DECISION with its own experiment, not settled here.
+- Phase 12: Dashboard and final integration - TODO (next)
 
 ## Start Here
 
@@ -218,4 +255,4 @@ headings in `docs/PHASE_HISTORY.md` are a historical record and were left as wri
 
 ## Knowledge Base
 
-Read the relevant documents in `docs/knowledge-base/` before changing a module. Read `docs/knowledge-base/20-constraints.md` before benchmarking or demo work. Record accepted architectural choices in `docs/decisions/architecture-decisions.md` and measured work in `docs/experiments/experiment-log.md`.
+Read the relevant documents in `docs/knowledge-base/` before changing a module. Read `docs/knowledge-base/20-constraints.md` before benchmarking or demo work, and `docs/EVALUATION.md` before touching a metric or reading an evaluation report. Record accepted architectural choices in `docs/decisions/architecture-decisions.md` and measured work in `docs/experiments/experiment-log.md`.

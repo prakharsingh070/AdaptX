@@ -51,7 +51,7 @@ from adaptx.config.settings import Settings, get_settings
 from adaptx.core.exceptions import AdaptXError, SimulatorUnavailableError
 from adaptx.core.lifecycle import ApplicationContext, build_context
 from adaptx.core.logging import get_logger
-from adaptx.models.common import DataSource
+from adaptx.models.common import DataSource, Vector3
 from adaptx.models.point_cloud import RawPointCloudFrame
 from adaptx.scenarios.interfaces import ScenarioSimulator
 from adaptx.scenarios.models import (
@@ -63,17 +63,20 @@ from adaptx.scenarios.models import (
 )
 from adaptx.scenarios.result import (
     ExpectedPose,
+    PipelineFrameOutputs,
     ScenarioActorRecord,
     ScenarioFrameRecord,
     ScenarioRunResult,
+    SensorConfiguration,
     StageCounts,
 )
 
 logger = get_logger(__name__)
 
-#: Processes one sensor frame and returns stage counts. Receives the frame and
-#: nothing else - the signature is the separation guarantee.
-FrameProcessor = Callable[[RawPointCloudFrame], StageCounts]
+#: Processes one sensor frame and returns what it produced: the stage counts,
+#: or the full result contracts (which reduce to counts). Receives the frame
+#: and nothing else - the signature is the separation guarantee.
+FrameProcessor = Callable[[RawPointCloudFrame], StageCounts | PipelineFrameOutputs]
 
 
 class ScenarioError(AdaptXError):
@@ -122,15 +125,22 @@ def resolve(definition: ScenarioDefinition) -> ResolvedScenario:
 # ---------------------------------------------------------------------------
 # pipeline processing
 # ---------------------------------------------------------------------------
-def pipeline_processor(context: ApplicationContext) -> FrameProcessor:
+def pipeline_processor(
+    context: ApplicationContext, *, record_outputs: bool = True
+) -> FrameProcessor:
     """A frame processor that runs the existing Phase 2-8 chain, unchanged.
 
     Every call below is the same call the LiDAR endpoints make. Nothing
     branches on the frame having come from a scenario, and the closure holds
     no reference to any ground truth - it could not use it if it wanted to.
+
+    Args:
+        context: The pipeline services.
+        record_outputs: Keep the stage result contracts on the record (the
+            Phase 11 evidence, ADR-050) rather than reducing them to counts.
     """
 
-    def process(frame: RawPointCloudFrame) -> StageCounts:
+    def process(frame: RawPointCloudFrame) -> StageCounts | PipelineFrameOutputs:
         if frame.source is not DataSource.SIMULATION:
             raise ScenarioError(
                 f"a scenario frame must be labelled 'simulation', got '{frame.source.value}'",
@@ -152,6 +162,18 @@ def pipeline_processor(context: ApplicationContext) -> FrameProcessor:
         adaptive = context.adaptive_mapping.run_from_pipeline(
             processed.frame, risk, tracking, trajectories=prediction.trajectories
         )
+        if record_outputs:
+            return PipelineFrameOutputs(
+                detection=detection,
+                tracking=tracking,
+                prediction=prediction,
+                risk=risk,
+                fixed_map=spatial_map.summary(),
+                adaptive_map=adaptive.summary(controller_duration_ms=adaptive.plan.duration_ms),
+                plan=adaptive.plan,
+                comparison=context.adaptive_mapping.compare_with_fixed(adaptive, spatial_map),
+                processing_ms=processed.metrics.duration_ms,
+            )
         return StageCounts(
             processed_points=processed.frame.point_count,
             detections=len(detection.objects),
@@ -282,7 +304,13 @@ class ScenarioRunner:
                 truth = simulator.ground_truth()
                 self._state = ScenarioState.RUNNING
 
-                counts = self._processor(frame) if self._processor is not None else None
+                produced = self._processor(frame) if self._processor is not None else None
+                outputs: PipelineFrameOutputs | None = None
+                counts: StageCounts | None = None
+                if isinstance(produced, PipelineFrameOutputs):
+                    outputs, counts = produced, produced.counts()
+                elif produced is not None:
+                    counts = produced
                 frames.append(
                     ScenarioFrameRecord(
                         frame_index=index,
@@ -293,6 +321,7 @@ class ScenarioRunner:
                         expected_poses=self._expected_poses(time_s),
                         ground_truth_actor_count=len(truth.others()),
                         pipeline=counts,
+                        outputs=outputs,
                     )
                 )
                 truths.append(truth)
@@ -323,6 +352,21 @@ class ScenarioRunner:
         )
 
     # -- internals ---------------------------------------------------------
+    def _sensor_configuration(self) -> SensorConfiguration:
+        """The LiDAR as the settings configured it, for the record."""
+        carla = self._settings.carla
+        return SensorConfiguration(
+            channels=carla.lidar_channels,
+            range_m=carla.lidar_range_m,
+            points_per_second=carla.lidar_points_per_second,
+            rotation_frequency_hz=carla.lidar_rotation_frequency_hz,
+            upper_fov_deg=carla.lidar_upper_fov_deg,
+            lower_fov_deg=carla.lidar_lower_fov_deg,
+            dropoff_general_rate=carla.lidar_dropoff_general_rate,
+            mount=Vector3(x=carla.lidar_x_m, y=carla.lidar_y_m, z=carla.lidar_z_m),
+            include_intensity=carla.include_intensity,
+        )
+
     def _apply_scenario_settings(self, settings: Settings) -> Settings:
         """A settings copy whose simulator section agrees with the definition.
 
@@ -426,6 +470,7 @@ class ScenarioRunner:
             # "unknown" - it ships no __version__).
             simulator_version=simulator_version or carla_package_version(),
             fixed_delta_seconds=self._definition.fixed_delta_seconds,
+            sensor=self._sensor_configuration(),
             frames=frames,
             ground_truth=truths,
         )

@@ -243,9 +243,15 @@ frame. **Counts only** — never point data, never ground truth, never an actor 
 ```
 
 `client_available` reports whether the optional `carla` Python package is importable.
-`ego_spawn_index` is the map spawn point the ego took (the first that accepted it; index 0
-is refused on Town10HD_Opt) and `server_version` is what the server reported at connect -
-both null until a session is open (ADR-049).
+`ego_spawn_index` is the map spawn point the ego took (the first that accepted it, or the
+one `ADAPTX_CARLA__EGO_SPAWN_INDEX` pins) and `server_version` is what the server reported
+at connect - both null until a session is open (ADR-049).
+
+**Phase 11 added no endpoint.** Evaluation is an offline research workflow
+(`python -m adaptx.evaluation`, see `docs/EVALUATION.md`); nothing about it is served over
+HTTP or telemetry. The `ScenarioRunResult` written by `python -m adaptx.scenarios run --json`
+gained two optional fields, `frames[].outputs` and `sensor` (ADR-050); neither travels
+through the API.
 `is_mock` is `true` only when `ADAPTX_CARLA__USE_MOCK=true`, in which case nothing the
 simulator returns is sensor data. A disabled or unreachable simulator is a 200 response
 describing `DISCONNECTED`, not an error.

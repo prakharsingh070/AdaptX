@@ -23,7 +23,7 @@ an abstract interface.
 | LiDAR pipeline | **Partial** | Phase 2A: input validation, NaN/Inf removal, ROI and range filtering. Phase 2B (opt-in): voxel downsampling, baseline ground segmentation, baseline noise filtering. Phase 2C: `LiDARProcessingPipeline` orchestration, per-stage timing, configuration snapshot. **No** clustering, no coordinate transforms, no exact radius/statistical outlier removal |
 | Benchmarking (pipeline, detection, tracking, prediction, mapping, risk, adaptive) | **Implemented** | Deterministic synthetic datasets, fixed-resolution baseline profile, measured timing/throughput/memory (`adaptx.benchmark`, flags `--detect` / `--track` / `--predict` / `--map` / `--risk` / `--adaptive`). Scope is **speed and workload only** - not the Phase 11 ADAPT-X evaluation, and never perception accuracy |
 | Risk | **Partial** | Phase 7: deterministic heuristic object-level risk and uncertainty (`risk/heuristic.py`) - proximity, rate of approach, predicted approach, with uncertainty reported separately. **Not** a probability of collision, not calibrated, never validated - no labelled risk data exists. **No** time-to-collision, no trajectory-map intersection, no spatial risk field. The proximity-only baseline is retained for comparison |
-| CARLA | **Partial** | Phase 9: deterministic simulation boundary - synchronous mode with a fixed timestep, ego spawn, LiDAR attach, ticking, and cleanup that survives a failed setup. One coordinate conversion at the boundary (ADR-043); simulation-authoritative time (ADR-044); ground truth on a separate path that never reaches perception (ADR-045). Optional: the backend and test suite run without it. **No live run has been executed here** - the package is not installed, so the live smoke test skips |
+| CARLA | **Partial** | Phase 9: deterministic simulation boundary - synchronous mode with a fixed timestep, ego spawn, LiDAR attach, ticking, and cleanup that survives a failed setup. One coordinate conversion at the boundary (ADR-043); simulation-authoritative time (ADR-044); ground truth on a separate path that never reaches perception (ADR-045). Optional: the backend and test suite run without it. Live-validated against CARLA 0.9.16 from a Python 3.12 environment (Experiments 010, 011); the primary 3.13 environment has no `carla` wheel, so the live tests skip there |
 | Object detection | **Partial** | Phase 3: grid clustering, size filtering and baseline classification by dimension bands (`perception/{clustering,classification,detector}.py`). **No** trained model, no oriented boxes, no velocity, no camera fusion, no semantic segmentation |
 | Tracking | **Partial** | Phase 4: gated nearest-neighbour association, measured velocity, track lifecycle, stateful service (`tracking/`). **No** learned motion model, no appearance features, no re-identification |
 | 2.5D mapping | **Partial** | Phase 6: deterministic frame-local fixed-resolution mapper - bounded dense grid, binary occupancy, per-cell height statistics (`mapping/grid_mapper.py`). Retained unchanged as the baseline (ADR-003). **No** temporal fusion, no probabilistic occupancy, no occlusion, no SLAM, no localisation. Correctness unmeasured - no labelled reference map exists |
@@ -31,8 +31,9 @@ an abstract interface.
 | Trajectory prediction | **Partial** | Phase 5: deterministic constant-velocity baseline with heuristic uncertainty (`prediction/constant_velocity.py`). **No** acceleration model, no Kalman filter, no learned model, no map or lane conditioning, no interaction between objects. Accuracy unmeasured - no labelled trajectories exist |
 | Uncertainty engine | **Partial** | Phase 7: a heuristic per-object uncertainty scalar with its contributing reasons, reported beside risk rather than folded into it (ADR-033). Not a variance, not calibrated. `AdaptiveMapCell.uncertainty` is still unpopulated - that needs a per-cell formulation |
 | Fixed-resolution baseline | **Implemented** | Both halves of ADR-003 now exist: `FixedResolutionMapper` (`is_adaptive: false`) and `TiledAdaptiveMapper` (`is_adaptive: true`). Experiment 007 is the first comparison over identical input, and it is **not a clean win** - see the entry before quoting it |
-| Scenario framework | **Partial** | Phase 10: `ScenarioDefinition` as data (ADR-046), timed constant-velocity motion placed rather than simulated (ADR-047), a single-use runner driving the Phase 9 boundary through an extracted protocol (ADR-048). Ground truth recorded per frame, never fed to perception. Four catalogue scenarios. Result is raw evidence with **no accuracy figure**. **No live run executed here.** Event replay deferred; `DataSource.REPLAY` still unproduced |
-| Event replay, scenario benchmarking | *Planned* | Not started. Replay was deferred from Phase 10 with the design question open |
+| Scenario framework | **Partial** | Phase 10: `ScenarioDefinition` as data (ADR-046), timed constant-velocity motion placed rather than simulated (ADR-047), a single-use runner driving the Phase 9 boundary through an extracted protocol (ADR-048). Ground truth recorded per frame, never fed to perception. Four catalogue scenarios. Result is raw evidence with **no accuracy figure**; since Phase 11 it also carries the pipeline's result contracts per frame and the sensor configuration (ADR-050). Live-validated (Experiments 010–012). Placed actors do not simulate physics and stand on the road (ADR-054). Event replay deferred; `DataSource.REPLAY` still unproduced |
+| Evaluation | **Partial** | Phase 11: `adaptx.evaluation` reads a recorded run offline and produces an `EvaluationReport` — detection and tracking at several match gates, ADE/FDE without interpolation, risk against proximity events with UNKNOWN preserved, map workload with **accuracy explicitly not evaluated**, adaptive resolution paired against the fixed map within one run, resource. Missing metrics are null with a reason (ADR-051). The only package that reads ground truth. First measured figures in Experiment 011: the baselines lost. **Simulation evidence only** |
+| Event replay | *Planned* | Not started. Deferred from Phase 10 with the design question open |
 | Dashboard | *Planned* | Not started (`dashboard/README.md`) |
 
 The running backend reports this itself at `GET /api/v1/system/status`. Each component
@@ -84,7 +85,9 @@ dashboard or API code (knowledge-base boundary rule).
 | `adaptx.risk` | `RiskEngine` contract; `HeuristicRiskEngine`; `BaselineProximityRiskEngine` |
 | `adaptx.tracking` | `ObjectTracker` contract; `GeometricObjectTracker` and the association algorithm |
 | `adaptx.prediction` | `TrajectoryPredictor` contract; `ConstantVelocityPredictor` |
-| `adaptx.carla` | `CarlaSimulatorClient` contract, real client, mock, simulator-local models |
+| `adaptx.carla` | `CarlaSimulatorClient` contract, real client, mock, simulator-local models, the deterministic session and the ground-truth contracts |
+| `adaptx.scenarios` | Scenario definitions as data, the catalogue, the single-use runner and the run record |
+| `adaptx.evaluation` | Offline evaluation of a run record against its ground truth; the one package allowed to read ground truth; no simulator import (`docs/EVALUATION.md`) |
 | `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking, prediction, mapping and risk services |
 | `adaptx.api` | Routes, HTTP schemas, WebSocket telemetry, dependency wiring |
 
@@ -524,6 +527,26 @@ documented order, which is not done silently.
 
 `CarlaService.connect()` never raises: a disabled, missing or unreachable simulator is
 recorded as `DISCONNECTED` with a human-readable reason, and the backend keeps running.
+
+---
+
+## 8b. Evaluation boundary (Phase 11)
+
+```
+ScenarioRunResult (.json) ──► adaptx.evaluation ──► EvaluationReport (.json / text)
+        ▲                          reads: frames[].outputs, ground_truth[], sensor
+        │                          imports: adaptx.models, adaptx.scenarios.result,
+  ScenarioRunner                            adaptx.carla.ground_truth
+  (pipeline never sees ground_truth)        never: carla, adaptx.perception internals
+```
+
+Two directions are enforced by tests: no production package imports `adaptx.evaluation`
+or `adaptx.carla.ground_truth` (subprocess import check and source inspection), and
+`adaptx.evaluation` never requires the `carla` package. Evaluation performs one conversion
+on ground truth - the sensor mount translation - and derives one quantity - the reference
+velocity by finite difference, because the simulator's velocity of a placed actor is
+meaningless (ADR-052). Everything else is read as recorded. Nothing is served over HTTP or
+telemetry. Metric definitions: `docs/EVALUATION.md`.
 
 ---
 

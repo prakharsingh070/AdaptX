@@ -895,10 +895,14 @@ tick's frame id, so the queue-matching logic in `step()` is correct on a real se
    spawn transform and uses it as the placement reference until the first tick (ADR-049);
    the fake now reports the origin until ticked, like the server, and a regression test
    spawns the ego off-origin.
-2. **Spawn point 0 of Town10HD_Opt refuses the ego every time** (3 of 3 attempts, while
-   indices 1-11 all accepted). The session now walks the spawn points in order and takes
-   the first that accepts - still deterministic per map - and records the index it used as
-   `ego_spawn_index` on the status. Every live run here used index 1.
+2. **Spawn point 0 refused the ego every time** (3 of 3 attempts, while indices 1-11 all
+   accepted). The session now walks the spawn points in order and takes the first that
+   accepts - deterministic for a given map and world state - and records the index it used
+   as `ego_spawn_index` on the status. Every live run here used index 1.
+   **Corrected in Experiment 011:** the map was not refusing; an ADAPT-X ego and LiDAR left
+   at spawn point 0 by this session's earlier killed run were occupying it, and they were
+   also parked about 4 m from the ego of every run in this experiment. Destroying them
+   made point 0 accept.
 3. **`fps` was never measured on Python 3.12 on Windows.** `time.monotonic()` there ticks
    every 15.6 ms, so two frames recorded within one tick shared a timestamp and the
    elapsed time was zero. Replaced with `time.perf_counter()` in `MetricsService`; a test
@@ -931,3 +935,345 @@ PyPI and the wheel must be installed by hand; still a documented gap.
 - **Behaviour with a moving ego, traffic, weather or any map other than Town10HD_Opt.**
 - **Whether the scripted placement matches the pose the server reports** after physics
   settles the actor. Both are in the run record; the comparison is Phase 11.
+
+## Experiment 011 - Phase 11 evaluation against CARLA ground truth (first measured correctness figures)
+
+**Date:** 2026-09-11
+
+> **Superseded in part by Experiment 012.** The placement defect found below (a placed
+> walker falling; every actor and the ego settling under physics) was fixed the same day
+> (ADR-054) and every scenario re-measured. The pedestrian figures here are void and the
+> parked-car recall was an artefact of the car falling; the method, the environment
+> findings and the repeatability analysis stand.
+
+### Question
+
+How well does the existing Phase 2-8 pipeline behave when measured against controlled
+CARLA ground truth, and what does the paired fixed-versus-adaptive comparison show?
+This is the first experiment in the project to put a number between what the pipeline
+inferred and what the simulator knew. Every earlier entry said "unmeasured".
+
+### Hypothesis (written before the runs)
+
+The baselines will lose. Constant-velocity prediction will be poor beyond a second;
+centroid association will swap identities in the cyclist's close pass; the heuristic
+risk score will order proximity but not much else; the adaptive map will use fewer cells
+than the 0.5 m fixed map and take longer to build, as Experiment 007 found on synthetic
+scenes. Whether the adaptive map puts detail where the objects are was unknown.
+
+### Setup
+
+CARLA 0.9.16 server on `127.0.0.1:2000`, `Carla/Maps/Town10HD_Opt`, ego pinned to
+**spawn point 1** (`ADAPTX_CARLA__EGO_SPAWN_INDEX=1`, see "environment findings"), Python
+3.12.10 client environment, Windows 11, single-threaded. Every catalogue scenario was run
+**twice** with `python -m adaptx.evaluation run <id>`, the run record written to disk, and
+evaluated offline with `python -m adaptx.evaluation evaluate` from the primary Python 3.13
+environment with no CARLA present. Defaults: gates 1 / 2 / 4 m (primary 2 m), proximity
+band 20 m, alert level HIGH, refined level MEDIUM. All thresholds were fixed before the
+first run. Seed 20260101 (the catalogue seed) for scenario and sensor. Pipeline settings:
+process defaults (map +/-60 m, 0.5 m fixed, 10 m tiles, LOW/MEDIUM/HIGH/CRITICAL = 1.0 /
+0.5 / 0.2 / 0.1 m).
+
+Figures below are from repeat 1; repeat 2 differs where "repeatability" says.
+
+### Environment findings that changed the setup (before any figure was read)
+
+1. **Spawn point 0 was never refused by the map.** Experiment 010 attributed the refusal
+   to Town10HD_Opt. Before this experiment the server held two stale actors - an ADAPT-X
+   ego and its LiDAR, ids 56 and 57 - left at spawn point 0 by the run that hung and was
+   killed during the first live attempt. Destroying them made spawn point 0 accept. ADR-049
+   and Experiment 010 are corrected in place; the spawn-point walk stays, because that is
+   exactly the situation it handles.
+2. **From spawn point 0 the approach scenario is off-road.** With point 0 free, the ego
+   spawned there and `vehicle_approach`'s target, 45 m ahead and 3.5 m left, lies 3.7 m off
+   the road (waypoint probe); from point 1 it is on a Driving lane 1.1 m from the lane
+   centre. Scenario placements are ego-relative, so the catalogue is only valid from one
+   pose on this map. `CarlaSettings.ego_spawn_index` was added to pin it; all four
+   scenarios ran from point 1, which is also where Experiment 010 ran.
+3. **The LiDAR was unseeded.** `CarlaSettings.seed` existed ("seed for any simulator
+   randomness") and was applied to nothing. Two unseeded runs differed in point count on
+   every frame. The session now sets the sensor's `noise_seed` from it. Seeded, most frames
+   are identical; see repeatability.
+
+### Results - correctness (simulation evidence; not real-world figures)
+
+Per scenario, primary gate 2 m unless stated. "Actor" is the scenario actor.
+
+**Detection recall** (a detection within the gate of the actor, over eligible frames):
+
+| Scenario / actor | 1 m | 2 m | 4 m | class agreement (2 m) | planar error at 2 m, mean |
+|---|---|---|---|---|---|
+| stationary_vehicle / parked (20 m) | 0/40 | 9/40 = 0.23 | 9/40 | 0.00 | 1.58 m |
+| vehicle_approach / approaching (45 to 21 m) | 1/60 | 25/60 = 0.42 | 33/60 | 0.00 | 1.63 m |
+| pedestrian_crossing / pedestrian (15 m) | 1/120 | 1/120 = **0.01** | 1/120 | 0.00 | 0.09 m |
+| cyclist_crossing / both (25 m; 12 to 21 m) | 10/160 | 84/160 = 0.53 | 84/160 | 0.07 | 1.53 m |
+
+**Tracking** (match rate, planar position error, velocity error against the finite-difference
+reference, continuity):
+
+| Scenario / actor | match 2 m | planar err mean / median | velocity err mean / median (n) | null velocity | coverage | ids | switches | fragments |
+|---|---|---|---|---|---|---|---|---|
+| stationary / parked | 16/40 = 0.40 | 1.57 / 1.58 m | 0.19 / 0.08 m/s (14) | 2 | 0.40 | [9, 33] | 1 | 2 |
+| approach / approaching | 29/60 = 0.48 | 1.50 / 1.69 m | 2.81 / 0.82 m/s (25) | 4 | 0.48 | [1, 33, 34, 35] | 3 | 3 |
+| pedestrian / pedestrian | 2/120 = 0.02 | 0.09 / 0.09 m | n/a (0) | 2 | 0.02 | [13] | 0 | 1 |
+| cyclist / waiting_vehicle | - | - | - | - | 0.98 | [10, 35] | 1 | 2 |
+| cyclist / cyclist | - | - | - | - | 0.25 | [9, 38, 39] | 2 | 3 |
+| cyclist / both pooled | 98/160 = 0.61 | 1.42 / 1.66 m | 0.45 / 0.29 m/s (91) | 7 | | | | |
+
+Unlabelled track-frames (tracks with no scenario-actor match, mostly the map's static
+geometry): 362, 499, 926, 684. Not false positives; the record cannot label them.
+
+**Trajectory prediction** (ADE/FDE over trajectories whose track was matched on the source
+frame and had at least one future ground-truth frame; the `t+0` point excluded):
+
+| Scenario | trajectories in record | evaluated | skipped (unmatched track / past end) | predictor skips | ADE mean / median | FDE mean / median | coverage |
+|---|---|---|---|---|---|---|---|
+| stationary | 333 | 14 | 319 / 0 | 45 insufficient_velocity | 1.50 / 1.55 m | 1.48 / 1.53 m | 0.40 |
+| approach | 479 | 22 | 454 / 3 | 49 | 3.37 / 1.94 m | 4.81 / 1.95 m | 0.31 |
+| pedestrian | 879 | **0** | 879 / 0 | 49 | n/a | n/a | n/a |
+| cyclist | 726 | 86 | 635 / 5 | 56 | 2.11 / 1.66 m | 2.83 / 1.66 m | 0.63 |
+
+Error by horizon, cyclist scenario (n falls with horizon because the run ends): t+0.25 s
+1.48 m, t+0.5 1.56, t+1.0 1.89, t+1.5 2.35, t+2.0 3.10, t+2.5 3.44, t+3.0 5.10 m (n=23).
+Approach scenario: t+0.25 s 1.97 m, t+0.5 2.59, t+1.0 5.49 (n=12), t+1.5 11.73 m (n=5).
+
+**Risk against proximity** (band 20 m, alert at or above HIGH):
+
+| Scenario / actor | event frames (matched) | alert recall | lead time | early alerts | UNKNOWN | ordering concordance (pairs) | levels on matched frames |
+|---|---|---|---|---|---|---|---|
+| stationary / parked | 0 (0) | n/a | n/a | 2 | 0 | 0.855 (69) | medium 14, high 2 |
+| approach / approaching | 0 (0) | n/a | n/a | 5 | 0 | 0.802 (398) | low 8, medium 16, high 5 |
+| pedestrian / pedestrian | 120 (2) | 1.00 (of 2) | -0.05 s | 0 | 0 | n/a (0) | high 2 |
+| cyclist / waiting_vehicle | 0 (0) | n/a | n/a | 0 | 0 | 0.396 (2439) | medium 78 |
+| cyclist / cyclist | 63 (20) | 0.25 | 0.00 s | 0 | 0 | 0.808 (167) | medium 15, high 5 |
+
+The 20 m band, chosen before the runs, sits just inside the closest approach of three
+scenarios (the parked vehicle is at 20.0 m, the approaching one ends at 21.4 m, the waiting
+vehicle is at 25 m), so three actors produced no event. **A second evaluation at 25 m was
+run afterwards and is reported as what it is - a post-hoc choice:** approaching, 8 event
+frames, alert recall 0.625, lead time -0.05 s; parked, 40 event frames (16 matched), alert
+recall 0.125; waiting_vehicle, 32 event frames, alert recall 0.00. Alerting unlabelled
+track-frames: 41, 63, 121, 81. No collision occurs in any scenario; no collision figure exists.
+
+### Results - adaptive resolution (paired against the fixed 0.5 m map, same frames)
+
+| Scenario | fixed cells | adaptive cells mean (min-max) | cell and byte ratio mean | build time ratio, mapping only / with controller (median) | area-weighted res. | actor-tile res. mean | other-tile res. mean |
+|---|---|---|---|---|---|---|---|
+| stationary | 57,600 | 31,785 (26,700-48,600) | 0.55 | 5.0 / 8.5 | 0.92 m | 0.58 m | 0.92 m |
+| approach | 57,600 | 30,245 (26,700-44,400) | 0.53 | 5.1 / 8.2 | 0.93 m | 0.49 m | 0.93 m |
+| pedestrian | 57,600 | 27,605 (26,700-39,600) | 0.48 | 4.9 / 7.9 | 0.94 m | **0.97 m** | 0.94 m |
+| cyclist | 57,600 | 32,400 (27,300-62,400) | 0.56 | 5.1 / 8.4 | 0.92 m | 0.41 m | 0.93 m |
+
+Actor-tile level distribution: stationary low 13 / medium 16 / high 11; approach low 3 /
+medium 49 / high 8; pedestrian **low 116** / high 4; cyclist low 2 / medium 105 / high 53.
+Actor-tile cell size by matched risk level: HIGH 0.20 m in every scenario (n = 2, 5, 2, 5);
+MEDIUM 0.35-0.44 m; unmatched frames 0.49-0.99 m.
+
+Refinement lead (frames; positive = the tile reached MEDIUM before the actor arrived):
+stationary 2 entries, 0 and +25; approach 3 entries, -1, +14, +38; pedestrian 2 entries,
+-1 and +77; cyclist 4 distinct (actor, tile) entries, 0, 0, +26, +50. No entry was never
+refined.
+
+Churn: changed tiles per frame mean 1.75 / 1.30 / 0.55 / 1.09; frames with any change
+18/40, 21/60, 16/120, 24/80; transitions 70 / 78 / 66 / 87 over 33-37 of 144 tiles;
+reversals (back to the level just left within 3 frames) 1 / 4 / 1 / 3; hysteresis holds
+304 / 371 / 924 / 573 and dwell holds 107 / 97 / 88 / 115 decisions. No frame over budget.
+
+Map workload: fixed occupancy ratio 0.052 on every scenario, adaptive 0.15-0.16; fixed grid
+1,843,200 bytes, adaptive 0.88-1.04 MB. **Occupancy accuracy not evaluated** (no reference).
+
+### Results - resource (this machine, not a real-time claim)
+
+Pipeline per frame, median (p95): 162.6 (215.5), 150.9 (195.0), 147.5 (189.1), 150.8
+(204.3) ms. Detection dominates at 96-105 ms median (clustering 85 ms of it), then adaptive
+mapping 22 ms, controller 13-15 ms, processing 7-8 ms, fixed mapping 4.5 ms, prediction
+1.5-2 ms, risk and tracking about 1 ms. Experiment 010 measured detection at 42 ms median
+on the same scene; the cause of the difference was not identified and is not claimed.
+Peak process memory: not sampled.
+
+### Repeatability
+
+Two seeded runs per scenario, compared with `python -m adaptx.evaluation compare`
+(timings and session ids excluded):
+
+| Scenario | frames | point count differs | max difference | detections differ | tracks differ | adaptive cells differ |
+|---|---|---|---|---|---|---|
+| stationary | 40 | 12 frames | 11 pts of ~27,000 | 7 frames | 9 | 12 |
+| approach | 60 | 42 | 16 | 7 | 13 | 33 |
+| pedestrian | 120 | 40 | 9 | 0 | 0 | 0 |
+| cyclist | 80 | 55 | 17 | 6 | 2 | 16 |
+
+**No live scenario is bit-repeatable.** With the sensor seeded, 30-70 % of frames return an
+identical point count and the rest differ by at most 17 points in 27,000; unseeded, every
+frame differed. The pipeline itself is deterministic - two fake-simulator runs evaluate
+identically, and that is a test - so the divergence is the sensor's, and the geometric
+detector amplifies a dozen points into a different cluster boundary, a different track and
+a different tile level. The deterministic-content comparison therefore fails on every live
+scenario, by the amounts above. The tracking, prediction and risk sections agreed to the
+digit on the pedestrian scenario and differed by one to three matched frames on the others.
+
+### Interpretation (written after the runs)
+
+- **The consistent 1.5-1.7 m planar offset** on vehicles at every gate, with recall at the
+  1 m gate near zero, is compatible with the detection centroid lying on the visible face of
+  the vehicle while the ground-truth position is the mesh origin - but that is a hypothesis
+  this record cannot test, and the number stands as the position error of the system as
+  built. The 0.09 m on the one matched pedestrian frame is consistent with it.
+- **The pedestrian is not detected.** One frame in 120. The record shows why the scenario
+  cannot say whether that is the detector's fault: the walker's ground-truth height reached
+  -1.06 m and was below the road on 45 of 120 frames, with a vertical speed of -31 m/s -
+  a placed walker keeps its physics velocity between placements and falls. The vehicles
+  settle (z at or above -0.09 m); the walker does not. **The pedestrian figures are
+  confounded by a Phase 10 placement defect** and should not be read as a detector result
+  until it is fixed. Not fixed here: Phase 11 measures.
+- **The detector never labels the Audi a vehicle** (class agreement 0.00 on 54 matched
+  frames across three scenarios; the cyclist scenario's 0.07 is the cyclist). The classes
+  it produced over the approach run were unknown 319, obstacle 151, vehicle 1.
+- **Identity does not survive**: 1-3 switches per moving actor, coverage 0.25-0.48, and the
+  waiting vehicle - the easiest case - still switched once.
+- **Prediction error grows with horizon as a constant-velocity model predicts it would**,
+  and in the approach scenario grows faster (11.7 m at 1.5 s) because the velocity estimate
+  itself was wrong on some frames (velocity error mean 2.8 m/s against a median of 0.8:
+  frames that measured a standstill for an object closing at 8 m/s).
+- **The risk score orders proximity** for the two moving actors (0.80, 0.81) and does not
+  for the stationary one (0.40, where the only distance variation is jitter). At the
+  pre-registered 20 m band nothing was inside it long enough to say more.
+- **The adaptive map uses 0.48-0.56 of the fixed map's cells and 5x its build time** (8x
+  with the controller), as Experiment 007 found. **It does put finer cells under the actor
+  than elsewhere** - 0.41-0.58 m against 0.92-0.93 m - in the three scenarios where the
+  actor was perceived, and refined ahead of arrival in every entry but two (one frame late
+  each). In the pedestrian scenario it did not, because nothing perceived the pedestrian:
+  the controller can only follow what upstream gives it.
+- Churn is low (a change on a quarter to a half of frames, 1-4 reversals) with the
+  stabiliser reporting hundreds of holds; whether the holds were right is not measured.
+
+### Limitations
+
+Simulation only; four scenarios; one map, one pose, one seed; the ego never moves; no
+occupancy reference; ground truth excludes static geometry, so no precision; peak memory
+not sampled; timings from one machine; runs are near- but not bit-repeatable. Nothing here
+is a safety, collision-probability or real-world claim.
+
+## Experiment 012 - Placement without physics: re-measurement of Experiment 011
+
+**Date:** 2026-09-11
+
+### Question
+
+Experiment 011 found two defects in the test environment, not the system under test: a
+placed walker fell through the road, and live runs were not repeatable. Does making placed
+actors *actually* placed (ADR-054) remove them, and what do the Phase 11 figures look like
+on a scene that stands still?
+
+### Hypothesis (written before the runs)
+
+Disabling physics on placed actors and grounding the ego will hold every actor where the
+script puts it and remove the falling walker and the ego's half-second settling transient.
+Repeatability should improve; whether it becomes exact was unknown. The pedestrian figures
+of Experiment 011 will change; the vehicle figures were expected to change little.
+
+### What changed (ADR-054)
+
+- `spawn_ahead_of_ego` switches physics off on every scenario actor and places it so the
+  **bottom of its bounding box** sits `up_m` above the ego's ground plane; `Placement.up_m`
+  now defaults to 0.0 (was 0.5, "spawn clearance"). A car's origin lands at road level, a
+  walker's 0.93 m up - both with their feet on the road.
+- The ego's physics is switched off and it is set down at the road surface under its spawn
+  point (a spawn point sits 0.6 m above the road; with physics on the ego fell that far
+  over the first ten frames of every run in Experiment 011, and the LiDAR fell with it).
+
+Same server, map, spawn point 1, seeds, pipeline defaults and evaluation thresholds as
+Experiment 011. Two repeats per scenario.
+
+### Results - the defects
+
+| | Experiment 011 | Experiment 012 |
+|---|---|---|
+| walker height rel. ego, over the run | -1.06 to +0.92 m, 45/120 frames below the road | **0.93 m on every frame** |
+| vehicle height rel. ego | -0.09 to +0.50 m (falling, caught by the road each tick) | **0.00 m on every frame** |
+| ego world z over the run | settling 0.6 m in the first 10 frames | **0.000 on every frame** |
+| stationary_vehicle repeat | 12/40 frames differ in point count | **0/40 - bit-repeatable; `compare` says REPEATABLE** |
+| vehicle_approach repeat | 42/60 frames, max 16 pts | 23/60, max 5 |
+| pedestrian_crossing repeat | 40/120, max 9 | 69/120, max 8 |
+| cyclist_crossing repeat | 55/80, max 17 | 43/80, max 8 |
+
+A scene in which nothing moves is now exactly repeatable. Scenes with moving placed actors
+still differ by at most 8 points in 27,000 on a third to half of frames, with detections
+identical in three of four scenarios. The residual is not explained; it is consistent with
+the server's own handling of a transform set between ticks, and is not the placement code.
+
+### Results - pipeline as configured by the process defaults (ground segmentation OFF)
+
+Pre-registered configuration, same as Experiment 011.
+
+| Scenario / actor | det. recall 2 m | trk. match 2 m | planar err. mean | coverage | id switches | ADE mean | notes |
+|---|---|---|---|---|---|---|---|
+| stationary / parked (20 m) | **0/40** | 0/40 | n/a | 0.00 | - | n/a | Experiment 011's 9/40 were the falling car's transient |
+| approach / approaching | 26/60 | 30/60 | 1.59 m | 0.50 | 2 | 3.23 m (11.7 m at 1.5 s) | |
+| pedestrian / pedestrian | **0/120** | 0/120 | n/a | 0.00 | - | n/a | standing on the road now, still unseen |
+| cyclist / waiting_vehicle | 87/160 pooled | 93/160 pooled | 1.49 m | **1.00** | **0** | 1.65 m | |
+| cyclist / cyclist | | | | 0.16 | 0 | | |
+
+The parked car returns about 26 LiDAR points per sweep at 20 m (measured directly with a
+sensor probe: 48 points within 3 m of its position against 22 without it). The detector
+saw, at the car's position, a rejected two-point cluster: the rest of its points were
+clustered with the ground, because **the process defaults disable ground segmentation**
+(`ADAPTX_LIDAR__GROUND_ENABLED=false`, ADR-012 made every Phase 2B stage opt-in) and the
+grid clusterer joins a low car to the road it stands on.
+
+Adaptive: cells 0.46-0.49 of fixed, build time 5x (8x with controller), actor tile
+0.47-0.56 m against 0.94 m elsewhere where the actor was perceived, 1.00 m (never refined)
+where it was not. Churn fell to 0-13 transitions per run with 0-3 reversals: without the
+settling transient the allocation is nearly static. Pipeline 140-142 ms per frame median,
+detection 89-92 ms of it.
+
+### Results - disclosed configuration variation: ground segmentation ON
+
+**Chosen after reading the result above**, to test the explanation; it is not the
+pre-registered configuration and is reported as a variation. One environment variable,
+`ADAPTX_LIDAR__GROUND_ENABLED=true`, nothing else changed; two repeats.
+
+| Scenario / actor | det. recall 1 m / 2 m | trk. match 2 m | planar err. mean / median | vel. err. median | coverage | id switches | ADE mean / med | ADE at 3 s |
+|---|---|---|---|---|---|---|---|---|
+| stationary / parked | 0/40 / **40/40** | 40/40 | 1.70 / 1.70 m | 0.00 m/s | 1.00 | 0 | 1.70 / 1.70 m | - |
+| approach / approaching | 0/60 / **9/60** | 13/60 | 1.46 / 1.62 m | 1.33 m/s | 0.22 | 0 | 1.07 / 1.11 m | - |
+| pedestrian / pedestrian | **120/120** / 120/120 | 120/120 | **0.10 / 0.10 m** | 0.10 m/s | 1.00 | 0 | 0.66 / 0.52 m | 1.87 m |
+| cyclist / both pooled | 45/160 / 124/160 | 128/160 | 1.03 / 1.50 m | 0.00 m/s | veh 1.00, cyc 0.60 | 0, 0 | 2.06 / 1.50 m | 5.21 m |
+
+- The pedestrian is seen on every frame at 0.10 m, tracked without a switch, and predicted
+  to 1.9 m at 3 s. The parked car is seen on every frame - at a **constant 1.70 m** planar
+  offset, so never within the 1 m gate: the centroid of the returns is not where the mesh
+  origin is, and this configuration makes that offset exact rather than noisy.
+- The approaching car is seen **less** with ground segmentation on (9/60 against 26/60): a
+  low car at 25-45 m apparently loses its returns to the ground stage. Not investigated.
+- No identity switch in any scenario. The classifier still never labels a vehicle a vehicle
+  (agreement 0.00-0.05; the cyclist scenario's 0.13 at 1 m is the cyclist).
+- Risk: ordering concordance 0.95-0.98 for the moving actors, 1.00 for the parked car (39
+  pairs), 0.69 for the pedestrian; the parked and waiting vehicles never entered the
+  pre-registered 20 m band; alert recall where an event existed was 0.008-0.021.
+- Adaptive: cells **0.65-0.69** of fixed (more than with ground on the map, because the
+  perceived objects now drive refinement), build time 7-8x (15-17x with controller), actor
+  tile 0.31-0.48 m against 0.90 m elsewhere, refined before or on arrival in every entry
+  but one (-9 frames), 9-11 transitions per run, no reversal. Pipeline **80-84 ms** per
+  frame median: ground segmentation costs 12 ms and saves 70 ms of clustering.
+
+### Interpretation
+
+- The Experiment 011 defects are closed by ADR-054 and the pedestrian scenario is now a
+  valid measurement. Its Experiment 011 figures are void.
+- **Every correctness figure in this project now depends on one configuration switch that
+  the process defaults leave off.** With it off, a car parked 20 m ahead and a pedestrian
+  15 m ahead are never detected, and the earlier "recall" on the parked car was an artefact
+  of the car falling. With it on, both are seen on every frame. Which default is right is a
+  Phase 2/3 decision with its own experiment, not something this phase settles; the
+  evaluation reports the configuration it ran under, and both are recorded here.
+- The 1.70 m offset between detection centroid and actor origin on a vehicle is systematic,
+  not noise. Any future accuracy claim at a 1 m gate would need either a reference point on
+  the visible face or an oriented box, and the record cannot say which.
+- Live runs are now bit-repeatable for a static scene and near-repeatable otherwise.
+
+### Limitations
+
+As Experiment 011, plus: the ground-on figures are a post-hoc variation; nothing was tuned
+inside any stage; the residual non-repeatability of moving actors is unexplained; one map,
+one pose, one seed; simulation only.

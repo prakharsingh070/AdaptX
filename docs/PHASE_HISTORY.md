@@ -703,7 +703,86 @@ was computed**; the ground truth to compute one is in every run record, and that
 
 **Status:** 1452 tests on 3.13 (1442 before), 1451 + 1 skipped on 3.12, 7 live tests
 passing against the server, ruff and mypy clean, 17 endpoints unchanged, no new
-dependencies. The fixes are uncommitted on `phase-10-scenario-framework` on top of `2a4ce2d`.
+dependencies. Committed as `ec93951` and merged with Phase 10 as PR #7 (`fe64d1c`).
+
+---
+
+## Phase 11 — Evaluation against simulator ground truth · verified · first measured correctness figures
+
+**What was built.** `adaptx.evaluation`, an offline layer that reads a recorded
+`ScenarioRunResult` and produces an `EvaluationReport`. To make that possible the Phase 10
+record gained, additively, the pipeline's own result contracts per frame and the sensor
+configuration (ADR-050); it still carries no metric and the Phase 10 test that says so still
+passes. Matching is greedy nearest-neighbour within a gate, reported at 1, 2 and 4 m, with
+deterministic tie-breaking and no precision figure, because the map's static geometry is
+not a CARLA actor and a track on it is unlabelled, not false (ADR-052). Detection recall,
+tracking match rate, planar and 3-D position error, velocity error against a
+finite-difference reference (the simulator's velocity of a placed actor is meaningless),
+continuity with identity switches and fragments, ADE/FDE over exactly aligned future frames
+with no interpolation and the t+0 point excluded, risk against proximity events with
+`UNKNOWN` preserved and never scored, map workload with occupancy accuracy explicitly not
+evaluated, adaptive resolution paired against the fixed map within the same run - cells,
+bytes, build time, detail at the actor's tile versus elsewhere, detail by risk level,
+refinement lead, churn, reversals, holds - and resource. Every missing metric is null with a
+reason (ADR-051). `python -m adaptx.evaluation evaluate | compare | run`. No endpoint, no
+telemetry, no dependency. Architecture written before the code in `docs/EVALUATION.md`.
+
+**The boundary held and is now proven in both directions.** Ground truth reaches
+`adaptx.evaluation` and nothing else: a subprocess check with a clean module table and a
+source inspection over `perception`, `tracking`, `prediction`, `mapping`, `risk` and
+`services` assert it, and the evaluation package is shown never to require the `carla`
+package. Evaluating a record does not modify it; a run evaluated and a fresh identical run
+produce the same stage counts.
+
+**Three things the live runs found before a figure was read.** Two stale actors - an ADAPT-X
+ego and its LiDAR from the run killed during the first live attempt - were still parked at
+spawn point 0 and about 4 m from every Experiment 010 ego; destroying them made point 0
+accept, so Experiment 010's "the map refuses index 0" was wrong and is corrected in place
+(ADR-049). From point 0 the approach scenario's target is off-road, so `ego_spawn_index`
+now pins the ego and every experiment ran from point 1. And `carla.seed`, documented as the
+seed for simulator randomness, seeded nothing: the LiDAR is now seeded from it, after
+which most frames repeat to the point and the rest differ by at most 17 points in 27,000.
+
+**The measurements (Experiment 011, simulation evidence only).** The baselines lost, as the
+handoff said they would. Vehicle detection recall 0.00-0.06 at a 1 m gate and 0.23-0.61 at
+2 m, with a consistent 1.5-1.7 m planar offset; the classifier never called the Audi a
+vehicle. Tracking coverage 0.25-0.48 for moving actors with 1-3 identity switches each.
+ADE 1.5-3.4 m mean, 5 m at a 3 s horizon for the cyclist and 12 m at 1.5 s for the
+approaching car, where some frames measured a standstill for an object closing at 8 m/s.
+The risk score orders proximity for moving actors (concordance 0.80-0.86) and not for a
+stationary one; at the pre-registered 20 m band no actor was inside long enough to measure
+alert recall, and a post-hoc 25 m band is reported as post-hoc. The adaptive map used
+0.48-0.56 of the fixed map's cells, took 5x longer to build (8x with the controller), and
+put finer cells under the perceived actor (0.41-0.58 m) than elsewhere (0.92-0.93 m),
+refining ahead of arrival in all but two entries. **The pedestrian scenario is confounded**:
+a placed walker keeps its physics velocity between placements and fell through the road on
+45 of 120 frames, so one detection in 120 says nothing about the detector. Recorded, not
+fixed - Phase 11 measures.
+
+**Two evaluation definitions were corrected after the first live read, and both are
+disclosed.** An actor sitting on a tile edge flickered between two tiles and was counted as
+arriving dozens of times; an (actor, tile) pair now counts once. And the comparison of two
+runs treated simulator-assigned actor ids as content; they are session identity and are
+now excluded. Neither changes a measured value; both change how many there are.
+
+**The test environment was fixed, then everything re-measured (ADR-054, Experiment 012).**
+Placed actors now have physics off and stand on the road with `up_m` measured to the bottom
+of the bounding box; the ego is grounded at the road surface. The walker stands at 0.93 m
+on every frame, nothing settles, and a static scene is bit-repeatable across runs - the first
+live repeatability in the project. Under the process defaults the parked car and the
+pedestrian are detected on no frame at all: their returns cluster with the road because
+ground segmentation is off by default (ADR-012). A disclosed variation with it on sees both
+on every frame, with no identity switch in any scenario and the pipeline at 80 ms rather
+than 140. The default is left as it was and the decision is handed on with the evidence.
+
+**Retargeted, not weakened.** Three status assertions that a live run had not happened and
+that prediction was unmeasured were retargeted to assert what is now true - live-validated,
+simulation only, measured in simulation and still unmeasured for real data - each with a
+stronger negative beside it.
+
+**Status:** 1565 tests (1452 before), 7 deselected live, ruff and mypy clean, 17 endpoints
+unchanged, no new dependencies. Uncommitted on `phase-11-evaluation`, branched from
+`origin/main` at `fe64d1c`.
 
 ---
 
@@ -714,6 +793,10 @@ Each phase ships a **deterministic, explainable baseline** behind an interface, 
 visible. Phase 9 declared `carla` as an **optional extra** rather than a dependency: the
 backend, the endpoints and the whole test suite still run without it, so the required set is
 unchanged after ten phases.
+
+Phase 11 made the honest negative the whole phase: the first correctness figures in the
+project's history are mostly unflattering, they are recorded with the method, the seed, the
+gate and the confound beside them, and nothing was tuned to improve them.
 
 Phase 8 added a second pattern worth naming: **the honest negative**. The phase the project
 is named for produced a result that is partly unflattering — slower than the baseline, and

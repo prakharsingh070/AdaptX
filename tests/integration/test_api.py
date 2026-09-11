@@ -121,7 +121,8 @@ class TestSystemStatus:
         assert prediction["implementation"] == "PARTIAL"
         assert prediction["implementation"] != "IMPLEMENTED"
         assert "baseline" in prediction["detail"]
-        assert "unmeasured" in prediction["detail"]
+        assert "simulation only" in prediction["detail"]  # retargeted in Phase 11
+        assert "unmeasured against any real trajectory" in prediction["detail"]
 
     def test_detection_is_reported_as_partial_not_finished(self, client: TestClient) -> None:
         """Phase 3 shipped a geometric baseline, which is not a finished detector."""

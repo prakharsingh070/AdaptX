@@ -63,7 +63,15 @@ class Vector3D:
 
 @dataclass
 class BoundingBox:
+    """A vehicle-shaped box whose bottom sits at the actor origin, as CARLA's do."""
+
     extent: Vector3D = field(default_factory=lambda: Vector3D(2.3, 1.0, 0.8))
+    location: Vector3D = field(default_factory=lambda: Vector3D(0.0, 0.0, 0.8))
+
+
+@dataclass
+class FakeWaypoint:
+    transform: Transform
 
 
 @dataclass
@@ -89,6 +97,8 @@ class FakeActor:
         # run). The fake reproduces that so code offsetting from a fresh
         # ego cannot pass here and fail on the simulator.
         self.settled = False
+        self.blueprint_attributes: dict[str, str] = {}
+        self.simulate_physics = True
         self.bounding_box = BoundingBox()
         self.destroyed = False
         self.velocity = Vector3D()
@@ -103,6 +113,9 @@ class FakeActor:
 
     def get_velocity(self) -> Vector3D:
         return self.velocity
+
+    def set_simulate_physics(self, enabled: bool) -> None:
+        self.simulate_physics = enabled
 
     def destroy(self) -> bool:
         self.destroyed = True
@@ -165,6 +178,7 @@ class FakeBlueprint:
             "upper_fov": "10",
             "lower_fov": "-30",
             "dropoff_general_rate": "0.0",
+            "noise_seed": "0",
         }
 
     def has_attribute(self, key: str) -> bool:
@@ -203,6 +217,10 @@ class FakeMap:
 
     def get_spawn_points(self) -> list[Transform]:
         return list(self.spawn_points)
+
+    def get_waypoint(self, location: Location) -> FakeWaypoint:
+        """The road under ``location``: a flat plane at the origin's height."""
+        return FakeWaypoint(Transform(Location(location.x, location.y, 0.0), Rotation()))
 
 
 @dataclass
@@ -290,6 +308,9 @@ class FakeWorld:
             actor: FakeActor = FakeSensor(self, actor_id, blueprint.id, transform)
         else:
             actor = FakeActor(self, actor_id, blueprint.id, transform)
+        # What the blueprint carried at spawn time, so a test can check the
+        # attributes the session set (a real actor exposes them too).
+        actor.blueprint_attributes = dict(blueprint.attributes)
         self.actors[actor_id] = actor
         return actor
 

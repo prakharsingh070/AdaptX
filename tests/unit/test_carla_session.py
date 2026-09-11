@@ -30,12 +30,14 @@ from adaptx.core.exceptions import SimulatorUnavailableError
 from adaptx.models.common import DataSource
 from adaptx.models.system import SimulationState
 from tests.fixtures.fake_carla import (
+    BoundingBox,
     FakeCarlaModule,
     FakeSensor,
     FakeWorld,
     Location,
     Rotation,
     Transform,
+    Vector3D,
 )
 
 
@@ -126,6 +128,16 @@ class TestDeterministicConfiguration:
         assert applied.fixed_delta_seconds == pytest.approx(0.05)
         instance.close()
 
+    def test_the_lidar_random_generator_is_seeded_from_the_configured_seed(self) -> None:
+        """Found live (Experiment 011): an unseeded sensor returns a different
+        point count on every run and nothing downstream is repeatable."""
+        world = FakeWorld()
+        instance = session(world, seed=4242)
+        instance.open()
+        sensor = next(a for a in world.actors.values() if isinstance(a, FakeSensor))
+        instance.close()
+        assert sensor.blueprint_attributes["noise_seed"] == "4242"
+
     def test_world_settings_are_restored_on_close(self) -> None:
         """A server left in synchronous mode blocks on a client that has gone."""
         world = FakeWorld()
@@ -195,11 +207,13 @@ class TestActorCleanup:
             instance.open()
 
     def test_a_refused_first_spawn_point_falls_through_to_the_next(self) -> None:
-        """Found live: Town10HD_Opt refuses spawn point 0 on CARLA 0.9.16.
+        """Found live: spawn point 0 was occupied by an actor a killed process
+        had left behind, and every spawn there was refused.
 
         The session must not be wedded to index 0. Taking the first point that
-        accepts the vehicle is still deterministic for a given map, and the
-        index used is recorded so the run stays reproducible from its report.
+        accepts the vehicle is still deterministic for a given map and world
+        state, and the index used is recorded so the run stays reproducible
+        from its report.
         """
         world = FakeWorld()
         world.refuse_spawn_point_indices.add(0)
@@ -223,6 +237,24 @@ class TestActorCleanup:
         with pytest.raises(SimulatorUnavailableError, match="any of the 2 spawn points"):
             session(world).open()
         assert world.actors == {}
+
+    def test_a_pinned_spawn_index_is_used_and_no_other_is_tried(self) -> None:
+        """A scenario is ego-relative: a different spawn point is a different
+        scene, so a pinned index must never silently fall through."""
+        world = FakeWorld()
+        instance = session(world, ego_spawn_index=1)
+        instance.open()
+        assert instance.ego_spawn_index == 1
+        instance.close()
+
+        world.refuse_spawn_point_indices.add(1)
+        with pytest.raises(SimulatorUnavailableError, match="spawn point 1"):
+            session(world, ego_spawn_index=1).open()
+        assert world.actors == {}
+
+    def test_a_pinned_spawn_index_beyond_the_map_is_reported(self) -> None:
+        with pytest.raises(SimulatorUnavailableError, match="out of range"):
+            session(ego_spawn_index=7).open()
 
     def test_the_spawn_index_is_forgotten_on_close(self) -> None:
         instance = session()
@@ -383,7 +415,7 @@ class TestScenarioPlacement:
         instance = session(world)
         instance.open()
         target = instance.spawn_ahead_of_ego(
-            "vehicle.audi.tt", forward_m=30.0, left_m=4.0, up_m=0.5
+            "vehicle.audi.tt", forward_m=30.0, left_m=4.0, up_m=0.0
         )
         instance.step()  # A pose is only reported once the server has ticked.
         location = target.get_transform().location
@@ -447,6 +479,55 @@ class TestScenarioPlacement:
         instance.close()
         assert state.position.x == pytest.approx(10.0)
         assert state.position.y == pytest.approx(-5.0)  # CARLA +y is ADAPT-X -y
+
+    def test_placed_actors_do_not_simulate_physics_and_stand_on_the_ground(self) -> None:
+        """Found live (Experiment 011): a placed walker kept its physics velocity
+        between placements and fell through the road; the ego fell 0.6 m from
+        its spawn clearance in the first half second. Placed means placed."""
+        world = FakeWorld()
+        instance = session(world)
+        instance.open()
+        target = instance.spawn_ahead_of_ego("vehicle.audi.tt", forward_m=20.0)
+        instance.step()
+        ego = world.actors[instance.ego_actor_id or -1]
+        instance.close()
+
+        assert not ego.simulate_physics
+        assert not target.simulate_physics
+        # The fake's box bottom sits at the origin, so up_m=0 puts the origin
+        # on the ego's ground plane (z=0 in the fake).
+        assert target.get_transform().location.z == pytest.approx(0.0)
+
+    def test_up_m_is_measured_to_the_bottom_of_the_bounding_box(self) -> None:
+        """A walker's origin is mid-capsule; asking for up_m=0 must still put
+        its feet on the road, not its middle."""
+        world = FakeWorld()
+        instance = session(world)
+        instance.open()
+        target = instance.spawn_ahead_of_ego("walker.pedestrian.0001", forward_m=10.0)
+        # Give it a walker-shaped box: centre at the origin, 0.93 m half-height.
+        target.bounding_box = BoundingBox(
+            extent=Vector3D(0.2, 0.2, 0.93), location=Vector3D(0.0, 0.0, 0.0)
+        )
+        instance._stand_offsets[target.id] = 0.93  # what spawn would have read
+        instance.place_ahead_of_ego(target, forward_m=10.0, up_m=0.0)
+        instance.step()
+        z = target.get_transform().location.z
+        instance.close()
+        assert z == pytest.approx(0.93)
+
+    def test_the_ego_is_grounded_on_the_road_under_its_spawn_point(self) -> None:
+        world = FakeWorld()
+        world.get_map().spawn_points[0] = Transform(Location(5.0, 2.0, 0.6), Rotation())
+        instance = session(world)
+        instance.open()
+        instance.step()
+        ego = world.actors[instance.ego_actor_id or -1]
+        location = ego.get_transform().location
+        state = instance.ego_state()
+        instance.close()
+        assert (location.x, location.y, location.z) == (5.0, 2.0, 0.0)
+        assert state.position.z == pytest.approx(0.0)
 
     def test_spawning_before_an_ego_exists_is_refused(self) -> None:
         with pytest.raises(SimulatorUnavailableError, match="no ego"):

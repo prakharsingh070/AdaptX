@@ -213,13 +213,13 @@ def _declared_components() -> list[ComponentStatus]:
                 "is recorded on a separate path and never reaches detection, "
                 "tracking, prediction, risk or adaptive resolution. The live "
                 "connection and session state are reported under `carla`, "
-                "not here. NO LIVE CARLA RUN HAS BEEN EXECUTED IN THIS "
-                "REPOSITORY: the package is optional, is absent in the "
-                "development environment, and the adapter has been exercised "
-                "only against a stand-in. Nothing about CARLA performance or "
-                "perception accuracy is claimed. One hard-coded smoke scenario; "
-                "no scenario framework, no traffic, no camera, no pitch/roll "
-                "conversion"
+                "not here. LIVE-VALIDATED against CARLA 0.9.16 (Experiments "
+                "010 and 011) from a Python 3.12 environment; the package is "
+                "optional and absent from the primary environment, where the "
+                "adapter is exercised against a stand-in. SIMULATION ONLY: "
+                "nothing about real-world performance or safety is claimed. "
+                "Scenarios are the scenario component; no traffic, no camera, "
+                "no pitch/roll conversion"
             ),
             phase=9,
         ),
@@ -238,14 +238,37 @@ def _declared_components() -> list[ComponentStatus]:
                 "truth beside every sensor frame and feeds it to NO pipeline "
                 "stage, and destroys every actor on completion or failure. "
                 "The run result is raw evidence - frame identities, scripted "
-                "poses, ground truth, stage counts - and carries NO accuracy "
+                "poses, ground truth, stage counts and, since Phase 11, the "
+                "pipeline's own result contracts - and carries NO accuracy "
                 "or evaluation figure; comparing perception against ground "
-                "truth is Phase 11 and has not been done. Four catalogue "
-                "scenarios. No live CARLA run has been executed; the framework "
-                "has been exercised only against a stand-in. Ego motion, event "
+                "truth is the evaluation component. Four catalogue scenarios, "
+                "live-validated on CARLA 0.9.16. Placed actors do not simulate "
+                "physics and stand on the road (ADR-054). Ego motion, event "
                 "replay, traffic and weather are not implemented"
             ),
             phase=10,
+        ),
+        ComponentStatus(
+            name="evaluation",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "offline evaluation of a recorded scenario run against "
+                "simulator ground truth: detection and tracking matched at "
+                "several gates, position and velocity error, continuity, "
+                "ADE/FDE without interpolation, risk against proximity events "
+                "with UNKNOWN preserved, map workload with occupancy accuracy "
+                "EXPLICITLY NOT EVALUATED, adaptive resolution paired against "
+                "the fixed map within one run, churn and refinement lead. A "
+                "metric that could not be computed is null with a reason, "
+                "never zero. Ground truth reaches this package and no other. "
+                "Not served over HTTP or telemetry: python -m adaptx.evaluation. "
+                "First measured results in Experiment 011: SIMULATION EVIDENCE "
+                "ONLY - not safety validation, not a collision probability, not "
+                "real-world validation. No precision figure (static geometry is "
+                "unlabelled), no occupancy reference, no peak-memory sample"
+            ),
+            phase=11,
         ),
         ComponentStatus(
             name="prediction",
@@ -260,9 +283,11 @@ def _declared_components() -> list[ComponentStatus]:
                 "lane or map conditioning, and no interaction between objects. "
                 "Uncertainty grows with extrapolation time by a documented "
                 "formula and is not a calibrated sigma or probability. "
-                "Prediction accuracy is unmeasured: no labelled trajectories "
-                "exist. Collision and conflict reasoning belong to the risk "
-                "engine, not here"
+                "Prediction error was first measured against simulator "
+                "ground truth in Experiment 011 (ADE 1.5-3.4 m mean, growing "
+                "with horizon; simulation only, one map, one seed) and remains "
+                "unmeasured against any real trajectory. Collision and "
+                "conflict reasoning belong to the risk engine, not here"
             ),
             phase=5,
         ),
