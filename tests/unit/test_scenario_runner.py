@@ -483,6 +483,12 @@ class TestRunResultContract:
         assert rebuilt.resolved == result.resolved
         assert rebuilt.ground_truth[0].frame_id == result.ground_truth[0].frame_id
 
+    def test_the_result_records_the_version_the_server_reported(self) -> None:
+        """The ``carla`` package ships no ``__version__`` (0.9.16), so the
+        server's own answer is the only version worth writing down."""
+        result = ScenarioRunner(definition(), simulator=simulator(), settings=settings()).run()
+        assert result.simulator_version == "fake-0.0"
+
     def test_the_result_carries_no_evaluation_metric(self) -> None:
         """Raw evidence only. A metric here would be a Phase 11 claim."""
         from adaptx.scenarios.result import ScenarioFrameRecord, ScenarioRunResult, StageCounts

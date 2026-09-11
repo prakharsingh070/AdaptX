@@ -50,6 +50,14 @@ class TestMetricsService:
         assert any("at least two" in note for note in metrics.unavailable)
 
     def test_fps_is_measured_once_two_frames_exist(self) -> None:
+        """Two frames, however close together, must yield a measured fps.
+
+        This failed on Python 3.12 on Windows, where ``time.monotonic()`` ticks
+        every ~15.6 ms: back-to-back frames shared a timestamp, elapsed was
+        zero, and fps was reported unmeasured. The clock is now
+        ``perf_counter``. Frames are recorded with no delay on purpose - a sleep
+        would hide the defect on any clock.
+        """
         service = MetricsService()
         service.record_frame(point_count=1, processing_time_s=0.001)
         service.record_frame(point_count=2, processing_time_s=0.003)
@@ -59,6 +67,13 @@ class TestMetricsService:
         assert metrics.fps > 0
         assert metrics.sample_count == 2
         assert metrics.latency_ms == pytest.approx(2.0)
+
+    def test_fps_survives_a_coarse_system_clock(self) -> None:
+        """Regression guard for the 3.12 defect, independent of the host clock."""
+        service = MetricsService()
+        for index in range(5):
+            service.record_frame(point_count=index, processing_time_s=0.001)
+        assert service.snapshot().fps is not None
 
     def test_window_is_bounded(self) -> None:
         service = MetricsService(window=3)

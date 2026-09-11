@@ -1703,6 +1703,49 @@ change, which is the point.
 
 **Status:** Accepted
 
+## ADR-049: The Ego's Spawn Transform Is the Placement Reference Until the First Tick
+
+**Decision:** `CarlaSimulationSession` keeps the transform the ego was spawned with and uses
+it - not `actor.get_transform()` - as the reference frame for every ego-relative placement
+(`spawn_ahead_of_ego`, `place_ahead_of_ego`), for `ego_state()` and for ground truth, until
+the session has stepped its first frame. From the first tick on it uses the simulator's
+reported transform. The spawn points are walked in order and the first that accepts the ego
+is used; its index is recorded as `ego_spawn_index` on the session status.
+
+**Reason:** Found by the first live run (Experiment 010). In synchronous mode, CARLA 0.9.16
+does not report a freshly spawned actor's pose until the server has ticked: `get_transform()`
+answers the world origin with zero yaw. The session read it immediately after spawning, so
+"45 m ahead and 3.5 m left" was computed from `(0, 0, 0)` and landed off-road, 70 m from the
+ego, and the target spawn was refused. The stand-in never caught this because its ego *is*
+at the origin.
+
+Before the first tick, the spawn transform is the only truthful statement of where the ego
+is. After it, the simulator's answer is - and the two agree to a centimetre of settling
+because the ego is never driven (ADR-047). Switching to the live pose after the first tick
+rather than using the spawn transform forever keeps the door open for a moving ego without
+another change here.
+
+Walking the spawn points is the same kind of finding: index 0 on Town10HD_Opt refuses every
+spawn while 1-11 accept. Taking the first accepting index is still deterministic per map,
+and recording it keeps a run reproducible from what it reports.
+
+**Alternatives considered:** Ticking once inside `open()` (would enqueue a sensor frame
+before any `step()`, and the frame-matching in `step()` would then have to discard it -
+more moving parts to be wrong); always using the spawn transform (correct today, wrong the
+day the ego moves); leaving it and telling scenarios to step once before spawning (pushes a
+simulator quirk into every scenario author's head).
+
+**Impact:** `SimulationSessionStatus` gains `ego_spawn_index` and `server_version` (both
+additive, null when unknown). The fake simulator now reports the origin until ticked, like
+the server, so the regression cannot pass against the stand-in and fail live again. Three
+placement tests read a pose only after stepping.
+
+**Risks:** A server that *does* report the pose before the first tick is handled identically -
+the spawn transform and the reported one agree. A scenario that moves the ego before the
+first tick would see the spawn transform; no such scenario exists (ADR-047, stationary ego).
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title

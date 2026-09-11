@@ -14,7 +14,9 @@ outside that boundary imports the ``carla`` package.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import socket
 import subprocess
 import sys
 
@@ -301,12 +303,29 @@ class TestCommandLine:
             assert scenario_id in completed.stdout
 
     def test_run_without_a_simulator_fails_honestly(self) -> None:
-        """No CARLA here: the command must say so and exit non-zero, not fake a run."""
+        """No CARLA reachable: the command must say so and exit non-zero, not
+        fake a run. Aimed at a closed port so the outcome is the same whether
+        or not a server happens to be running on the default one - the first
+        live validation found this test passing a real run and failing."""
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed_port = probe.getsockname()[1]  # released on exit; nothing listens
         completed = subprocess.run(
-            [sys.executable, "-m", "adaptx.scenarios", "run", "vehicle_approach"],
+            [
+                sys.executable,
+                "-m",
+                "adaptx.scenarios",
+                "run",
+                "vehicle_approach",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(closed_port),
+            ],
             capture_output=True,
             text=True,
             check=False,
+            env={**os.environ, "ADAPTX_CARLA__TIMEOUT_S": "2"},
         )
         assert completed.returncode != 0
         assert "could not start" in completed.stdout

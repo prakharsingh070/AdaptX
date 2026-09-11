@@ -38,7 +38,9 @@ were deliberately left as originally written.
 - Branch: `phase-10-scenario-framework`, branched from `origin/main`
 - Phases 1 through 9 are committed **and merged into `origin/main`** (PR #1 through PR #6).
   Phase 9 is commit `efc935c`, merged as PR #6 in `9092c69`
-- Phase 10 is in the working tree on this branch, **not committed and not pushed**
+- Phase 10 is committed on this branch as `2a4ce2d`, **not pushed**. The live-validation
+  fixes of 2026-09-11 (ADR-049, Experiment 010) are in the working tree on top of it,
+  **not committed**
 
 > Local `main` was stale at `5f68a5e` (the Phase 7 merge) when Phase 9 began, two commits
 > behind `origin/main`. Branching from it would have silently dropped Phase 8. **Check
@@ -242,15 +244,19 @@ Optional extras declared but **not installed**: `open3d` (`[pointcloud]`), `carl
 
 ## 12–14. Verification status
 
-- **1442 tests pass**, 7 deselected (`pytest`). The 7 are the live CARLA tests
+- **1452 tests pass**, 7 deselected (`pytest`, Python 3.13; 1451 + 1 skipped on 3.12). The 7 are the live CARLA tests
 - `ruff check .` — All checks passed
 - `ruff format --check .` — 192 files formatted
 - `mypy src` — no issues in 109 source files
 - Backend starts; all 17 endpoints respond; no tracebacks
-- **No live CARLA run has been executed.** The `carla` package is not installed here, so
-  `pytest -m carla` reports 7 skipped with the reason. Every catalogue scenario has run only
-  against a stand-in. Nothing in this repository reports a CARLA performance or accuracy
-  figure
+- **Live CARLA run executed on 2026-09-11** (Experiment 010): CARLA 0.9.16 server on
+  `127.0.0.1:2000`, Town10HD_Opt. `pytest -m carla` **7 passed** from a Python 3.12
+  environment (`.venv312`) holding the 0.9.16 wheel; every catalogue scenario COMPLETED via
+  the CLI; zero actors left on the server. In the primary Python 3.13 environment the
+  package cannot be installed (no wheel), so `pytest -m carla` there still reports 7 skipped
+  and the default suite is unchanged. Nothing in this repository reports a CARLA accuracy
+  figure; the only live performance figures are the per-frame stage timings in
+  Experiment 010, measured on this machine
 - Live temporal check: a vehicle advancing 1 m per 0.5 s measured 2.000 m/s, and its
   trajectory advanced +1 m at t+0.5, +2 m at t+1, +4 m at t+2 and +6 m at t+3; uncertainty
   rose 0.5 → 2.0 m; the track's first frame produced **no trajectory** and an explicit

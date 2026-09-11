@@ -324,9 +324,13 @@ CARLA became an upstream **data source**, not a second perception stack.
 - CARLA remains **optional**: the backend starts, all 17 endpoints respond and the suite
   passes with the package absent.
 
-**No live CARLA run has been executed.** The `carla` package is not installed in this
-environment, so the live smoke test skips and Experiment 008 measures only ADAPT-X's own
-conversion code. Nothing in this phase is a CARLA performance or accuracy claim.
+**Live-validated on 2026-09-11** against CARLA 0.9.16 on Town10HD_Opt: `pytest -m carla`
+7/7 pass (Experiment 010). Three real-server behaviours the stand-in could not show were
+found and fixed with fake-backed regressions: a spawned actor reports the origin until the
+first tick (ADR-049), spawn point 0 refuses every spawn (points walked in order), and the
+package exposes no `__version__` (the server's own is recorded). Requires a Python 3.12
+environment, because no `carla` wheel exists for 3.13. Nothing in this phase is a CARLA
+accuracy claim.
 
 **Phase 9 is not an accuracy phase.** What it delivers is the *precondition* for one:
 repeatable simulation, deterministic time, and labelled ground truth. Measuring accuracy
@@ -376,10 +380,11 @@ run and reproduce controlled scenarios."
 ground truth and stage counts - and no accuracy, precision, error or match figure anywhere.
 Computing one is Phase 11, and a test asserts the result contracts carry no such field.
 
-**No live CARLA run has been executed.** The package is still absent here; the framework
-has been exercised only against a stand-in. Experiment 009 measures orchestration cost alone
-(~35 µs to resolve, ~7 µs per actor per frame). The catalogue's blueprints have not been
-confirmed to exist on any real server.
+**Live-validated on 2026-09-11:** all four catalogue scenarios COMPLETED against a real
+CARLA 0.9.16 server, contiguous frame ids, dt exactly 0.05 s, ~27,000 points per frame,
+~92 ms of ADAPT-X pipeline per frame on this machine, zero actors left behind
+(Experiment 010). All five catalogue blueprints exist on that server. Experiment 009
+measures orchestration cost alone (~35 µs to resolve, ~7 µs per actor per frame).
 
 ### Deferred from Phase 10
 

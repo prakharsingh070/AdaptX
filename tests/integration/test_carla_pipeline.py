@@ -458,10 +458,16 @@ class TestCarlaStaysBehindTheBoundary:
         assert offenders == []
 
     def test_importing_adaptx_never_requires_carla(self) -> None:
-        """INVARIANT 6: CARLA is optional for the test suite and the backend."""
-        import sys
+        """INVARIANT 6: CARLA is optional for the test suite and the backend.
 
-        assert "carla" not in sys.modules
+        Retargeted during the first live validation. This asserted
+        ``"carla" not in sys.modules`` in-process, which only held while the
+        package was absent from every environment the suite had run in. Once
+        it is installed, other tests in the same process import it
+        legitimately. The invariant is about what ``adaptx`` *requires*, and a
+        fresh interpreter is the only place that can be observed.
+        """
+        assert _leaked_modules(["adaptx"], forbidden="carla") == []
 
     def test_the_whole_application_imports_without_the_carla_package(self) -> None:
         """The app may import the *boundary*; it must not require the simulator.

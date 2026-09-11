@@ -827,3 +827,107 @@ adaptx 0.1.0. Single-threaded.
 - **Anything about perception accuracy.** Ground truth and scripted poses are now recorded
   beside every frame, which is the precondition for measuring it. Measuring it is Phase 11.
 
+
+## Experiment 010 - First live CARLA run (Phases 9 and 10 against a real server)
+
+**Date:** 2026-09-11
+
+### What was executed
+
+The first run of ADAPT-X against a **real CARLA server**. Everything in Experiments 008 and
+009 that was marked "not executed - no server" was executed here, and several of the
+assumptions the stand-in could not check turned out to be wrong. Fixes are listed below;
+each one has a fake-backed regression test so the suite fails without a server if it is
+ever undone.
+
+**Setup:** CARLA server 0.9.16 on `127.0.0.1:2000`, map `Carla/Maps/Town10HD_Opt`
+(155 spawn points), already running before the session started. Client: the `carla`
+0.9.16 wheel, which is built for CPython 3.12 only - there is no wheel for the
+project's primary Python 3.13.7, and PyPI resolves `carla` to 0.9.5, which does not
+install either. A second virtual environment on **Python 3.12.10** was created for the
+client; the primary 3.13 environment stays without CARLA and the default suite is
+unchanged. Windows 11, 16 logical CPUs, single-threaded, no GPU used by ADAPT-X.
+
+### Results
+
+**`pytest -m carla` against the live server: 7 passed, 0 failed, 0 skipped** (88.6 s;
+repeated after every fix, last run 89.1 s). Session opens and cleans up; frames are
+labelled `simulation`; successive frames advance by exactly the timestep; ground truth is
+recorded beside the frame; the `vehicle_approach` catalogue scenario completes; every
+catalogue scenario completes; no vehicle, walker or sensor actor is left on the server
+afterwards (checked independently with a fresh client: 0).
+
+**`python -m adaptx.scenarios run <id>` for every catalogue scenario**, full Phase 2-8
+chain per frame, ground truth recorded beside every frame and fed to no stage:
+
+| Scenario | Frames | State | Sim frame ids | dt observed | Points / frame | Wall clock |
+|---|---|---|---|---|---|---|
+| stationary_vehicle | 40 | COMPLETED | contiguous | 0.0500 s every frame | 26,982-27,035 | 8.4 s |
+| vehicle_approach | 60 | COMPLETED | contiguous | 0.0500 s every frame | 26,991-27,037 | 11.6 s |
+| pedestrian_crossing | 120 | COMPLETED | contiguous | 0.0500 s every frame | 26,989-27,035 | 21.4 s |
+| cyclist_crossing | 80 | COMPLETED | contiguous | 0.0500 s every frame | 26,988-27,038 | 15.1 s |
+
+Per-frame pipeline time on this machine (sum of the eight measured stage durations,
+processing through adaptive mapping), medians: 94.0 / 93.3 / 91.6 / 93.9 ms, minimum
+86.4 ms, occasional frames to 185 ms. Wall clock per frame (0.17-0.21 s including session open and close) is therefore
+roughly half simulator tick plus sensor transfer and half ADAPT-X. Detections per frame ran 8-16 and
+tracks 8-18 in every scenario - **most of those are the map's static geometry**, not the
+one or two scripted actors; whether the scripted actor is among them is exactly the
+question Phase 11 will answer against the recorded ground truth, and nothing here answers
+it. LiDAR: 32 channels, 560,000 points/s at 20 Hz, giving ~27,000 returns per 0.05 s
+frame, which is 96-97% of the theoretical 28,000 after CARLA's own drop-off.
+
+**Also confirmed live:** server and client versions match (0.9.16); all five blueprints
+the catalogue uses exist on this server; the sensor measurement's frame id equals the
+tick's frame id, so the queue-matching logic in `step()` is correct on a real server;
+`world.tick()` in synchronous mode returns a frame id that increases by exactly one.
+
+### What the live run found, and what was changed
+
+1. **A freshly spawned actor reports the world origin until the server has ticked.**
+   `actor.get_transform()` immediately after `try_spawn_actor()` returns `(0, 0, 0)` with
+   zero yaw; after one `world.tick()` it returns the spawn transform (verified directly:
+   requested `(-67.25, 27.96, 0.60) yaw 0.16`, read back before tick `(0, 0, 0) yaw 0`,
+   after tick `(-67.25, 27.96, 0.59) yaw 0.16`). The session computed every ego-relative
+   placement from that origin, so "45 m ahead" landed 70 m from the ego, off the road, and
+   the target spawn was refused - the one live failure of the first attempt. The stand-in
+   never caught it because its ego *is* at the origin. Fix: the session keeps the ego's
+   spawn transform and uses it as the placement reference until the first tick (ADR-049);
+   the fake now reports the origin until ticked, like the server, and a regression test
+   spawns the ego off-origin.
+2. **Spawn point 0 of Town10HD_Opt refuses the ego every time** (3 of 3 attempts, while
+   indices 1-11 all accepted). The session now walks the spawn points in order and takes
+   the first that accepts - still deterministic per map - and records the index it used as
+   `ego_spawn_index` on the status. Every live run here used index 1.
+3. **`fps` was never measured on Python 3.12 on Windows.** `time.monotonic()` there ticks
+   every 15.6 ms, so two frames recorded within one tick shared a timestamp and the
+   elapsed time was zero. Replaced with `time.perf_counter()` in `MetricsService`; a test
+   with a mocked coarse clock guards it. Invisible on 3.13, whose `monotonic()` is fine.
+4. **The `carla` package has no `__version__`** in 0.9.16, so the run result recorded
+   `"unknown"`. The session now asks the server (`get_server_version()`) at connect, exposes
+   it as `server_version` on the status, and the result records that instead.
+5. **A "no simulator" CLI test passed a real run and failed.** It ran the scenario against
+   the default host and port; with a server there it completed successfully, which is the
+   opposite of what the test asserts. It now targets a port nothing listens on.
+6. **An import-isolation test failed once `carla` was importable**, because earlier tests
+   in the same process had legitimately imported it. It now checks in a subprocess.
+7. **Editable installs point at one checkout.** `pip install -e` from the main checkout
+   left a worktree's tests importing the main checkout's (older) source. Not a code
+   defect; recorded so nobody loses an afternoon to it again.
+
+Not changed, noted: CARLA's client prints `INFO: streaming client: connection failed: An
+operation was attempted on something that is not a socket` when a sensor is stopped and at
+process exit - harmless, from inside the CARLA library, not ADAPT-X. `carla.CityObjectLabel`
+has no `Vehicles` member in 0.9.16 (only met in an ad-hoc probe; nothing in the repository
+uses it). The `[carla]` extra in `pyproject.toml` (`carla>=0.9.15`) cannot be satisfied from
+PyPI and the wheel must be installed by hand; still a documented gap.
+
+### Not measured, and not claimed
+
+- **Accuracy of anything.** Ground truth and scripted poses are recorded beside every
+  frame of every run above; no comparison was made. Phase 11.
+- **CARLA's own performance.** Wall clock includes the server rendering and ray casting on
+  this machine's CPU; it is not a property of ADAPT-X and would differ on any other host.
+- **Behaviour with a moving ego, traffic, weather or any map other than Town10HD_Opt.**
+- **Whether the scripted placement matches the pose the server reports** after physics
+  settles the actor. Both are in the run record; the comparison is Phase 11.

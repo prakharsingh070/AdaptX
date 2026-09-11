@@ -265,12 +265,15 @@ class ScenarioRunner:
         frames: list[ScenarioFrameRecord] = []
         truths: list[Any] = []
         map_name: str | None = None
+        simulator_version: str | None = None
 
         try:
             simulator.open()
             self._spawn_actors(simulator)
             self._state = ScenarioState.READY
-            map_name = simulator.status().map_name
+            status = simulator.status()
+            map_name = status.map_name
+            simulator_version = status.server_version
 
             for index in range(self._definition.frame_count):
                 time_s = self._definition.scenario_time(index)
@@ -298,7 +301,13 @@ class ScenarioRunner:
                 "scenario run failed",
                 extra={"context": {"scenario": self._definition.scenario_id, "error": str(exc)}},
             )
-            return self._failed(str(exc), frames=frames, truths=truths, map_name=map_name)
+            return self._failed(
+                str(exc),
+                frames=frames,
+                truths=truths,
+                map_name=map_name,
+                simulator_version=simulator_version,
+            )
         finally:
             simulator.close()
             self._handles.clear()
@@ -310,6 +319,7 @@ class ScenarioRunner:
             frames=frames,
             truths=truths,
             map_name=map_name,
+            simulator_version=simulator_version,
         )
 
     # -- internals ---------------------------------------------------------
@@ -378,6 +388,7 @@ class ScenarioRunner:
         frames: list[ScenarioFrameRecord],
         truths: list[Any],
         map_name: str | None = None,
+        simulator_version: str | None = None,
     ) -> ScenarioRunResult:
         self._state = ScenarioState.FAILED
         return self._result(
@@ -386,6 +397,7 @@ class ScenarioRunner:
             frames=frames,
             truths=truths,
             map_name=map_name,
+            simulator_version=simulator_version,
         )
 
     def _result(
@@ -396,6 +408,7 @@ class ScenarioRunner:
         frames: list[ScenarioFrameRecord],
         truths: list[Any],
         map_name: str | None,
+        simulator_version: str | None,
     ) -> ScenarioRunResult:
         assert self._resolved is not None  # resolution precedes every result
         resolved = self._resolved
@@ -408,7 +421,10 @@ class ScenarioRunner:
             resolved=resolved,
             actors=list(self._records),
             map_name=map_name,
-            simulator_version=carla_package_version(),
+            # The server's own report when the session obtained one; the
+            # installed package otherwise (which, for CARLA 0.9.16, only says
+            # "unknown" - it ships no __version__).
+            simulator_version=simulator_version or carla_package_version(),
             fixed_delta_seconds=self._definition.fixed_delta_seconds,
             frames=frames,
             ground_truth=truths,

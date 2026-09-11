@@ -664,6 +664,49 @@ unchanged, zero regressions, no new dependencies.
 
 ---
 
+## Live CARLA validation of Phases 9 and 10 · 2026-09-11 · 7/7 live tests pass
+
+The "no live run" caveats on the two sections above were retired by running everything
+against a real CARLA 0.9.16 server on Town10HD_Opt (Experiment 010). The 3.13 environment
+cannot hold the client - the 0.9.16 wheel is built for CPython 3.12 only and PyPI's `carla`
+is 0.9.5 - so a second, Python 3.12 environment was created for it; the primary environment
+and the default suite are unchanged.
+
+**What the stand-in could not show, and the server did.** Three real behaviours, each fixed
+in the boundary with a fake-backed regression so it cannot recur silently:
+
+- A freshly spawned actor's `get_transform()` returns the world origin until the server has
+  ticked. Every ego-relative placement was computed from that origin, so the first live
+  scenario put its target 70 m from the ego, off-road, and the spawn was refused. The session
+  now uses the spawn transform as the reference until the first tick (ADR-049), and the fake
+  reports the origin until ticked so this cannot pass against the stand-in again.
+- Spawn point 0 of Town10HD_Opt refuses the ego every time; 1-11 accept. The session walks
+  the spawn points in order and records the index it used.
+- The `carla` module has no `__version__`; the server's `get_server_version()` is recorded.
+
+**One Phase 1 defect surfaced only because of the interpreter change.** `MetricsService`
+measured `fps` with `time.monotonic()`, which on Windows Python 3.12 ticks every 15.6 ms;
+frames within one tick shared a timestamp and `fps` was never computed. `perf_counter` now,
+with a mocked-clock test. On 3.13 it had been fine by accident.
+
+**Two tests assumed the absence of CARLA rather than testing for it.** A "no simulator"
+CLI test ran against the default port and, with a server there, *succeeded* and failed; it
+now targets a closed port. An import-isolation test ran in-process after other tests had
+legitimately imported `carla`; it now checks in a subprocess.
+
+**Result.** `pytest -m carla`: 7 passed. `python -m adaptx.scenarios run` for all four
+catalogue scenarios: COMPLETED, contiguous simulator frame ids, dt exactly 0.05 s,
+26,982-27,038 points per frame, ~92 ms of ADAPT-X pipeline per frame on this machine, and
+zero vehicle, walker or sensor actors left on the server, checked with a fresh client.
+Detections ran 8-16 per frame - most of them the map's static geometry. **No accuracy figure
+was computed**; the ground truth to compute one is in every run record, and that is Phase 11.
+
+**Status:** 1452 tests on 3.13 (1442 before), 1451 + 1 skipped on 3.12, 7 live tests
+passing against the server, ruff and mypy clean, 17 endpoints unchanged, no new
+dependencies. The fixes are uncommitted on `phase-10-scenario-framework` on top of `2a4ce2d`.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled

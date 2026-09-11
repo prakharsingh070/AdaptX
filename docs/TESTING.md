@@ -12,7 +12,7 @@ CARLA is optional and the default run never needs it:
 
 ```bash
 pytest                 # everything except the live CARLA tests
-pytest -m carla        # live tests; skip cleanly without a server
+pytest -m carla        # live tests; skip cleanly without a server or the package
 ```
 
 
@@ -229,8 +229,8 @@ enforced by CI rather than by review:
 
 ### CARLA simulation boundary (Phase 9)
 
-CARLA is optional and is **not installed** in this environment. The suite is split so that
-never becomes a false failure:
+CARLA is optional and is **not installed** in the primary (Python 3.13) environment - no
+`carla` wheel exists for 3.13. The suite is split so that never becomes a false failure:
 
 - **Conversion** (`test_carla_conversion.py`) needs no simulator at all, because
   `adaptx.carla.conversion` imports none. Axis flips, handedness (a cross product check),
@@ -250,6 +250,24 @@ never becomes a false failure:
 - **Live** (`test_carla_live.py`) is the only test that touches a real server. It is
   deselected by default (`-m "not carla"`) *and* skips itself when the package or server is
   absent. Run it with `pytest -m carla`.
+
+**Running the live tests for real** (done on 2026-09-11, 7/7 passed - Experiment 010):
+
+```bash
+# Python 3.12 only: the CARLA 0.9.16 wheel ships for cp312 and PyPI's "carla" is 0.9.5.
+py -3.12 -m venv .venv312
+.venv312\Scripts\python -m pip install -e ".[dev]"      # from THIS checkout, see below
+.venv312\Scripts\python -m pip install <path-to>\carla-0.9.16-cp312-cp312-win_amd64.whl
+ADAPTX_CARLA__HOST=127.0.0.1 .venv312\Scripts\python -m pytest -m carla -v
+```
+
+Two things that cost time: an editable install points at the checkout it was run from,
+so a worktree must reinstall or set `PYTHONPATH` to its own `src`; and CARLA's client
+prints `INFO: streaming client: connection failed ...` lines at sensor stop and process
+exit, which come from inside the CARLA library and are not ADAPT-X errors. The fake
+simulator reproduces two server behaviours the live run found - an actor reports the world
+origin until the first tick, and a spawn point can refuse - so those regressions fail
+without a server.
 
 What the stand-in **cannot** prove: anything about CARLA itself - its API compatibility, its
 sensor model or its performance. No figure produced against it is a CARLA measurement.

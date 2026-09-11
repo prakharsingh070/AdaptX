@@ -66,7 +66,12 @@ class MetricsService:
     def record_frame(self, *, point_count: int, processing_time_s: float) -> None:
         """Record one ingested frame. Called on the hot path; must stay cheap."""
         with self._lock:
-            self._arrivals.append(time.monotonic())
+            # perf_counter, not monotonic: on Windows before Python 3.13,
+            # monotonic() ticks every ~15.6 ms, so two frames recorded in the
+            # same tick share a timestamp, elapsed is zero and fps is never
+            # measured. perf_counter is sub-microsecond on every supported
+            # interpreter and platform.
+            self._arrivals.append(time.perf_counter())
             self._processing_times_s.append(processing_time_s)
             self._last_point_count = point_count
 
