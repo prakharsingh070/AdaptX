@@ -262,13 +262,77 @@ def _declared_components() -> list[ComponentStatus]:
                 "the fixed map within one run, churn and refinement lead. A "
                 "metric that could not be computed is null with a reason, "
                 "never zero. Ground truth reaches this package and no other. "
-                "Not served over HTTP or telemetry: python -m adaptx.evaluation. "
+                "Computed only offline by python -m adaptx.evaluation, never "
+                "over HTTP or telemetry; stored reports are served READ-ONLY "
+                "to the dashboard (Phase 12). "
                 "First measured results in Experiment 011: SIMULATION EVIDENCE "
                 "ONLY - not safety validation, not a collision probability, not "
                 "real-world validation. No precision figure (static geometry is "
                 "unlabelled), no occupancy reference, no peak-memory sample"
             ),
             phase=11,
+        ),
+        ComponentStatus(
+            name="dashboard",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "static browser console served by this backend at /dashboard. "
+                "A CONSUMER ONLY: it draws the scene snapshot the pipeline last "
+                "produced (live, over /ws/scene) and the stored Phase 11 "
+                "evaluation reports and Phase 10 run records (read-only, "
+                "over /api/v1/reports and /api/v1/runs) and computes no risk, "
+                "trajectory, resolution, match or metric of its own. The two "
+                "modes are labelled and never mixed; ground truth appears only "
+                "in evaluation playback. It cannot spawn, move, start or stop "
+                "anything in the simulator. Routing, decision, planning and "
+                "a spatial risk field are shown as NOT IMPLEMENTED; GPU use is "
+                "NOT MEASURED; browser rendering cost is a measured figure "
+                "on one machine only (Experiment 013), not a claim"
+            ),
+            phase=12,
+        ),
+        ComponentStatus(
+            name="live_simulation",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "long-lived CARLA session behind the dashboard (post-Phase-12 "
+                "extension): one thread owns the session, is the only caller of "
+                "world.tick(), runs every LiDAR frame through the existing Phase "
+                "2-8 chain unchanged, publishes a SceneSnapshot per frame "
+                "(latest only; the scene channel reports skipped frames) and "
+                "spawns catalogue scenarios - seeded Traffic Manager traffic plus "
+                "timed scripted actors anchored to the ego's pose at the moment "
+                "they appear. Ground truth is NEVER read in the loop. A collision "
+                "sensor is a SAFETY FALLBACK that ends the session and records "
+                "the contact; the RGB camera is display only. Loop timing is "
+                "measured every frame and reported as LAGGING when the wall-clock "
+                "period exceeds the timestep; nothing is claimed real-time. "
+                "Session controls are start/pause/resume/stop/reset only: no "
+                "endpoint spawns, moves, ticks or drives anything"
+            ),
+            phase=12,
+        ),
+        ComponentStatus(
+            name="vehicle_control",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "risk-governed speed baseline (post-Phase-12 extension): a target "
+                "speed per risk level, tightened by the distance of the closest "
+                "in-path object from its risk assessment, with a full-brake "
+                "emergency distance, a hold-then-resume dwell and proportional "
+                "throttle/brake under acceleration limits. Steering follows the "
+                "map's lane centre (road geometry, not perception). Reads the "
+                "risk, tracking and prediction outputs and the ego's own odometry; "
+                "reads NO ground truth. A CONTROLLED-SIMULATION BASELINE: untuned, "
+                "unvalidated, not an autonomous-driving controller and not "
+                "collision-free by claim - collisions are counted by the safety "
+                "sensor and reported. Routing, planning and decision-making beyond "
+                "this speed governor are NOT IMPLEMENTED"
+            ),
+            phase=12,
         ),
         ComponentStatus(
             name="prediction",

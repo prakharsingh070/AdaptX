@@ -24,6 +24,7 @@ perception against the ground truth it records is Phase 11.
 from __future__ import annotations
 
 from itertools import pairwise
+from typing import Any
 
 import pytest
 
@@ -171,3 +172,79 @@ class TestLiveCarla:
         after = len(remaining._require_world().get_actors())
         remaining.close()
         assert after <= before
+
+
+class TestLiveLoop:
+    """The post-Phase-12 live loop against the real server.
+
+    What it proves: a driven ego moves under the controller, the scripted
+    obstacle is a real actor the real LiDAR sees, the pipeline's own outputs
+    make the controller slow and hold, and the session leaves nothing behind.
+    What it does not prove: anything about the quality of the perception -
+    Experiments 011/012 measured that, and it is not flattering.
+    """
+
+    def _run(self, scenario: str, seconds: float, *, seed: int = 42) -> tuple[Any, Any]:
+        import time
+
+        settings = require_live_server()
+        settings.lidar.ground_enabled = True
+        settings.live.camera_enabled = True
+        context = build_context(settings)
+        live = context.live
+        trace: list[Any] = []
+        started = time.perf_counter()
+        live.start(scenario, seed)
+        try:
+            while time.perf_counter() - started < seconds:
+                time.sleep(0.25)
+                status = live.status()
+                trace.append(status)
+                if status.state.value != "RUNNING":
+                    break
+        finally:
+            final = live.stop()
+        return final, trace
+
+    def test_the_ego_drives_and_the_loop_measures_itself(self) -> None:
+        final, trace = self._run("random_urban_traffic", 20.0, seed=1)
+        assert final.state.value == "STOPPED", final.detail
+        speeds = [s.ego_speed_mps for s in trace if s.ego_speed_mps is not None]
+        assert max(speeds) > 1.0, "the ego never moved"
+        last = next(s for s in reversed(trace) if s.timing is not None)
+        assert last.timing.loop_ms > 0 and last.timing.pipeline_ms > 0
+        assert last.frames_processed == last.snapshots_published > 10
+        assert last.traffic_count >= 1, "the Traffic Manager spawned traffic"
+        assert last.camera_available
+        assert final.collision_count == 0
+
+    def test_the_obstacle_stop_demo_holds_before_the_parked_car(self) -> None:
+        """Ego drives, sees the parked car, slows, holds short of it. Live."""
+        final, trace = self._run("static_obstacle", 75.0)
+        assert final.state.value == "STOPPED", final.detail
+        states = [s.control.state.value for s in trace if s.control is not None]
+        assert "SLOWING" in states or "HOLDING" in states, states
+        held = [s for s in trace if s.control is not None and s.control.state.value == "STOPPED"]
+        assert held, "the ego never came to a hold"
+        nearest = held[-1].control.nearest_in_path_m
+        assert nearest is not None and nearest < 9.0, "held on the in-path object"
+        assert final.collision_count == 0, "stopped short of the car, no contact"
+
+    def test_the_live_session_leaves_no_actors_and_restores_the_world(self) -> None:
+        settings = require_live_server()
+        probe = CarlaSimulationSession(settings.carla)
+        probe.open()
+        world = probe._require_world()
+        before = len(world.get_actors())
+        probe.close()
+        original = world.get_settings().synchronous_mode  # after the probe restored it
+
+        final, _ = self._run("mixed_obstacles", 6.0)
+        assert final.state.value == "STOPPED"
+
+        after = CarlaSimulationSession(settings.carla)
+        after.open()
+        world = after._require_world()
+        assert len(world.get_actors()) <= before + 2  # this probe's own ego + lidar
+        after.close()
+        assert world.get_settings().synchronous_mode == original

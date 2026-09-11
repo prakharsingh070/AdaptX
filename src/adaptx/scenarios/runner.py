@@ -53,6 +53,7 @@ from adaptx.core.lifecycle import ApplicationContext, build_context
 from adaptx.core.logging import get_logger
 from adaptx.models.common import DataSource, Vector3
 from adaptx.models.point_cloud import RawPointCloudFrame
+from adaptx.models.processing import PointCloudProcessingResult
 from adaptx.scenarios.interfaces import ScenarioSimulator
 from adaptx.scenarios.models import (
     Placement,
@@ -77,6 +78,14 @@ logger = get_logger(__name__)
 #: or the full result contracts (which reduce to counts). Receives the frame
 #: and nothing else - the signature is the separation guarantee.
 FrameProcessor = Callable[[RawPointCloudFrame], StageCounts | PipelineFrameOutputs]
+
+#: Watches each frame after it has been processed: the sensor frame, its
+#: index and scenario time, and what the processor produced. Receives no
+#: ground truth, by signature - the same separation guarantee the processor
+#: has (ADR-045). Used by the dashboard publisher (Phase 12).
+FrameObserver = Callable[
+    [RawPointCloudFrame, int, float, StageCounts | PipelineFrameOutputs | None], None
+]
 
 
 class ScenarioError(AdaptXError):
@@ -126,7 +135,10 @@ def resolve(definition: ScenarioDefinition) -> ResolvedScenario:
 # pipeline processing
 # ---------------------------------------------------------------------------
 def pipeline_processor(
-    context: ApplicationContext, *, record_outputs: bool = True
+    context: ApplicationContext,
+    *,
+    record_outputs: bool = True,
+    on_processed: Callable[[PointCloudProcessingResult], None] | None = None,
 ) -> FrameProcessor:
     """A frame processor that runs the existing Phase 2-8 chain, unchanged.
 
@@ -138,6 +150,9 @@ def pipeline_processor(
         context: The pipeline services.
         record_outputs: Keep the stage result contracts on the record (the
             Phase 11 evidence, ADR-050) rather than reducing them to counts.
+        on_processed: Told the Phase 2 result of every frame, so a caller
+            can account for the frame (the live loop feeds it to the ingest
+            metrics) without running preprocessing twice.
     """
 
     def process(frame: RawPointCloudFrame) -> StageCounts | PipelineFrameOutputs:
@@ -147,6 +162,8 @@ def pipeline_processor(
                 details={"source": frame.source.value},
             )
         processed = context.preprocessor.run(frame)
+        if on_processed is not None:
+            on_processed(processed)
         detection = context.detector.detect(processed.frame)
         tracking = context.tracking.update(
             detection.objects,
@@ -215,6 +232,8 @@ class ScenarioRunner:
             stand-in.
         processor: What to do with each sensor frame. ``None`` records frames
             and ground truth without processing.
+        observer: Told about each frame and its outputs after processing;
+            never about ground truth. An observer that raises fails the run.
         settings: Application settings; the process defaults when omitted.
     """
 
@@ -224,12 +243,14 @@ class ScenarioRunner:
         *,
         simulator: ScenarioSimulator | None = None,
         processor: FrameProcessor | None = None,
+        observer: FrameObserver | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._definition = definition
         self._settings = settings if settings is not None else get_settings()
         self._simulator = simulator
         self._processor = processor
+        self._observer = observer
         self._state = ScenarioState.CREATED
         self._resolved: ResolvedScenario | None = None
         self._handles: dict[str, Any] = {}
@@ -311,6 +332,8 @@ class ScenarioRunner:
                     outputs, counts = produced, produced.counts()
                 elif produced is not None:
                     counts = produced
+                if self._observer is not None:
+                    self._observer(frame, index, time_s, produced)
                 frames.append(
                     ScenarioFrameRecord(
                         frame_index=index,
@@ -486,6 +509,7 @@ def run_scenario(
     context: ApplicationContext | None = None,
     simulator: ScenarioSimulator | None = None,
     process: bool = True,
+    observer: FrameObserver | None = None,
 ) -> ScenarioRunResult:
     """Run a scenario through the pipeline with default wiring.
 
@@ -497,6 +521,7 @@ def run_scenario(
         simulator: Simulator to drive; a CARLA session when omitted.
         process: Whether to push frames through the pipeline. False records
             sensor frames and ground truth only.
+        observer: Told about each processed frame; see :class:`ScenarioRunner`.
     """
     resolved_settings = settings if settings is not None else get_settings()
     processor: FrameProcessor | None = None
@@ -504,12 +529,17 @@ def run_scenario(
         app = context if context is not None else build_context(resolved_settings)
         processor = pipeline_processor(app)
     runner = ScenarioRunner(
-        definition, simulator=simulator, processor=processor, settings=resolved_settings
+        definition,
+        simulator=simulator,
+        processor=processor,
+        observer=observer,
+        settings=resolved_settings,
     )
     return runner.run()
 
 
 __all__ = [
+    "FrameObserver",
     "FrameProcessor",
     "ScenarioError",
     "ScenarioRunner",

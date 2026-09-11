@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -949,6 +950,183 @@ class RiskSettings(BaseModel):
         return self.weight_proximity + self.weight_closing_speed + self.weight_predicted_proximity
 
 
+class DashboardSettings(BaseModel):
+    """Where the dashboard reads stored evidence from, and how much of a cloud it draws.
+
+    The dashboard is a local engineering tool (docs/DASHBOARD.md §8): the
+    directories are read-only inputs, names are restricted to plain files
+    inside them, and nothing here controls the pipeline.
+    """
+
+    report_dir: Path = Field(
+        default=Path("reports"),
+        description="Directory of stored EvaluationReport JSON files.",
+    )
+    run_dir: Path = Field(
+        default=Path("runs"),
+        description="Directory of stored ScenarioRunResult JSON files.",
+    )
+    scene_max_points: int = Field(
+        default=6000,
+        ge=100,
+        le=100_000,
+        description=(
+            "Ceiling on points in the live scene sample. A picture of the cloud "
+            "for drawing, not the cloud; the full frame is never streamed."
+        ),
+    )
+    run_cache_size: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description="Recorded runs kept parsed in memory for frame playback.",
+    )
+
+
+class ControlSettings(BaseModel):
+    """The baseline speed governor that drives the ego in a live simulation.
+
+    A **controlled-simulation baseline**, not an autonomous-driving controller:
+    a table of target speeds per risk level, a distance-based emergency stop,
+    a proportional throttle/brake law under an acceleration limit, and
+    steering that follows the map's lane centre. None of these values is
+    tuned, validated or safety-rated. They are engineering starting points.
+    """
+
+    max_speed_mps: float = Field(
+        default=8.0, gt=0.0, le=30.0, description="Cruising target under LOW or no risk."
+    )
+    medium_speed_mps: float = Field(default=5.0, ge=0.0, description="Target under MEDIUM risk.")
+    high_speed_mps: float = Field(default=2.0, ge=0.0, description="Target under HIGH risk.")
+    unknown_speed_mps: float = Field(
+        default=5.0,
+        ge=0.0,
+        description=(
+            "Target when the highest level is UNKNOWN: an unscored object is not a "
+            "safe one, so this is the MEDIUM speed by default, never the cruise speed."
+        ),
+    )
+    min_safe_distance_m: float = Field(
+        default=8.0,
+        gt=0.0,
+        description="An in-path object closer than this holds the ego at a stop.",
+    )
+    emergency_distance_m: float = Field(
+        default=5.0,
+        gt=0.0,
+        description="An in-path object closer than this applies full brake immediately.",
+    )
+    braking_threshold_mps: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="Speed error above which the brake, not throttle release, slows the ego.",
+    )
+    max_acceleration_mps2: float = Field(
+        default=2.0, gt=0.0, description="Ceiling on commanded speed increase per second."
+    )
+    max_deceleration_mps2: float = Field(
+        default=6.0, gt=0.0, description="Ceiling on commanded speed decrease per second."
+    )
+    steering_limit: float = Field(
+        default=0.5, gt=0.0, le=1.0, description="Absolute cap on the steer command."
+    )
+    steering_gain: float = Field(
+        default=0.8, gt=0.0, description="Steer per radian of lane heading error."
+    )
+    lane_lookahead_m: float = Field(
+        default=6.0, gt=0.0, description="How far ahead the lane-centre target is taken."
+    )
+    path_half_width_m: float = Field(
+        default=1.8,
+        gt=0.0,
+        description="Objects within this lateral distance of the ego axis are 'in path'.",
+    )
+    resume_dwell_frames: int = Field(
+        default=10,
+        ge=1,
+        description="Frames the risk must stay below CRITICAL before a stopped ego resumes.",
+    )
+    throttle_gain: float = Field(default=0.35, gt=0.0, description="Throttle per m/s of error.")
+    hold_throttle: float = Field(
+        default=0.22,
+        ge=0.0,
+        le=0.6,
+        description=(
+            "Throttle that holds speed on a flat road, added when accelerating. Measured "
+            "live: a pure proportional law stalled the ego 0.4 m/s under its target "
+            "because a small error gives a throttle below rolling resistance."
+        ),
+    )
+    brake_gain: float = Field(default=0.5, gt=0.0, description="Brake per m/s of error.")
+
+    @model_validator(mode="after")
+    def _check_order(self) -> ControlSettings:
+        if self.emergency_distance_m >= self.min_safe_distance_m:
+            raise ValueError("control.emergency_distance_m must be < control.min_safe_distance_m")
+        if not self.high_speed_mps <= self.medium_speed_mps <= self.max_speed_mps:
+            raise ValueError("control speeds must satisfy high <= medium <= max")
+        return self
+
+
+class LiveSettings(BaseModel):
+    """The long-lived live simulation session behind the dashboard.
+
+    Off unless the operator turns it on; when on, the dashboard's Start /
+    Pause / Stop / Reset controls act on it. Nothing here spawns anything by
+    itself: a scenario must be started explicitly.
+    """
+
+    controls_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the HTTP session controls (start, pause, resume, stop, reset) "
+            "are accepted. They are high-level and local-only; raw actor control is "
+            "never exposed regardless of this flag."
+        ),
+    )
+    default_scenario: str = Field(default="mixed_obstacles", min_length=1)
+    max_frames: int = Field(
+        default=0,
+        ge=0,
+        description="Stop the session after this many frames; 0 runs until stopped.",
+    )
+    camera_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach an RGB camera to the ego for the dashboard's front view. "
+            "Visualisation only: no perception stage reads it."
+        ),
+    )
+    camera_width: int = Field(default=320, ge=64, le=1280)
+    camera_height: int = Field(default=180, ge=36, le=720)
+    camera_fov_deg: float = Field(default=90.0, gt=10.0, lt=170.0)
+    collision_sensor_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach a collision sensor as a SAFETY FALLBACK: a collision stops the "
+            "session and is recorded. It is never a perception input."
+        ),
+    )
+    traffic_manager_port: int = Field(
+        default=8050,
+        ge=1,
+        le=65535,
+        description=(
+            "Port of CARLA's Traffic Manager, which the client opens locally. Not "
+            "8000, the API's own port."
+        ),
+    )
+    event_history: int = Field(default=200, ge=10, le=2000)
+    lag_ratio: float = Field(
+        default=1.25,
+        gt=1.0,
+        description=(
+            "The loop is reported LAGGING when its wall-clock period exceeds the "
+            "simulation timestep by this factor."
+        ),
+    )
+
+
 class WebSocketSettings(BaseModel):
     """Real-time telemetry channel settings."""
 
@@ -979,6 +1157,9 @@ class Settings(BaseSettings):
     adaptive: AdaptiveResolutionSettings = Field(default_factory=AdaptiveResolutionSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     websocket: WebSocketSettings = Field(default_factory=WebSocketSettings)
+    dashboard: DashboardSettings = Field(default_factory=DashboardSettings)
+    control: ControlSettings = Field(default_factory=ControlSettings)
+    live: LiveSettings = Field(default_factory=LiveSettings)
 
     @property
     def is_production(self) -> bool:

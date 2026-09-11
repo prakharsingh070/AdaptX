@@ -65,3 +65,10 @@ class ModuleNotReadyError(AdaptXError):
 
     code = "module_not_ready"
     http_status = 501
+
+
+class StoredEvidenceError(AdaptXError):
+    """A stored run or report could not be found or did not validate."""
+
+    code = "stored_evidence_error"
+    http_status = 404

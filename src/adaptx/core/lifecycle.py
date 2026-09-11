@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 from adaptx.config.settings import Settings, get_settings
 from adaptx.core.logging import configure_logging, get_logger
+from adaptx.evidence.service import EvidenceService
+from adaptx.live.service import LiveSimulationService
 from adaptx.perception.detector import GeometricObjectDetector
 from adaptx.perception.lidar import FrameValidationProcessor
 from adaptx.perception.pipeline import LiDARProcessingPipeline
@@ -22,6 +24,7 @@ from adaptx.services.mapping_service import MappingService
 from adaptx.services.metrics_service import MetricsService
 from adaptx.services.prediction_service import PredictionService
 from adaptx.services.risk_service import RiskService
+from adaptx.services.scene_service import SceneService
 from adaptx.services.system_service import SystemService
 from adaptx.services.tracking_service import TrackingService
 
@@ -45,6 +48,9 @@ class ApplicationContext:
     mapping: MappingService
     risk: RiskService
     adaptive_mapping: AdaptiveMappingService
+    scene: SceneService
+    evidence: EvidenceService
+    live: LiveSimulationService
 
 
 def build_context(settings: Settings | None = None) -> ApplicationContext:
@@ -59,7 +65,8 @@ def build_context(settings: Settings | None = None) -> ApplicationContext:
     )
     carla = CarlaService(resolved.carla)
     system = SystemService(settings=resolved, lidar=lidar, carla=carla)
-    return ApplicationContext(
+    live = LiveSimulationService(resolved)
+    context = ApplicationContext(
         settings=resolved,
         metrics=metrics,
         lidar=lidar,
@@ -73,7 +80,14 @@ def build_context(settings: Settings | None = None) -> ApplicationContext:
         mapping=MappingService(resolved.map),
         risk=RiskService(resolved.risk),
         adaptive_mapping=AdaptiveMappingService(resolved.map, resolved.adaptive),
+        scene=SceneService(),
+        evidence=EvidenceService(resolved.dashboard),
+        live=live,
     )
+    # The live loop runs the context's own stages, so it is bound after the
+    # context exists rather than given a second pipeline of its own.
+    live.attach(context)
+    return context
 
 
 def startup(context: ApplicationContext) -> None:
@@ -113,10 +127,14 @@ def shutdown(context: ApplicationContext) -> None:
     state - only the counters behind their status summaries, which would
     otherwise describe frames a restarted context never processed.
     """
+    # The live session first: it is the one thing holding simulator actors,
+    # and a process that exits with them spawned leaves a server littered.
+    context.live.shutdown()
     context.tracking.reset()
     context.prediction.reset()
     context.mapping.reset()
     context.risk.reset()
     context.adaptive_mapping.reset()
+    context.scene.reset()
     context.carla.disconnect()
     logger.info("ADAPT-X stopped")

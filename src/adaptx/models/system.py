@@ -45,6 +45,7 @@ class CarlaStatus(StrEnum):
 
     CONNECTED = "CONNECTED"
     DISCONNECTED = "DISCONNECTED"
+    ERROR = "ERROR"
 
 
 class SimulationState(StrEnum):

@@ -29,6 +29,7 @@ from adaptx.core.exceptions import SimulatorUnavailableError
 from adaptx.core.logging import configure_logging
 from adaptx.scenarios.catalogue import load, scenario_ids
 from adaptx.scenarios.models import ScenarioState
+from adaptx.scenarios.publish import ScenePublisher
 from adaptx.scenarios.result import ScenarioRunResult
 from adaptx.scenarios.runner import run_scenario
 
@@ -118,9 +119,18 @@ def _run(args: argparse.Namespace) -> int:
     if args.port:
         settings.carla.port = args.port
 
+    publisher = (
+        None
+        if args.publish is None
+        else ScenePublisher(
+            args.publish,
+            scenario_id=definition.scenario_id,
+            max_points=settings.dashboard.scene_max_points,
+        )
+    )
     started = time.perf_counter()
     try:
-        result = run_scenario(definition, settings=settings)
+        result = run_scenario(definition, settings=settings, observer=publisher)
     except SimulatorUnavailableError as exc:
         print(f"scenario could not start: {exc.message}")
         print("\nCARLA is optional; the ADAPT-X test suite runs and passes without a")
@@ -138,6 +148,12 @@ def _run(args: argparse.Namespace) -> int:
 
     print(render(result))
     print(f"\nwall-clock duration: {time.perf_counter() - started:.1f} s")
+    if publisher is not None:
+        print(
+            f"published {publisher.published} frames to {publisher.url}"
+            + (f"; {publisher.failed} failed" if publisher.failed else "")
+            + ("; publishing was disabled after repeated failures" if publisher.disabled else "")
+        )
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +177,16 @@ def main() -> int:
     run.add_argument("--host", type=str, default=None, help="CARLA host.")
     run.add_argument("--port", type=int, default=None, help="CARLA port.")
     run.add_argument("--json", type=pathlib.Path, help="Write the full result here.")
+    run.add_argument(
+        "--publish",
+        type=str,
+        default=None,
+        metavar="URL",
+        help=(
+            "Hand each processed frame to a running ADAPT-X backend for the dashboard's "
+            "live scene, e.g. http://127.0.0.1:8000. The run is unaffected if it is down."
+        ),
+    )
     args = parser.parse_args()
 
     configure_logging("INFO")

@@ -369,6 +369,80 @@ What none of this proves: anything about CARLA. The fake places actors exactly w
 so the fake-simulator figures are near-perfect by construction and are never reported as
 results. The live figures are in Experiment 011.
 
+### Dashboard (Phase 12)
+
+- `tests/unit/test_scene_service.py` - the point sample is deterministic, strided and
+  rounded; a snapshot keeps every output as produced, has no place for ground truth, keeps
+  UNKNOWN and null velocity through a JSON round trip, refuses an orphan trajectory; the
+  service keeps the latest and counts; the scenario publisher builds snapshots from a real
+  fake-simulator run without ground truth, and a dead backend never fails the run.
+- `tests/unit/test_evidence_service.py` - unsafe names (`..`, separators, wrong suffix)
+  refused before the disk is touched; listing; a valid report loads and the file is
+  byte-identical afterwards; malformed JSON or a wrong contract is `StoredEvidenceError`
+  with the validation message; run summary, frame, out-of-range frame; the LRU cache; a
+  served frame is a copy; `compare` goes through the Phase 11 contract.
+- `tests/integration/test_dashboard_api.py` - `/dashboard/` serves with `no-cache` and `/`
+  redirects; the full chain publishes a downsampled scene without ground truth that carries
+  the chain's own assessments and tiles; the hand-over endpoint accepts a snapshot and
+  refuses one with `ground_truth`; `/ws/scene` says hello, pushes each new frame and gives
+  a late client the current scene; stored reports and runs list, serve, compare and play
+  back with ground truth **only** on the frame path; a malformed report is a 404 with the
+  reason. **Boundaries:** no route path contains spawn / destroy / teleport / start / stop /
+  control / tick; the only non-GET dashboard endpoint is the snapshot hand-over; the
+  `dashboard` component is PARTIAL and says CONSUMER ONLY; the frontend source has no
+  `Math.hypot`/`sqrt`/`atan2`, no `.reduce(`, no `predict(`, no assignment to a metric or
+  threshold name outside `render/`; one `fetch` site, GET only, no CARLA URL beyond
+  `/api/v1/carla/status`; `ground_truth` appears only in `data/normalise.js` and
+  `views/run.js`; "collision probability", "production ready" and "real-time" never appear
+  unnegated; "Not available" is written only by `data/format.js`.
+- `tests/integration/test_evaluation_pipeline.py` - retargeted in Phase 12: the API
+  composition root now reaches the evaluation layer through `api/routes/evidence.py` and
+  nothing else, and that single site is asserted; the pipeline stages, runner and
+  application context stay clean.
+- `dashboard/tests/*.test.mjs` (`cd dashboard && node --test tests/*.test.mjs`, Node 22,
+  no package) - `format.js` turns null into "Not available" and UNKNOWN into "UNKNOWN" and
+  never rounds a null; `normalise.js` joins tracks with assessments and paths by track id,
+  keeps UNKNOWN as its own bucket, selects by id not index, attaches ground truth only to a
+  playback scene, and never mutates a frozen report; `projection.js` puts +X up and +Y left
+  with `toWorld` inverting `toScreen`, fits a box inside the viewport, and culls behind the
+  perspective camera.
+
+### Live simulation loop (post-Phase-12 extension)
+
+- `tests/unit/test_control_policy.py` - the governor's rules on real Phase 4/5/7 result
+  contracts: the level table sets the target for in-path objects; UNKNOWN is never LOW;
+  an object beside the road is reported (`scene_level`) but does not govern; inside the
+  safe distance holds, inside the emergency distance is full brake; a predicted path into
+  the corridor counts as in-path; CRITICAL holds and resumes only after the dwell, a
+  flicker restarts it; steering follows the lane error within the limit; one pedal at a
+  time; settings reject inverted distances and speeds.
+- `tests/unit/test_live_scenarios.py` - the six catalogue entries validate; the same seed
+  resolves the same scene and another seed differs; jitter stays in bounds; actors appear
+  on time anchored to the ego's pose *then* and do not move with a driven ego; scripted
+  motion moves them in the anchor frame; lifetimes remove them; traffic is best effort,
+  autopiloted, with the Traffic Manager synchronous and seeded.
+- `tests/integration/test_live_simulation.py` - the loop against the fake simulator: start
+  runs the real chain and publishes live snapshots (raw points, SIMULATION-labelled ego,
+  a command, measured timing, **no ground truth**), and the frames count as ingested;
+  the ego actually moves under the controller; **the obstacle-stop demo**: the parked car
+  is detected, tracked, becomes the in-path object, the controller reacts and the ego
+  stops short of it with no collision; pause freezes the world and resume continues;
+  stop destroys every actor, restores the world settings and releases the Traffic
+  Manager; reset restarts the same scenario and seed; a collision ends the session and
+  is recorded; a second start is refused and a dead server is reported; controls can be
+  disabled; the camera is served as PNG; the whole thing over HTTP; the scene channel
+  reports skipped frames.
+- `tests/integration/test_carla_live.py::TestLiveLoop` (`pytest -m carla`) - against a
+  real server: the ego drives and the loop measures itself with traffic and a camera; the
+  obstacle-stop demo holds before the parked car with no contact; the session leaves no
+  actor and restores the world.
+- Boundaries: `control` and `live` are in the Phase 11 production-package list (no
+  evaluation or ground-truth import); the route audit allowlists exactly the five session
+  controls and still forbids spawn / destroy / teleport / tick / apply / actor / drive; the
+  frontend scan additionally forbids `Math.random`, video files and a second camera URL
+  site, and asserts the playback view model never reads a snapshot and the live view model
+  never reads ground truth.
+
 ## Conventions for new tests
 
 - **Never weaken or delete a test to make the suite green.** If a test fails, either the

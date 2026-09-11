@@ -27,7 +27,18 @@ from tests.integration.test_scenario_pipeline import run, short
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "adaptx"
 
 #: Packages that must never import the evaluation layer or the ground truth.
-PRODUCTION_PACKAGES = ("perception", "tracking", "prediction", "mapping", "risk", "services")
+PRODUCTION_PACKAGES = (
+    "perception",
+    "tracking",
+    "prediction",
+    "mapping",
+    "risk",
+    "services",
+    # Post-Phase-12: the ego controller and the live loop read the pipeline's
+    # outputs and the ego's own odometry, never ground truth or evaluation.
+    "control",
+    "live",
+)
 
 
 @pytest.fixture
@@ -224,10 +235,17 @@ class TestCommandLine:
 
 class TestGroundTruthReachesOnlyEvaluation:
     def test_no_production_package_imports_evaluation(self) -> None:
-        """Evaluation reads the pipeline; the pipeline never reads evaluation."""
+        """Evaluation reads the pipeline; the pipeline never reads evaluation.
+
+        Since Phase 12 the API composition root (``adaptx.api.app``) does
+        import the evaluation layer - through ``adaptx.api.routes.evidence``
+        only, to serve STORED reports read-only to the dashboard - so it is
+        no longer in this list; the static check below pins that single
+        allowed site. The pipeline stages, the runner and the application
+        context stay clean.
+        """
         leaked = _leaked_modules(
             [
-                "adaptx.api.app",
                 "adaptx.core.lifecycle",
                 "adaptx.perception.detector",
                 "adaptx.tracking.tracker",
@@ -236,6 +254,8 @@ class TestGroundTruthReachesOnlyEvaluation:
                 "adaptx.mapping.adaptive_mapper",
                 "adaptx.risk.heuristic",
                 "adaptx.scenarios.runner",
+                "adaptx.control.policy",
+                "adaptx.live.service",
             ],
             forbidden="adaptx.evaluation",
         )
@@ -263,6 +283,17 @@ class TestGroundTruthReachesOnlyEvaluation:
                     f"{path.relative_to(SRC)}: {needle}" for needle in needles if needle in text
                 )
         assert offenders == []
+
+    def test_the_api_reaches_evaluation_only_through_the_evidence_route(self) -> None:
+        """Phase 12 serves stored reports; nothing else in api/ or core/ may touch them."""
+        allowed = {"api/routes/evidence.py"}
+        holders = sorted(
+            path.relative_to(SRC).as_posix()
+            for package in ("api", "core")
+            for path in (SRC / package).rglob("*.py")
+            if "adaptx.evaluation" in path.read_text(encoding="utf-8")
+        )
+        assert holders == sorted(allowed), holders
 
     def test_evaluation_never_requires_the_carla_package(self) -> None:
         assert _leaked_modules(["adaptx.evaluation", "adaptx.evaluation.__main__"], "carla") == []

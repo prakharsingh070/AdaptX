@@ -16,7 +16,7 @@ an abstract interface.
 | Configuration | **Implemented** | Typed, environment-driven settings with validation (`config/settings.py`) |
 | Logging | **Implemented** | Structured text/JSON logging with contextual fields (`core/logging.py`) |
 | Data contracts | **Implemented** | Point cloud, vehicle, object, track, trajectory, map, risk, system models (`models/`) |
-| API | **Implemented** | 17 HTTP endpoints + OpenAPI (`api/`) |
+| API | **Implemented** | 24 HTTP endpoints + OpenAPI (`api/`); Phase 12 added the scene and stored-evidence reads and one snapshot hand-over, all additive |
 | Telemetry (WebSocket) | **Implemented** | `/ws/telemetry`, carrying system status, measured metrics and detection/tracking/prediction/mapping/risk/adaptive **summaries**. No per-frame geometry, no trajectory points, no map cells, no tiles |
 | Metrics | **Implemented** | Measured ingest FPS/latency and process CPU/memory; unmeasured values are `null` |
 | LiDAR ingest | **Partial** | Structural validation, point count, bounds, provenance |
@@ -34,7 +34,9 @@ an abstract interface.
 | Scenario framework | **Partial** | Phase 10: `ScenarioDefinition` as data (ADR-046), timed constant-velocity motion placed rather than simulated (ADR-047), a single-use runner driving the Phase 9 boundary through an extracted protocol (ADR-048). Ground truth recorded per frame, never fed to perception. Four catalogue scenarios. Result is raw evidence with **no accuracy figure**; since Phase 11 it also carries the pipeline's result contracts per frame and the sensor configuration (ADR-050). Live-validated (Experiments 010–012). Placed actors do not simulate physics and stand on the road (ADR-054). Event replay deferred; `DataSource.REPLAY` still unproduced |
 | Evaluation | **Partial** | Phase 11: `adaptx.evaluation` reads a recorded run offline and produces an `EvaluationReport` — detection and tracking at several match gates, ADE/FDE without interpolation, risk against proximity events with UNKNOWN preserved, map workload with **accuracy explicitly not evaluated**, adaptive resolution paired against the fixed map within one run, resource. Missing metrics are null with a reason (ADR-051). The only package that reads ground truth. First measured figures in Experiment 011: the baselines lost. **Simulation evidence only** |
 | Event replay | *Planned* | Not started. Deferred from Phase 10 with the design question open |
-| Dashboard | *Planned* | Not started (`dashboard/README.md`) |
+| Live simulation session | **Partial** | Post-Phase-12 extension (ADR-056): `adaptx.live` owns one long-lived driven-ego CARLA session on a thread, the only caller of `world.tick()`; every LiDAR frame runs through the unchanged Phase 2-8 chain, the baseline controller drives from those outputs, a snapshot is published per frame (latest only, skipped frames reported), events are derived from output differences. Seeded Traffic Manager traffic and timed scripted actors anchored to the ego's pose. Collision sensor as a safety fallback; RGB camera for display. **Ground truth is never read.** Measured ~0.3x wall-clock speed and reported LAGGING (Experiment 014). Controls: start / pause / resume / stop / reset only |
+| Vehicle control | **Partial** | Post-Phase-12 extension: `adaptx.control`, a risk-governed speed baseline - target speed per in-path risk level, safe-distance hold, emergency brake, resume dwell, rate-limited setpoint, lane-centre steering from map geometry. Reads risk, tracking, prediction and the ego's odometry; no ground truth. **Not** an autonomous-driving controller: untuned, unvalidated, not collision-free by claim. Routing, planning, decision beyond this governor NOT IMPLEMENTED |
+| Dashboard | **Partial** | Phase 12: static ES-module console served at `/dashboard` (`dashboard/`). Live extension: explicit LIVE SIMULATION / STORED EVALUATION mode, session controls, Front View from the ego camera, Decision / Control and Performance cards, Recent Events from the live loop. Live 3-D / top-down scene of the last `SceneSnapshot` over `/ws/scene`, object inspector, spatial map and adaptive resolution, and a viewer for stored Phase 11 reports and recorded runs with frame playback. **Consumer only** - computes no risk, trajectory, resolution, match or metric; no simulator control; ground truth only in evaluation playback (ADR-055, `docs/DASHBOARD.md`). Routing, decision, planning and a spatial risk field are shown as *Not implemented*; GPU as *Not measured* |
 
 The running backend reports this itself at `GET /api/v1/system/status`. Each component
 carries a **readiness** (`READY` / `NOT_READY`) and an **implementation status**
@@ -88,8 +90,12 @@ dashboard or API code (knowledge-base boundary rule).
 | `adaptx.carla` | `CarlaSimulatorClient` contract, real client, mock, simulator-local models, the deterministic session and the ground-truth contracts |
 | `adaptx.scenarios` | Scenario definitions as data, the catalogue, the single-use runner and the run record |
 | `adaptx.evaluation` | Offline evaluation of a run record against its ground truth; the one package allowed to read ground truth; no simulator import (`docs/EVALUATION.md`) |
-| `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking, prediction, mapping and risk services |
-| `adaptx.api` | Routes, HTTP schemas, WebSocket telemetry, dependency wiring |
+| `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking, prediction, mapping, risk and (Phase 12) scene services |
+| `adaptx.evidence` | Phase 12: stored reports and runs read from configured directories, validated and served read-only; the one package outside `adaptx.evaluation` that imports it, sitting downstream of it and outside the pipeline |
+| `adaptx.control` | Live extension: `ControlCommand` / `EgoObservation` contracts, the `VehicleController` protocol and `RiskGovernedSpeedPolicy` - a pure function of the pipeline's outputs and ego odometry |
+| `adaptx.live` | Live extension: the live scenario catalogue and anchored scenario manager, the `LiveSimulationService` loop, the PNG encoder for the camera, and the session contracts |
+| `adaptx.api` | Routes, HTTP schemas, WebSocket telemetry and scene channels, dependency wiring; mounts `dashboard/` |
+| `dashboard/` | Not a Python package: the static browser console (`docs/DASHBOARD.md`) |
 
 ---
 
@@ -545,8 +551,52 @@ or `adaptx.carla.ground_truth` (subprocess import check and source inspection), 
 `adaptx.evaluation` never requires the `carla` package. Evaluation performs one conversion
 on ground truth - the sensor mount translation - and derives one quantity - the reference
 velocity by finite difference, because the simulator's velocity of a placed actor is
-meaningless (ADR-052). Everything else is read as recorded. Nothing is served over HTTP or
-telemetry. Metric definitions: `docs/EVALUATION.md`.
+meaningless (ADR-052). Everything else is read as recorded. Nothing is **computed** over
+HTTP or telemetry; since Phase 12, stored reports are **served** read-only by
+`adaptx.evidence` through `api/routes/evidence.py`, the single API module allowed to import
+the evaluation layer (the boundary test pins it). Metric definitions: `docs/EVALUATION.md`.
+
+---
+
+## 8d. Live loop boundary (post-Phase-12 extension)
+
+```
+CARLA ──► CarlaSimulationSession(drive_ego) ──► RawPointCloudFrame ──► pipeline_processor (Phase 2-8, unchanged)
+   ▲                                                                          │ risk, tracking, prediction
+   │ apply_ego_control(throttle, brake, steer)                                ▼
+   └───────────────── RiskGovernedSpeedPolicy.decide(outputs, ego odometry) ◄─┘
+                                          │
+                                          └──► SceneSnapshot(+ego, control, live) ──► /ws/scene
+   session.ground_truth()  ── never called by the loop; the snapshot has no field for it
+   collision sensor        ── ends the session and records the contact; drives nothing
+```
+
+`adaptx.live` and `adaptx.control` are in the Phase 11 boundary tests' production list:
+neither imports the evaluation layer or the ground-truth contracts. The only caller of
+`world.tick()` is the live loop's thread while a session runs (the Phase 10 runner when a
+scenario runs; never both). Ownership and the shutdown order that survives the Traffic
+Manager are in `carla/session.py`. Decision: ADR-056; measurements: Experiment 014.
+
+---
+
+## 8c. Dashboard boundary (Phase 12)
+
+```
+POST /lidar/adaptive-map ─┐                                     ┌─► /ws/scene ──► browser
+scenario CLI --publish  ──┴► SceneSnapshot ──► SceneService ────┤
+   (outputs only; the snapshot has no ground-truth field)       └─► GET /scene/latest
+
+reports/*.json ─┐                                 ┌─► GET /reports, /reports/{name}, /reports/compare
+runs/*.json    ─┴► adaptx.evidence (read-only) ───┴─► GET /runs, /runs/{name}, /runs/{name}/frames/{i}
+                                                       (the only path that serves ground truth)
+```
+
+The dashboard (`dashboard/`, vanilla ES modules, Canvas 2D, no dependency) is a consumer:
+it formats and draws backend fields and performs no aggregation, matching, thresholding or
+distance arithmetic; a test scans its source for exactly that. The live and stored modes are
+labelled and never mixed. There is no endpoint that spawns, destroys, moves, starts or stops
+anything; the route table is audited by test. Details, views, screen transform and
+limitations: `docs/DASHBOARD.md`; decision: ADR-055.
 
 ---
 

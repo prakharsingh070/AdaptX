@@ -73,6 +73,32 @@ class BoundingBox:
 class FakeWaypoint:
     transform: Transform
 
+    def next(self, distance: float) -> list[FakeWaypoint]:
+        """The lane continues straight along +x in the fake."""
+        location = self.transform.location
+        return [
+            FakeWaypoint(
+                Transform(Location(location.x + distance, location.y, location.z), Rotation())
+            )
+        ]
+
+
+@dataclass
+class VehicleControl:
+    """Mirrors ``carla.VehicleControl``."""
+
+    throttle: float = 0.0
+    brake: float = 0.0
+    steer: float = 0.0
+    hand_brake: bool = False
+    reverse: bool = False
+
+
+#: Kinematics of the fake's driven vehicle: full throttle accelerates at this
+#: rate, full brake decelerates at the second. Test scaffolding, not a model.
+FAKE_THROTTLE_MPS2 = 3.0
+FAKE_BRAKE_MPS2 = 8.0
+
 
 @dataclass
 class WorldSettings:
@@ -102,11 +128,55 @@ class FakeActor:
         self.bounding_box = BoundingBox()
         self.destroyed = False
         self.velocity = Vector3D()
+        self.control = VehicleControl()
+        self.controls_applied: list[VehicleControl] = []
+        self.autopilot: tuple[bool, int] | None = None
+        self.parent: FakeActor | None = None
 
     def get_transform(self) -> Transform:
         if not self.settled:
             return Transform()
         return self._transform
+
+    def world_transform(self) -> Transform:
+        """Where the actor is, attachment included (the fake ignores parent yaw)."""
+        if self.parent is None:
+            return self._transform
+        base = self.parent.world_transform()
+        return Transform(
+            Location(
+                base.location.x + self._transform.location.x,
+                base.location.y + self._transform.location.y,
+                base.location.z + self._transform.location.z,
+            ),
+            base.rotation,
+        )
+
+    def apply_control(self, control: VehicleControl) -> None:
+        self.control = control
+        self.controls_applied.append(control)
+
+    def set_autopilot(self, enabled: bool, port: int = 8000) -> None:
+        self.autopilot = (enabled, port)
+
+    def integrate(self, dt: float) -> None:
+        """Advance a driven vehicle one step: straight along +x, no steering."""
+        if not self.simulate_physics or self.type_id.startswith(("sensor.", "walker.")):
+            return
+        speed = self.velocity.x
+        speed += (
+            self.control.throttle * FAKE_THROTTLE_MPS2 - self.control.brake * FAKE_BRAKE_MPS2
+        ) * dt
+        speed = max(0.0, speed)
+        self.velocity = Vector3D(speed, 0.0, 0.0)
+        self._transform = Transform(
+            Location(
+                self._transform.location.x + speed * dt,
+                self._transform.location.y,
+                self._transform.location.z,
+            ),
+            self._transform.rotation,
+        )
 
     def set_transform(self, transform: Transform) -> None:
         self._transform = transform
@@ -141,11 +211,49 @@ class FakeSensor(FakeActor):
         self.stopped = True
 
     def deliver(self, frame: int, timestamp: float) -> None:
-        """Emit one scan for the given simulator frame."""
+        """Emit one measurement for the given simulator frame, by sensor type."""
         if not self.listening or self._callback is None:
             return
-        points = self._world.scan(self._transform)
-        self._callback(FakeLidarMeasurement(frame=frame, timestamp=timestamp, points=points))
+        if self.type_id == "sensor.lidar.ray_cast":
+            points = self._world.scan(self.world_transform(), exclude=self.parent)
+            self._callback(FakeLidarMeasurement(frame=frame, timestamp=timestamp, points=points))
+        elif self.type_id == "sensor.camera.rgb":
+            width = int(self.blueprint_attributes.get("image_size_x", "8"))
+            height = int(self.blueprint_attributes.get("image_size_y", "4"))
+            self._callback(FakeImage(frame=frame, width=width, height=height))
+        # The collision sensor emits only when the world reports a contact.
+
+    def deliver_collision(self, frame: int, other: FakeActor, impulse: float = 100.0) -> None:
+        if self.listening and self._callback is not None:
+            self._callback(
+                FakeCollisionEvent(
+                    frame=frame, other_actor=other, normal_impulse=Vector3D(impulse, 0.0, 0.0)
+                )
+            )
+
+
+@dataclass
+class FakeImage:
+    """Mirrors ``carla.Image``: BGRA bytes, one grey gradient row per line."""
+
+    frame: int
+    width: int
+    height: int
+
+    @property
+    def raw_data(self) -> bytes:
+        rows = []
+        for y in range(self.height):
+            value = int(255 * y / max(1, self.height - 1))
+            rows.append(bytes([value, value, value, 255]) * self.width)
+        return b"".join(rows)
+
+
+@dataclass
+class FakeCollisionEvent:
+    frame: int
+    other_actor: FakeActor
+    normal_impulse: Vector3D
 
 
 @dataclass
@@ -179,6 +287,9 @@ class FakeBlueprint:
             "lower_fov": "-30",
             "dropoff_general_rate": "0.0",
             "noise_seed": "0",
+            "image_size_x": "8",
+            "image_size_y": "4",
+            "fov": "90",
         }
 
     def has_attribute(self, key: str) -> bool:
@@ -262,7 +373,12 @@ class FakeWorld:
             "vehicle.audi.tt",
             "vehicle.diamondback.century",
             "walker.pedestrian.0001",
+            "vehicle.lincoln.mkz_2020",
+            "vehicle.nissan.patrol",
+            "vehicle.mini.cooper_s",
             "sensor.lidar.ray_cast",
+            "sensor.other.collision",
+            "sensor.camera.rgb",
         }
         self.refuse_spawn: set[str] = set()
         self.refuse_spawn_point_indices: set[int] = set()
@@ -311,8 +427,19 @@ class FakeWorld:
         # What the blueprint carried at spawn time, so a test can check the
         # attributes the session set (a real actor exposes them too).
         actor.blueprint_attributes = dict(blueprint.attributes)
+        actor.parent = attach_to
         self.actors[actor_id] = actor
         return actor
+
+    def collide(self, actor: FakeActor, other: FakeActor) -> None:
+        """Report a contact to every collision sensor attached to ``actor``."""
+        for candidate in self.actors.values():
+            if (
+                isinstance(candidate, FakeSensor)
+                and candidate.type_id == "sensor.other.collision"
+                and candidate.parent is actor
+            ):
+                candidate.deliver_collision(self._frame, other)
 
     # -- stepping ----------------------------------------------------------
     def tick(self) -> int:
@@ -320,8 +447,9 @@ class FakeWorld:
             raise self.tick_error
         self._frame += 1
         self._elapsed += self._dt
-        for actor in self.actors.values():
+        for actor in list(self.actors.values()):
             actor.settled = True
+            actor.integrate(self._dt)
         if self.deliver_frames:
             for actor in list(self.actors.values()):
                 if isinstance(actor, FakeSensor):
@@ -331,29 +459,35 @@ class FakeWorld:
     def get_snapshot(self) -> FakeSnapshot:
         return FakeSnapshot(frame=self._frame, timestamp=FakeTimestamp(self._elapsed))
 
+    def wait_for_tick(self) -> FakeSnapshot:
+        """An asynchronous server frame; the fake just reports the current one."""
+        return self.get_snapshot()
+
     # -- scan generation ---------------------------------------------------
-    def scan(self, sensor_transform: Transform) -> np.ndarray:
+    def scan(self, sensor_transform: Transform, exclude: FakeActor | None = None) -> np.ndarray:
         """Generate a scan in the sensor's local **CARLA** frame.
 
         A ground plane plus a box of returns for every vehicle other than the
         one the sensor is attached to. Crude by design: it exists to give the
         pipeline something with real structure to cluster, not to model a
-        beam pattern.
+        beam pattern. ``sensor_transform`` is the sensor's world pose (the
+        ego's pose plus the mount), so a driven ego sees objects recede.
         """
         mount = sensor_transform.location
-        blocks: list[np.ndarray] = [_ground_plane(mount.z)]
+        mount_height = mount.z - (exclude.world_transform().location.z if exclude else 0.0)
+        blocks: list[np.ndarray] = [_ground_plane(mount_height)]
 
         for actor in self.actors.values():
             if isinstance(actor, FakeSensor) or actor.type_id.startswith("sensor."):
                 continue
+            if actor is exclude:
+                continue
             location = actor.get_transform().location
-            # Ego sits at the world origin in this fake, so a world position is
-            # already sensor-relative once the mount offset is removed.
             dx = location.x - mount.x
             dy = location.y - mount.y
             if abs(dx) < 1e-6 and abs(dy) < 1e-6:
                 continue  # the ego itself, under the sensor
-            blocks.append(_vehicle_box(dx, dy, -mount.z + 0.8))
+            blocks.append(_vehicle_box(dx, dy, -mount_height + 0.8))
 
         points = np.vstack(blocks)
         intensity = np.full((points.shape[0], 1), 0.75, dtype=np.float64)
@@ -393,6 +527,24 @@ def _vehicle_box(cx: float, cy: float, cz: float, spacing_m: float = 0.12) -> np
 # ---------------------------------------------------------------------------
 # client and module
 # ---------------------------------------------------------------------------
+class FakeTrafficManager:
+    """Mirrors the small part of ``carla.TrafficManager`` the session touches."""
+
+    def __init__(self, port: int) -> None:
+        self._port = port
+        self.synchronous: bool | None = None
+        self.seed: int | None = None
+
+    def set_synchronous_mode(self, enabled: bool) -> None:
+        self.synchronous = enabled
+
+    def set_random_device_seed(self, seed: int) -> None:
+        self.seed = seed
+
+    def get_port(self) -> int:
+        return self._port
+
+
 class FakeClient:
     def __init__(self, host: str, port: int) -> None:
         self.host = host
@@ -401,12 +553,17 @@ class FakeClient:
         self.world = FakeWorld()
         self.loaded: list[str] = []
         self.connect_error: Exception | None = None
+        self.traffic_manager: FakeTrafficManager | None = None
 
     def set_timeout(self, timeout: float) -> None:
         self.timeout = timeout
 
     def get_server_version(self) -> str:
         return "fake-0.0"
+
+    def get_trafficmanager(self, port: int = 8000) -> FakeTrafficManager:
+        self.traffic_manager = FakeTrafficManager(port)
+        return self.traffic_manager
 
     def get_world(self) -> FakeWorld:
         if self.connect_error is not None:
@@ -428,6 +585,7 @@ class FakeCarlaModule:
     Rotation = Rotation
     Transform = Transform
     WorldSettings = WorldSettings
+    VehicleControl = VehicleControl
     __version__ = "0.9.15-fake"
 
     def __init__(self, world: FakeWorld | None = None) -> None:

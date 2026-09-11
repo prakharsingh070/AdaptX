@@ -4,28 +4,37 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from adaptx import __version__
 from adaptx.api.routes import (
     carla,
+    evidence,
     health,
     lidar,
+    live,
     prediction,
     risk,
+    scene,
     system,
     tracking,
 )
 from adaptx.api.routes import map as map_routes
+from adaptx.api.websocket import scene as scene_channel
 from adaptx.api.websocket import telemetry
 from adaptx.api.websocket.manager import ConnectionManager
 from adaptx.config.settings import Settings, get_settings
 from adaptx.core.exceptions import AdaptXError
 from adaptx.core.lifecycle import ApplicationContext, build_context, shutdown, startup
 from adaptx.core.logging import get_logger
+
+#: The static dashboard: ``<repo>/dashboard``, three levels above this file.
+DASHBOARD_DIR = Path(__file__).resolve().parents[3] / "dashboard"
 
 logger = get_logger(__name__)
 
@@ -116,8 +125,32 @@ def create_app(
     api.include_router(risk.router)
     api.include_router(tracking.router)
     api.include_router(prediction.router)
+    api.include_router(scene.router)
+    api.include_router(live.router)
+    api.include_router(evidence.router)
     app.include_router(api)
 
     app.include_router(telemetry.router)
+    app.include_router(scene_channel.router)
+
+    # The dashboard is static files served by the same process (Phase 12,
+    # docs/DASHBOARD.md). It is mounted last so no API path can be shadowed,
+    # and only when the directory exists so a checkout without it still serves
+    # the API. `/` redirects there for convenience; the API is unaffected.
+    if DASHBOARD_DIR.is_dir():
+        app.mount("/dashboard", StaticFiles(directory=DASHBOARD_DIR, html=True), name="dashboard")
+
+        @app.middleware("http")
+        async def dashboard_no_cache(request: Request, call_next):  # type: ignore[no-untyped-def]
+            # ES modules are cached heuristically by browsers; a local
+            # engineering tool must always serve the checkout's current files.
+            response = await call_next(request)
+            if request.url.path.startswith("/dashboard"):
+                response.headers["Cache-Control"] = "no-cache"
+            return response
+
+        @app.get("/", include_in_schema=False)
+        async def dashboard_index() -> RedirectResponse:
+            return RedirectResponse(url="/dashboard/")
 
     return app
