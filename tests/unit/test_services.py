@@ -256,7 +256,11 @@ class TestSystemService:
         assert carla.implementation is not ImplementationStatus.IMPLEMENTED
         assert carla.phase == 9
         assert carla.required is False
-        assert "NO LIVE CARLA RUN HAS BEEN EXECUTED" in carla.detail
+        # Retargeted in Phase 11: a live run has now been executed, so the
+        # guarantee is that the component says it and still claims nothing
+        # about the real world.
+        assert "LIVE-VALIDATED" in carla.detail
+        assert "SIMULATION ONLY" in carla.detail
         assert "never reaches detection" in carla.detail
         assert "DATA SOURCE" in carla.detail
 
@@ -278,7 +282,32 @@ class TestSystemService:
         assert scenarios.required is False
         assert "NO accuracy" in scenarios.detail
         assert "NO pipeline stage" in scenarios.detail
-        assert "No live CARLA run" in scenarios.detail
+        # Retargeted in Phase 11: the run has happened and evaluation exists,
+        # so the component must point at it rather than claim a figure.
+        assert "evaluation component" in scenarios.detail
+        assert "live-validated" in scenarios.detail
+
+    def test_evaluation_is_partial_simulation_only_and_off_the_api(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 11 added the evaluation layer; it must never look like validation."""
+        components = {c.name: c for c in context.system.status().components}
+        evaluation = components["evaluation"]
+
+        assert evaluation.implementation is ImplementationStatus.PARTIAL
+        assert evaluation.implementation is not ImplementationStatus.IMPLEMENTED
+        assert evaluation.phase == 11
+        assert evaluation.required is False
+        assert "SIMULATION EVIDENCE ONLY" in evaluation.detail
+        assert "NOT EVALUATED" in evaluation.detail
+        assert "never zero" in evaluation.detail
+        assert "Not served over HTTP" in evaluation.detail
+        for forbidden in ("safe", "validated", "collision probability"):
+            # "not safety validation" and "not a collision probability" are the
+            # only allowed occurrences; assert the negations are present.
+            assert forbidden not in evaluation.detail.replace("not safety validation", "").replace(
+                "not a collision probability", ""
+            ).replace("not real-world validation", "")
 
     def test_prediction_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext
@@ -296,7 +325,12 @@ class TestSystemService:
         assert prediction.required is False
         assert "constant-velocity baseline" in prediction.detail
         assert "heuristic" in prediction.detail
-        assert "unmeasured" in prediction.detail
+        # Retargeted in Phase 11: prediction error has now been measured in
+        # simulation, so the guarantee is that the component reports the
+        # measurement as simulation-only and still unmeasured for real data.
+        assert "measured" in prediction.detail
+        assert "simulation only" in prediction.detail
+        assert "unmeasured against any real trajectory" in prediction.detail
 
     def test_tracking_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext

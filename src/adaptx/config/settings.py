@@ -130,6 +130,16 @@ class CarlaSettings(BaseModel):
             "actors are described by the scenario, never by configuration."
         ),
     )
+    ego_spawn_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Map spawn point to place the ego at. None walks the map's spawn points "
+            "and takes the first that accepts. Set it to pin the ego pose: scenario "
+            "placements are ego-relative, so the same scenario from a different "
+            "spawn point is a different scene, and on some maps an off-road one."
+        ),
+    )
 
     # -- LiDAR sensor ------------------------------------------------------
     lidar_channels: int = Field(default=32, ge=1, le=128)

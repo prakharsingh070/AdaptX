@@ -21,10 +21,13 @@ Rules that govern all work are in [`../CLAUDE.md`](../CLAUDE.md) and
 
 ## 2. Current phase
 
-**Phase 10 COMPLETE** (scenario framework; event replay deferred). Phases 1 through 10 are
+**Phase 11 COMPLETE** (evaluation against simulator ground truth). Phases 1 through 11 are
 implemented and verified.
-Adaptive resolution — the thing the project is named for — now exists as a deterministic
-heuristic baseline, and has been measured against the fixed baseline (Experiment 007).
+Adaptive resolution — the thing the project is named for — exists as a deterministic
+heuristic baseline and has now been measured on live CARLA scenes against the fixed
+baseline **and** against ground truth (Experiment 011): 0.48–0.56 of the fixed map's cells,
+5× its build time, finer cells under the perceived actor than elsewhere. The perception
+baselines were measured for the first time and lost, as expected: see §15.
 
 **Phase numbering was resolved and changed in Phase 5.** Trajectory prediction moved from
 Phase 8 to **Phase 5**, because it is what the risk engine needs next; 2.5D mapping, risk
@@ -35,12 +38,10 @@ were deliberately left as originally written.
 
 ## 3. Branch and status
 
-- Branch: `phase-10-scenario-framework`, branched from `origin/main`
-- Phases 1 through 9 are committed **and merged into `origin/main`** (PR #1 through PR #6).
-  Phase 9 is commit `efc935c`, merged as PR #6 in `9092c69`
-- Phase 10 is committed on this branch as `2a4ce2d`, **not pushed**. The live-validation
-  fixes of 2026-09-11 (ADR-049, Experiment 010) are in the working tree on top of it,
-  **not committed**
+- Branch: `phase-11-evaluation`, branched from `origin/main` at `fe64d1c`
+- Phases 1 through 10 are committed **and merged into `origin/main`** (PR #1 through PR #7).
+  Phase 10 is commits `2a4ce2d` + `ec93951`, merged as PR #7 in `fe64d1c`
+- Phase 11 is in the working tree on this branch, **not committed and not pushed**
 
 > Local `main` was stale at `5f68a5e` (the Phase 7 merge) when Phase 9 began, two commits
 > behind `origin/main`. Branching from it would have silently dropped Phase 8. **Check
@@ -118,7 +119,8 @@ configuration snapshot so a record is self-describing.
 | `adaptx.prediction` | `constant_velocity`, `interfaces` |
 | `adaptx.mapping` | `grid_mapper` (fixed baseline), `controller` (Phase 8 policy), `adaptive_mapper` (tiled), `tiles` (shared geometry), `comparison`, `interfaces` |
 | `adaptx.risk` | `heuristic` (Phase 7 engine), `baseline` (proximity-only comparison reference), `interfaces` |
-| `adaptx.scenarios` | `models` (definition, motion, resolution - imports nothing from `adaptx.carla`), `result` (raw evidence, no metrics), `interfaces` (`ScenarioSimulator` protocol), `runner`, `catalogue` (4 scenarios), `__main__` (CLI) |
+| `adaptx.scenarios` | `models` (definition, motion, resolution - imports nothing from `adaptx.carla`), `result` (raw evidence, no metrics; since Phase 11 also the pipeline's result contracts per frame and the sensor configuration), `interfaces` (`ScenarioSimulator` protocol), `runner`, `catalogue` (4 scenarios), `__main__` (CLI) |
+| `adaptx.evaluation` | Phase 11, **the only package that reads ground truth**: `dataset` (record → evaluation view, sensor-frame conversion, finite-difference reference velocity), `matching` (greedy gated), `tracking` (detection + tracking), `prediction` (ADE/FDE), `risk` (proximity events), `mapping` (workload; accuracy explicitly unavailable), `adaptive` (paired fixed vs adaptive, churn, refinement lead), `resource`, `evaluator`, `report` (text), `compare` (repeatability), `models` (report contracts), `__main__` (CLI). Offline; imports no simulator |
 | `adaptx.carla` | Boundary: `client` (connection), `session` (deterministic simulation lifecycle), `conversion` (the single coordinate/time boundary, imports no simulator), `ground_truth`, `interfaces`, `mock`. Optional dependency. `smoke.py` was deleted in Phase 10 |
 | `adaptx.services` | `lidar_service`, `metrics_service`, `carla_service`, `system_service`, `tracking_service`, `prediction_service`, `mapping_service`, `risk_service`, `adaptive_mapping_service` |
 | `adaptx.api` | `app`, `schemas`, `dependencies`, `routes/`, `websocket/` |
@@ -162,7 +164,7 @@ configuration snapshot so a record is self-describing.
 Shared rules: `schema_version`, tz-aware UTC timestamps, `coordinate_frame`, `source`
 (`live_sensor`/`simulation`/`replay`/`synthetic_test`/`unavailable`), `extra="forbid"`.
 
-## 7. API endpoints (17, unchanged in Phases 9 and 10)
+## 7. API endpoints (17, unchanged in Phases 9, 10 and 11)
 
 | Method | Path |
 |---|---|
@@ -244,10 +246,15 @@ Optional extras declared but **not installed**: `open3d` (`[pointcloud]`), `carl
 
 ## 12–14. Verification status
 
-- **1452 tests pass**, 7 deselected (`pytest`, Python 3.13; 1451 + 1 skipped on 3.12). The 7 are the live CARLA tests
+- **1565 tests pass**, 7 deselected (`pytest`, Python 3.13). The 7 are the live CARLA tests
 - `ruff check .` — All checks passed
-- `ruff format --check .` — 192 files formatted
-- `mypy src` — no issues in 109 source files
+- `ruff format --check .` — 215 files formatted
+- `mypy src` — no issues in 123 source files
+- **Phase 11 live experiments** (Experiment 011): all four catalogue scenarios recorded
+  twice on CARLA 0.9.16 from spawn point 1 and evaluated offline; figures in §15 and the
+  experiment log. Two stale actors from an earlier killed run were found on the server and
+  destroyed first; the "spawn point 0 refuses" finding of Experiment 010 was a consequence
+  of them and is corrected in place
 - Backend starts; all 17 endpoints respond; no tracebacks
 - **Live CARLA run executed on 2026-09-11** (Experiment 010): CARLA 0.9.16 server on
   `127.0.0.1:2000`, Town10HD_Opt. `pytest -m carla` **7 passed** from a Python 3.12
@@ -279,9 +286,35 @@ so `tile_size_m` is the lever. Read the entry before quoting any of it.
 
 ## 15. Known limitations — do not hide these
 
-- **No labelled data exists.** Detection accuracy, tracking correctness and prediction
-  accuracy are all unmeasured and currently **unmeasurable**. Every benchmark measures
-  speed only.
+- **Measured against simulator ground truth for the first time (Experiment 011), and the
+  baselines lost.** Simulation evidence only, one map, one pose, one seed:
+  - Vehicle detection recall 0.00–0.06 at a 1 m gate, 0.23–0.61 at 2 m, with a consistent
+    ~1.5–1.7 m planar offset between detection centroid and actor origin. The classifier
+    never labelled the Audi a vehicle (class agreement 0.00 on 54 matched frames).
+  - Tracking coverage 0.25–0.48 for moving actors with 1–3 identity switches each; the
+    stationary waiting vehicle reached 0.98 coverage and still switched once. Velocity
+    error median 0.1–0.8 m/s with outlying frames that measured a standstill for an
+    object closing at 8 m/s.
+  - ADE 1.5–3.4 m mean over the trajectories that could be aligned, growing with horizon
+    to 5 m (cyclist, 3 s) and 12 m (approach, 1.5 s).
+  - The risk score orders proximity for moving actors (concordance 0.80–0.86) and not for
+    a stationary one; at the pre-registered 20 m band no scenario actor was inside long
+    enough to measure alert recall (a post-hoc 25 m band gave 0.13–0.63).
+  - **Re-measured after the placement fix (ADR-054, Experiment 012).** With physics off on
+    placed actors and the ego grounded, the walker stands on the road, nothing settles, and
+    a static scene is bit-repeatable; scenes with moving placed actors still differ by ≤ 8
+    of 27,000 points on some frames (unexplained). Under the **process defaults** (ground
+    segmentation OFF) the parked car (20 m) and the pedestrian (15 m) are detected on **0**
+    frames — their returns are clustered with the road — so Experiment 011's parked-car
+    recall was an artefact of the car falling. With ground segmentation **ON** (a disclosed
+    post-hoc variation, `ADAPTX_LIDAR__GROUND_ENABLED=true`) both are detected on every
+    frame (pedestrian 0.10 m; parked car at a constant 1.70 m centroid-to-origin offset),
+    no scenario shows an identity switch, pedestrian ADE is 0.66 m and the pipeline runs at
+    80 ms/frame instead of 140. **Every correctness figure depends on that one default**,
+    which this phase does not decide.
+  - **Still unmeasured:** mapping occupancy accuracy (no honest reference), precision or
+    any false-positive figure (static geometry is unlabelled), peak memory, anything with a
+    moving ego, traffic or weather, and anything real-world.
 - Detection is a geometric baseline: no trained model, no oriented boxes (AABB only,
   `yaw_rad` always 0), no velocity from a single frame.
 - Clustering **merges** objects in touching grid cells and cannot split points sharing a cell.
@@ -367,8 +400,16 @@ so `tile_size_m` is the lever. Read the entry before quoting any of it.
 
 ## 16. Architecture decisions
 
-ADR-001 … ADR-048 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
+ADR-001 … ADR-053 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
 Most load-bearing for future work:
+
+- **ADR-050** — evaluation is offline from the run record, which carries the pipeline's
+  outputs; never re-run perception to evaluate
+- **ADR-051** — a metric that could not be computed is null with a reason, never zero
+- **ADR-052** — greedy gated matching at several gates; no precision over unlabelled tracks;
+  reference velocity by finite difference, never the simulator's
+- **ADR-053** — fixed vs adaptive is paired within one run; every report is simulation
+  evidence with fixed limitations
 
 - **ADR-009** — coordinate convention: **+x forward, +y left, +z up**, metres, right-handed
 - **ADR-005** — readiness *and* implementation status reported separately
@@ -418,6 +459,11 @@ Most load-bearing for future work:
 9. The mapper never chooses its own resolution, and is never handed tracks, trajectories,
    risk or uncertainty (ADR-029). Keep that interface narrow.
 10. An unobserved map cell reports null height, never zero (ADR-031).
+11. Ground truth reaches `adaptx.evaluation` and nothing else; no production package imports
+    the evaluation layer (ADR-045, ADR-050). Two tests assert it.
+12. The run record carries no metric; evaluation produces its own report (ADR-050).
+13. Nothing in Phases 2–8 is tuned in response to an evaluation result without its own
+    experiment entry stating the before and after.
 11. A missing risk factor is dropped, never scored zero; `UNKNOWN` carries a **null** score
     (ADR-032).
 12. Uncertainty is never summed into the risk score (ADR-033), and map context never lowers
@@ -456,25 +502,24 @@ Most load-bearing for future work:
     It is evidence for Phase 11, not a Phase 11 result.
 31. `carla/smoke.py` stays deleted. The scenario framework is the way to run a scene.
 
-## 18–19. Next step — benchmarking and evaluation (Phase 11)
+## 18–19. Next step — dashboard and final integration (Phase 12)
 
-Everything Phase 11 needs now exists and has been kept apart on purpose. A scenario run
-records, per frame, three things that have never been compared: what the scenario
-**commanded** (`ExpectedPose`), what the simulator **reported** (`GroundTruthFrame`), and
-what the pipeline **counted** (`StageCounts`). Phase 11 is the first phase allowed to put a
-number between them.
-
-That also makes it the first phase where an honest negative is likely. Every "unmeasured
-and unmeasurable" limitation in §15 becomes measurable, and the baselines were built to be
-replaced.
+Every backend contract the dashboard needs exists, and for the first time there is a
+measured account of what the pipeline actually does with them. Phase 12 builds the UI
+against the existing endpoints and telemetry; perception logic stays out of it, and the
+evaluation figures it shows must come from a recorded report, never be recomputed in the
+browser. One decision is owed before more evaluation runs are read: whether ground
+segmentation stays off by default (Experiment 012).
 
 Objective and full handoff: [`NEXT_PHASE.md`](NEXT_PHASE.md).
 
 ## 20. Not yet
 
-Do **not** start the dashboard (Phase 12), and do not start Phase 11 without a live CARLA
-run first - see [`NEXT_PHASE.md`](NEXT_PHASE.md). Evaluating perception against ground truth
-that has only ever come from a stand-in would measure the stand-in.
+Do **not** tune Phases 2–8 against Experiment 011's figures without a new experiment entry
+stating the before and after. Do **not** build an occupancy reference by hand; if one is
+built from simulator ray casts it lives in `adaptx.evaluation`, is labelled a simulation
+reference, and never reaches perception. Do **not** report a precision figure while static
+geometry is unlabelled.
 
 Event replay was **deferred** from Phase 10, not done. If it is picked up, the design
 question from the Phase 9 handoff is still open: re-run the simulation, or re-play a

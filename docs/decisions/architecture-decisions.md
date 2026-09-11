@@ -1725,9 +1725,18 @@ because the ego is never driven (ADR-047). Switching to the live pose after the 
 rather than using the spawn transform forever keeps the door open for a moving ego without
 another change here.
 
-Walking the spawn points is the same kind of finding: index 0 on Town10HD_Opt refuses every
-spawn while 1-11 accept. Taking the first accepting index is still deterministic per map,
-and recording it keeps a run reproducible from what it reports.
+Walking the spawn points is the same kind of finding: index 0 refused every spawn while
+1-11 accepted. Taking the first accepting index is deterministic for a given map and world
+state, and recording it keeps a run reproducible from what it reports.
+
+**Corrected in Phase 11 (Experiment 011):** the map was not refusing index 0. Two actors
+left there by a killed process - an ADAPT-X ego and its LiDAR - were occupying it, and
+destroying them made it accept. The walk stays, because a point occupied by something a
+previous process left behind is precisely the case it handles. Scenario placements are
+ego-relative, so a different spawn point is a different scene and on this map an off-road
+one (from index 0 the approach scenario's target is 3.7 m off the road; from index 1 it is
+on a Driving lane). `CarlaSettings.ego_spawn_index` pins the ego to one point; when set,
+no other point is tried, and a refusal is an error rather than a different scene.
 
 **Alternatives considered:** Ticking once inside `open()` (would enqueue a sensor frame
 before any `step()`, and the frame-matching in `step()` would then have to discard it -
@@ -1743,6 +1752,212 @@ placement tests read a pose only after stepping.
 **Risks:** A server that *does* report the pose before the first tick is handled identically -
 the spawn transform and the reported one agree. A scenario that moves the ego before the
 first tick would see the spawn transform; no such scenario exists (ADR-047, stationary ego).
+
+**Status:** Accepted
+
+## ADR-050: Evaluation Is Offline, From the Pipeline Outputs Recorded on the Run
+
+**Decision:** Phase 11 evaluates a recorded `ScenarioRunResult` and nothing else. To make
+that possible the Phase 10 record gains two optional, additive fields: `frames[].outputs`,
+holding the pipeline's own result contracts for the frame (`DetectionResult`,
+`TrackingResult`, `PredictionResult`, `RiskAssessmentResult`, the two map summaries, the
+`ResolutionPlan` and the frame's `MappingComparison`), and `sensor`, the LiDAR configuration
+the run used including the mount offset. `pipeline_processor` records outputs by default;
+`record_outputs=False` gives the Phase 10 counts-only record. The evaluator never contacts a
+simulator and never re-runs perception. `python -m adaptx.evaluation evaluate run.json`
+works with CARLA closed and the `carla` package absent, and a test asserts it.
+
+**Reason:** Counts cannot support a position error, an ADE or a churn figure, and the
+alternatives were worse. Re-running perception inside the evaluator would make the
+evaluation depend on the pipeline's current code rather than on what actually ran, and
+would need the point cloud on disk (27,000 points a frame). A replay engine was deferred
+from Phase 10 with its design open and is not needed for this. Keeping the result objects
+the pipeline already built costs no computation; a record grows to 30-80 MB per catalogue
+scenario, dominated by 144 tile decisions a frame, which is acceptable for a research
+artefact and was not optimised before being measured.
+
+The record stays evidence in the Phase 10 sense: no accuracy, error or match figure is on
+it, the Phase 10 test that asserts so still passes, and every earlier consumer is
+unaffected because both fields default to `None`.
+
+**Alternatives considered:** Re-running the pipeline offline (evaluates the code of the
+day, not the run); storing point clouds (large, and still needs a re-run); a replay
+subsystem (deferred design, out of scope); a separate evidence file beside the record (two
+files to keep aligned, for no gain).
+
+**Impact:** `FrameProcessor` may return either `StageCounts` or `PipelineFrameOutputs`;
+the runner records both counts and outputs. `docs/EVALUATION.md` §1.
+
+**Risks:** Record size; a consumer that loads a record with outputs into memory needs a
+few hundred MB for the longest scenario. Nothing streams them.
+
+**Status:** Accepted
+
+## ADR-051: A Metric That Could Not Be Computed Is Absent With a Reason, Never Zero
+
+**Decision:** Every section of an `EvaluationReport` carries a `MetricStatus` - `measured`,
+`partial`, `unavailable`, `not_applicable` - and a reason when it is not `measured`. Every
+summary is a `Distribution` whose statistics are `None` when it has no samples, and whose
+`p95` is `None` below 20 samples with the rule stated. Nothing is defaulted to 0, 0.0,
+`LOW` or an empty string that reads as a measurement. An `UNKNOWN` risk assessment
+(`risk_score = None`) is counted as unknown and takes part in no rate. Mapping accuracy is
+`unavailable` with its reason on every report. Peak memory is `unavailable` with its reason.
+
+**Reason:** The same rule Phase 7 set for risk (ADR-035) and the project's constraints set
+for every metric: an absent measurement that looks like one is worse than none. A
+prediction section reading `ADE: 0.0` because no trajectory could be aligned would be a
+perfect score for a predictor that predicted nothing. A p95 of twelve samples is the maximum
+with a different name. `UNKNOWN` read as `LOW` would make the risk engine's most honest
+output its worst-scored one.
+
+**Alternatives considered:** Sentinel zeros with a flag (the zero still gets averaged);
+omitting the section (the reader cannot tell "not applicable" from "forgot"); NaN (does not
+survive JSON and does not carry a reason).
+
+**Impact:** Report consumers must handle `None`; the text renderer prints `n/a` and the
+reason. A test asserts the text report prints reasons, not zeros, for a run with nothing
+to measure.
+
+**Risks:** More fields to read. That is the point.
+
+**Status:** Accepted
+
+## ADR-052: Greedy Gated Matching, Reported at Several Gates; Reference Velocity by Finite Difference
+
+**Decision:** Tracks (and detections) are matched to ground-truth actors per frame by
+greedy nearest neighbour on planar distance within a gate, pairs sorted by (distance,
+candidate id, actor id) so the result is deterministic. Every actor the record holds takes
+part in matching; only actors within the sensor range and the map bounds enter a rate. A
+track with no match is *unlabelled*, and no precision, false-positive count, MOTA or MOTP is
+reported. Matching is evaluated at every gate in `match_gates_m` (baseline 1, 2, 4 m) and
+the report carries all of them; continuity, prediction and risk use the primary gate. Class
+agreement is reported, never required. The velocity reference is the finite difference of
+consecutive ground-truth positions; the simulator's reported velocity is not used.
+
+**Reason:** The catalogue never has more than two scenario actors in a frame, so greedy
+and optimal assignment coincide unless two actors sit within one gate of one track, and the
+Hungarian method would need a dependency the project has avoided for eleven phases or a
+hand-written one for a case that does not arise. Deterministic tie-breaking matters more
+than optimality here: two evaluations of one record must agree.
+
+Precision is not reported because the map's buildings, poles and parked meshes return
+LiDAR points and are not CARLA actors: most tracks in every live run are on unlabelled
+geometry, and calling them false positives would fabricate the denominator of every
+precision figure. MOTA needs that term and so is not MOTA without it.
+
+Several gates because the association rule is a choice, and a single headline recall
+depends on it entirely (`docs/NEXT_PHASE.md` said so before the phase began). The live
+results bear it out: vehicle recall is 0.00-0.06 at 1 m and 0.23-0.61 at 2 m.
+
+The simulator's velocity is not used because a placed actor (ADR-047) keeps its physics
+velocity between placements: the record shows ~0 m/s in the plane for an actor scripted at
+8 m/s and a growing vertical velocity as it falls. The finite difference of positions is
+exact for a scripted constant-velocity segment.
+
+**Alternatives considered:** Hungarian assignment (no need, no dependency); requiring class
+agreement for a match (the classifier is under evaluation; it never labelled the Audi a
+vehicle, and requiring it would have zeroed every vehicle metric); one gate (a single choice
+hidden as a result); using the recorded velocity (wrong by construction).
+
+**Impact:** `docs/EVALUATION.md` §2-3. If a future scenario has dense actors, revisit
+assignment.
+
+**Risks:** Greedy matching can be suboptimal with three or more actors within one gate.
+Recorded, not currently reachable.
+
+**Status:** Accepted
+
+## ADR-053: Fixed Versus Adaptive Is Paired Within One Run, and Every Figure Is Simulation Evidence
+
+**Decision:** The fixed-resolution and adaptive maps are compared **within one run**: the
+pipeline builds both from the same processed frame, the record carries both summaries and
+their `MappingComparison`, and every ratio (cells, bytes, build time) is per frame, paired
+by construction. No second run with a different policy is made. The adaptive policy is
+evaluated against its own stated intent - detail at the tile holding each ground-truth
+actor versus the rest, detail grouped by matched risk level, refinement lead before the
+actor's arrival, churn, reversals and reported holds - and none of those metrics assumes the
+adaptive map is better; a ratio above one and a negative lead are reported as measured.
+
+Every `EvaluationReport` carries `source = SIMULATION` and a fixed, non-configurable list of
+limitations: simulation evidence only; not safety validation; not collision-probability
+validation; not real-world validation; unlabelled tracks are not false positives; mapping
+accuracy not evaluated; timings are not real-time claims. The text renderer prints them
+after the conclusion, and the conclusion itself states measured findings only - no verdict,
+because no threshold for one has been justified.
+
+**Reason:** A paired comparison removes every source of variance except the policy: same
+sensor frame, same detections, same tracks, same risk, same bounds, same machine, same
+moment. Experiment 011 showed live runs are not bit-repeatable even seeded, so two separate
+runs would have compared two slightly different scenes. The pipeline already computed both
+maps for every frame; pairing them cost nothing.
+
+The limitations travel with the numbers because a report is copied more often than the
+document that qualifies it. `CLAUDE.md` forbids fabricated benchmark results and production
+claims; the risk engine's own contract says its score is not a probability (ADR-032); the
+catalogue contains no collision; ground truth is what one simulator knew about one map. A
+reader who stops at the conclusion must still see this.
+
+**Alternatives considered:** Two runs, one per policy (adds sensor variance; the fixed
+map is already built every frame); a verdict line (would need thresholds the project has no
+evidence to set); configurable limitations (would let them be switched off).
+
+**Impact:** `MappingComparison` from Phase 8 is the paired contract, recorded per frame.
+Experiment 011 records the first paired figures on live scenes: 0.48-0.56 of the fixed
+cells, 5x the build time, finer cells under the actor where the actor was perceived.
+
+**Risks:** Pairing within one run cannot measure whether a *different* upstream (a policy
+that changed what was detected) would have changed the outcome. That is not what Phase 8
+does; if it ever does, this decision must be revisited.
+
+**Status:** Accepted
+
+## ADR-054: Placed Actors Do Not Simulate Physics and Stand on the Ego's Ground Plane
+
+**Decision:** Every actor the simulation session spawns for a scenario has its physics
+switched off the moment it exists, and is placed so that the **bottom of its bounding box**
+sits `up_m` above the ego's ground plane; `Placement.up_m` defaults to 0.0 and means "on
+the road". The ego has its physics switched off too and is set down at the road surface
+under its spawn point rather than left at the spawn point's 0.6 m clearance. The session
+records each actor's origin-to-box-bottom offset at spawn so `place_ahead_of_ego` keeps the
+same meaning of `up_m` on every frame.
+
+**Reason:** ADR-047 said actors are placed, not simulated, and the implementation only half
+meant it: it set the transform every tick and left physics on. Experiment 011 recorded the
+consequences. A placed walker kept its physics velocity between placements and fell through
+the road on 45 of 120 frames (vertical speed -31 m/s), so the pedestrian was invisible to
+the LiDAR and "one detection in 120 frames" said nothing about the detector. Vehicles fell
+half a metre every tick and were caught by the road, so their reported height jittered and
+their returns changed frame to frame. The ego, spawned 0.6 m above the road for clearance,
+settled over the first half second of every run, and every ego-relative placement and the
+LiDAR settled with it. None of this was the scene the scenario described.
+
+With physics off nothing moves unless placed. Experiment 012 measured the result: the
+walker at 0.93 m and the vehicles at 0.00 m on every frame, the ego at 0.000 world z on
+every frame, and the stationary scenario bit-repeatable across two runs, which no live run
+had been before.
+
+`up_m` is measured to the box bottom rather than the origin because CARLA puts a vehicle's
+origin at its wheels and a walker's at the middle of its capsule; "0.5 m above the ego
+origin" put a car half a metre in the air and a walker's middle at knee height.
+
+**Alternatives considered:** Zeroing velocity each tick with physics on (works for the
+vehicle in a probe, but the walker's behaviour differed between probe and run and physics
+would stay a source of variance); ticking the world until the ego settles before READY
+(changes the session's frame accounting and leaves the placed actors' physics on); disabling
+physics on scenario actors only and leaving the ego to settle (keeps the 0.6 m transient
+in every run).
+
+**Impact:** Phase 10 `Placement.up_m` default and meaning changed; no catalogue scenario set
+it explicitly, so every scenario now stands its actors on the road. Expected poses carry
+`up_m` as before. The fake simulator gained `set_simulate_physics`, a road-surface waypoint
+and a box location so the behaviour is tested without a server. Experiment 011's pedestrian
+figures are void; Experiment 012 re-measures every scenario.
+
+**Risks:** A physics-less vehicle does not react to anything; a future scenario that wants
+a vehicle to be pushed, to brake or to drive must switch physics back on for that actor and
+own the consequences. The residual run-to-run difference on scenes with moving placed actors
+(at most 8 of 27,000 points on some frames) is not removed by this decision and is not
+explained by it.
 
 **Status:** Accepted
 

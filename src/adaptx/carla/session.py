@@ -74,6 +74,25 @@ logger = get_logger(__name__)
 #: reports per-point intensity.
 LIDAR_BLUEPRINT = "sensor.lidar.ray_cast"
 
+#: Height above the resting pose at which an actor is spawned before being
+#: set down: the server refuses a spawn whose collision volume meets the road.
+SPAWN_CLEARANCE_M = 0.5
+
+
+def _stand_offset(actor: Any) -> float:
+    """How far an actor's origin sits above the bottom of its bounding box.
+
+    A CARLA vehicle's origin is at its wheels (offset about zero); a walker's
+    is at the middle of its capsule (about 0.93 m). Zero when the server
+    reports no bounding box, in which case ``up_m`` is measured to the origin.
+    """
+    box = getattr(actor, "bounding_box", None)
+    extent = getattr(box, "extent", None)
+    if extent is None:
+        return 0.0
+    centre = getattr(getattr(box, "location", None), "z", 0.0)
+    return float(extent.z) - float(centre)
+
 
 def load_carla_module() -> ModuleType:
     """Import the optional ``carla`` package, or fail with an actionable message."""
@@ -109,6 +128,10 @@ class CarlaSimulationSession:
         self._ego: Any | None = None
         self._ego_spawn_index: int | None = None
         self._ego_spawn_transform: Any | None = None
+        # Per placed actor: how far its origin sits above the bottom of its
+        # bounding box, so "up_m" can mean the same thing for a car (origin at
+        # the wheels) and a walker (origin at the middle of the capsule).
+        self._stand_offsets: dict[int, float] = {}
         self._sensor: Any | None = None
         self._actors: list[Any] = []
         self._queue: queue.Queue[Any] = queue.Queue()
@@ -233,6 +256,7 @@ class CarlaSimulationSession:
         self._ego = None
         self._ego_spawn_index = None
         self._ego_spawn_transform = None
+        self._stand_offsets.clear()
 
         # Restoring settings matters more than it looks: a server left in
         # synchronous mode blocks on a client that no longer exists, and looks
@@ -376,14 +400,21 @@ class CarlaSimulationSession:
         )
 
     def spawn_ahead_of_ego(
-        self, blueprint_id: str, *, forward_m: float, left_m: float = 0.0, up_m: float = 0.5
+        self, blueprint_id: str, *, forward_m: float, left_m: float = 0.0, up_m: float = 0.0
     ) -> Any:
-        """Spawn a vehicle at an offset from the ego, in the ADAPT-X frame.
+        """Spawn an actor at an offset from the ego, in the ADAPT-X frame.
 
         A scenario describes positions the way a person does - "30 m ahead and
         3 m to the left" - which is a statement in the ego frame. The
         conversion to CARLA world coordinates happens here so the scenario
         never writes a CARLA coordinate.
+
+        The actor is **placed, not simulated** (ADR-047, ADR-054): its physics
+        is switched off the moment it exists, and ``up_m`` is the height of
+        the bottom of its bounding box above the ego's ground plane, so a
+        walker and a car asked for ``up_m=0`` both stand on the road. It is
+        spawned with clearance first, because the server refuses a spawn that
+        intersects the road, then moved to its resting pose.
 
         Raises:
             SimulatorUnavailableError: no ego exists, or the location is
@@ -392,7 +423,7 @@ class CarlaSimulationSession:
         carla = self._require_carla()
         world = self._require_world()
         blueprint = self._find_blueprint(blueprint_id)
-        cx, cy, cz = self._world_position_for(forward_m, left_m, up_m)
+        cx, cy, cz = self._world_position_for(forward_m, left_m, up_m + SPAWN_CLEARANCE_M)
 
         transform = carla.Transform(
             carla.Location(x=cx, y=cy, z=cz), carla.Rotation(yaw=self._ego_yaw())
@@ -405,20 +436,25 @@ class CarlaSimulationSession:
                 details={"blueprint": blueprint_id, "forward_m": forward_m},
             )
         self._actors.append(actor)
+        actor.set_simulate_physics(False)
+        self._stand_offsets[int(actor.id)] = _stand_offset(actor)
+        self.place_ahead_of_ego(actor, forward_m=forward_m, left_m=left_m, up_m=up_m)
         return actor
 
     def place_ahead_of_ego(
-        self, actor: Any, *, forward_m: float, left_m: float = 0.0, up_m: float = 0.5
+        self, actor: Any, *, forward_m: float, left_m: float = 0.0, up_m: float = 0.0
     ) -> None:
         """Move an actor to an ego-relative pose.
 
         Scripted rather than physical: setting the transform each tick makes
         the motion exactly reproducible, which physics and traffic autopilot
         are not (ADR-044). Phase 9 needs repeatable observations, not realistic
-        dynamics.
+        dynamics. ``up_m`` is the height of the bottom of the actor's bounding
+        box above the ego's ground plane (ADR-054).
         """
         carla = self._require_carla()
-        cx, cy, cz = self._world_position_for(forward_m, left_m, up_m)
+        stand = self._stand_offsets.get(int(actor.id), 0.0)
+        cx, cy, cz = self._world_position_for(forward_m, left_m, up_m + stand)
         actor.set_transform(
             carla.Transform(carla.Location(x=cx, y=cy, z=cz), carla.Rotation(yaw=self._ego_yaw()))
         )
@@ -528,27 +564,45 @@ class CarlaSimulationSession:
                 f"map '{self._map_name}' offers no spawn points",
                 details={"map": self._map_name},
             )
-        # Walk the map's spawn points in order and take the first that accepts
-        # the vehicle. Still deterministic - a given map always yields the same
-        # first-accepting index - but no longer wedded to index 0, which the
-        # first live run showed is refused on Town10HD_Opt while every later
-        # point succeeds (CARLA 0.9.16). The index used is recorded on the
-        # status so a run remains reproducible from what it reports.
+        # A pinned index is used and nothing else is tried: the caller asked for
+        # that pose, and quietly taking another would run a different scene.
+        # Otherwise walk the map's spawn points in order and take the first
+        # that accepts - deterministic for a given map and world state, and
+        # robust to a point being occupied, which the first live run met when
+        # an actor left behind by a killed process sat on index 0. The index
+        # used is recorded on the status so a run is reproducible from what it
+        # reports (ADR-049).
+        pinned = self._settings.ego_spawn_index
+        if pinned is not None:
+            if pinned >= len(spawn_points):
+                raise SimulatorUnavailableError(
+                    f"ego_spawn_index {pinned} is out of range: map '{self._map_name}' has "
+                    f"{len(spawn_points)} spawn points",
+                    details={"ego_spawn_index": pinned, "spawn_points": len(spawn_points)},
+                )
+            candidates = [(pinned, spawn_points[pinned])]
+        else:
+            candidates = list(enumerate(spawn_points))
         actor = None
-        for index, transform in enumerate(spawn_points):
+        for index, transform in candidates:
             actor = world.try_spawn_actor(blueprint, transform)
             if actor is not None:
                 self._ego_spawn_index = index
                 self._ego_spawn_transform = transform
                 break
         if actor is None:
+            where = (
+                f"spawn point {pinned}"
+                if pinned is not None
+                else f"any of the {len(spawn_points)} spawn points"
+            )
             raise SimulatorUnavailableError(
-                f"could not spawn the ego vehicle '{self._settings.ego_blueprint}' at any "
-                f"of the {len(spawn_points)} spawn points of '{self._map_name}'; every "
-                "location is occupied or colliding",
+                f"could not spawn the ego vehicle '{self._settings.ego_blueprint}' at {where} "
+                f"of '{self._map_name}'; the location is occupied or colliding",
                 details={
                     "blueprint": self._settings.ego_blueprint,
                     "spawn_points": len(spawn_points),
+                    "ego_spawn_index": pinned,
                 },
             )
         if self._ego_spawn_index:
@@ -558,6 +612,40 @@ class CarlaSimulationSession:
             )
         self._ego = actor
         self._actors.append(actor)
+        self._ground_ego(actor, self._ego_spawn_transform)
+
+    def _ground_ego(self, actor: Any, spawn_transform: Any) -> None:
+        """Stop the ego simulating physics and stand it on the road surface.
+
+        A map spawn point sits about 0.6 m above the road so a spawned vehicle
+        has clearance; with physics on, the ego then falls for half a second
+        and every ego-relative placement, and the LiDAR, falls with it
+        (Experiment 011). The ego never drives (ADR-047), so physics buys
+        nothing: it is switched off and the ego is set down at the road
+        surface under the spawn point, which is where the measured settled
+        pose was. If the map has no road under the point the spawn height is
+        kept and the fact is logged.
+        """
+        carla = self._require_carla()
+        world = self._require_world()
+        actor.set_simulate_physics(False)
+        waypoint = world.get_map().get_waypoint(spawn_transform.location)
+        if waypoint is None:
+            logger.warning(
+                "no road under the ego spawn point; keeping the spawn height",
+                extra={"context": {"spawn_index": self._ego_spawn_index}},
+            )
+            return
+        grounded = carla.Transform(
+            carla.Location(
+                x=float(spawn_transform.location.x),
+                y=float(spawn_transform.location.y),
+                z=float(waypoint.transform.location.z),
+            ),
+            spawn_transform.rotation,
+        )
+        actor.set_transform(grounded)
+        self._ego_spawn_transform = grounded
 
     def _attach_lidar(self) -> None:
         carla = self._require_carla()
@@ -573,6 +661,13 @@ class CarlaSimulationSession:
             "upper_fov": str(settings.lidar_upper_fov_deg),
             "lower_fov": str(settings.lidar_lower_fov_deg),
             "dropoff_general_rate": str(settings.lidar_dropoff_general_rate),
+            # The sensor's own random number generator - point drop-off and
+            # atmospheric attenuation draw from it. Left unseeded, two runs
+            # of one scenario return different point counts and everything
+            # downstream diverges (Experiment 011); seeded, the sensor is
+            # repeatable. ``settings.seed`` is the scenario seed when a
+            # scenario is running (ADR-046).
+            "noise_seed": str(settings.seed),
         }
         for key, value in attributes.items():
             if blueprint.has_attribute(key):

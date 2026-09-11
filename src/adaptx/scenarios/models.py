@@ -79,10 +79,11 @@ class Placement(AdaptXModel):
     forward_m: float = Field(description="Metres ahead of the ego reference.")
     left_m: float = Field(default=0.0, description="Metres to the left of the ego reference.")
     up_m: float = Field(
-        default=0.5,
+        default=0.0,
         description=(
-            "Metres above the ego origin at which to spawn. Slightly above ground "
-            "so a spawned actor settles onto the road instead of clipping into it."
+            "Height of the bottom of the actor's bounding box above the ego's ground "
+            "plane, metres. Zero stands the actor on the road. Placed actors do not "
+            "simulate physics, so this is exactly where the actor stays (ADR-054)."
         ),
     )
 

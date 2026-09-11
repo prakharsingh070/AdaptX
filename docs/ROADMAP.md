@@ -327,8 +327,10 @@ CARLA became an upstream **data source**, not a second perception stack.
 **Live-validated on 2026-09-11** against CARLA 0.9.16 on Town10HD_Opt: `pytest -m carla`
 7/7 pass (Experiment 010). Three real-server behaviours the stand-in could not show were
 found and fixed with fake-backed regressions: a spawned actor reports the origin until the
-first tick (ADR-049), spawn point 0 refuses every spawn (points walked in order), and the
-package exposes no `__version__` (the server's own is recorded). Requires a Python 3.12
+first tick (ADR-049), an occupied spawn point is walked past (the point 0 refusal turned
+out in Experiment 011 to be a stale actor from a killed run; `ego_spawn_index` can pin a
+point), and the package exposes no `__version__` (the server's own is recorded). Experiment
+011 also found `carla.seed` was applied to nothing and now seeds the LiDAR. Requires a Python 3.12
 environment, because no `carla` wheel exists for 3.13. Nothing in this phase is a CARLA
 accuracy claim.
 
@@ -400,18 +402,33 @@ measures orchestration cost alone (~35 µs to resolve, ~7 µs per actor per fram
 - References: [`knowledge-base/12_scenario-generation.md`](knowledge-base/12_scenario-generation.md),
   [`knowledge-base/14_event-replay.md`](knowledge-base/14_event-replay.md).
 
-## Phase 11 — Benchmarking · **To do**
+## Phase 11 — Evaluation and benchmarking · **Done**
 
-- Phase 8 delivered the first fixed-versus-adaptive comparison (Experiment 007) over
-  synthetic scenes with hand-specified risk. Phase 11 is the same comparison over *scenario*
-  input, with the whole chain in the loop.
-- Run identical scenarios through fixed-resolution and adaptive perception; record
-  measured performance, workload and perception metrics into
-  [`experiments/experiment-log.md`](experiments/experiment-log.md).
-- Read [`knowledge-base/20-constraints.md`](knowledge-base/20-constraints.md) before any
-  benchmarking or demo work.
+- `adaptx.evaluation`: an offline evaluation layer that reads a recorded `ScenarioRunResult`
+  and produces an `EvaluationReport` — detection and tracking against ground truth at
+  several gates, ADE/FDE, risk against proximity events, map workload, adaptive resolution
+  paired against the fixed map within one run, resource; `python -m adaptx.evaluation
+  evaluate|compare|run`. Architecture and metric definitions in
+  [`EVALUATION.md`](EVALUATION.md); ADR-050/051/052/053.
+- The Phase 10 record gained the pipeline's result contracts per frame and the sensor
+  configuration, additively; it still carries no metric.
+- Ground truth reaches `adaptx.evaluation` and nothing else — asserted in a subprocess and
+  by source inspection. No production package imports the evaluation layer.
+- **Measured (Experiment 011, simulation evidence only):** the baselines lost, as the
+  handoff predicted. Vehicle detection recall 0.23–0.61 at a 2 m gate with a consistent
+  1.5–1.7 m planar offset and no vehicle ever classified as one; 1–3 identity switches per
+  moving actor; ADE 1.5–3.4 m mean; risk concordance with proximity 0.80–0.86 for moving
+  actors; the adaptive map at 0.48–0.56 of the fixed map's cells and 5× its build time,
+  with finer cells under the perceived actor than elsewhere. The placement defect that
+  confounded the pedestrian scenario (a placed walker falling through the road) was fixed
+  in ADR-054 and everything re-measured (Experiment 012): a static scene is now
+  bit-repeatable; under the process defaults (ground segmentation off) a parked car and a
+  pedestrian are never detected, and with ground segmentation on both are seen on every
+  frame — the default is an open Phase 2/3 decision.
+- **Not evaluated:** mapping occupancy accuracy (no honest reference), precision over
+  unlabelled tracks, peak memory, anything real-world. Nothing was tuned.
 
-## Phase 12 — Dashboard and final integration · **To do**
+## Phase 12 — Dashboard and final integration · **To do (next)**
 
 - Build the dashboard against the existing backend contracts. Perception logic must not
   live in the UI.

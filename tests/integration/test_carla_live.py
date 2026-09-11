@@ -29,7 +29,7 @@ import pytest
 
 from adaptx.carla.client import carla_package_available
 from adaptx.carla.session import CarlaSimulationSession
-from adaptx.config.settings import CarlaSettings, Settings
+from adaptx.config.settings import Settings
 from adaptx.core.exceptions import SimulatorUnavailableError
 from adaptx.core.lifecycle import build_context
 from adaptx.models.common import DataSource
@@ -39,13 +39,22 @@ pytestmark = pytest.mark.carla
 
 
 def live_settings() -> Settings:
-    """Settings pointed at a real server, with a short run."""
-    carla = CarlaSettings(enabled=True, sensor_timeout_s=20.0)
-    return Settings(
+    """Settings pointed at a real server, with a short run.
+
+    The ``carla`` section is read from the environment (``ADAPTX_CARLA__*``)
+    and then switched on: host, port and - on Town10HD_Opt - the spawn point
+    are properties of the server being tested, not of the test. The catalogue's
+    placements are ego-relative and on that map are on the road only from
+    spawn point 1, so run with ``ADAPTX_CARLA__EGO_SPAWN_INDEX=1`` there
+    (Experiment 011).
+    """
+    settings = Settings(
         app={"environment": "development", "debug": True},
         logging={"level": "WARNING"},
-        carla=carla.model_dump(),
     )
+    settings.carla.enabled = True
+    settings.carla.sensor_timeout_s = 20.0
+    return settings
 
 
 def require_live_server() -> Settings:

@@ -9,9 +9,11 @@ match rate anywhere in these contracts, because computing one is evaluation
 and evaluation is Phase 11. A result that carried "detection accuracy: 94%"
 would be presenting a Phase 11 claim without Phase 11 having been done.
 
-What it does carry is everything Phase 11 will need to compute those things:
+What it does carry is everything Phase 11 needs to compute those things:
 for every frame, the simulator frame id joins the LiDAR frame to its ground
-truth, and the scripted expected pose sits beside both.
+truth, the scripted expected pose sits beside both, and - since Phase 11 -
+the pipeline's own result contracts for the frame sit in ``outputs``, so the
+comparison can be made offline from the record alone (ADR-050).
 """
 
 from __future__ import annotations
@@ -22,7 +24,14 @@ from itertools import pairwise
 from pydantic import Field, model_validator
 
 from adaptx.carla.ground_truth import GroundTruthFrame
+from adaptx.models.adaptive_map import AdaptiveSpatialMapSummary, MappingComparison
+from adaptx.models.adaptive_resolution import ResolutionPlan
 from adaptx.models.common import AdaptXModel, DataSource, TimestampedModel, Vector3
+from adaptx.models.detection import DetectionResult
+from adaptx.models.prediction_result import PredictionResult
+from adaptx.models.risk_assessment import RiskAssessmentResult
+from adaptx.models.spatial_map import SpatialMapSummary
+from adaptx.models.tracking_result import TrackingResult
 from adaptx.scenarios.models import ResolvedScenario, ScenarioState
 
 
@@ -67,6 +76,78 @@ class StageCounts(AdaptXModel):
         return sum(self.stage_ms.values())
 
 
+class PipelineFrameOutputs(AdaptXModel):
+    """What the pipeline produced for one frame - the result contracts themselves.
+
+    Raw evidence, exactly as Phase 3-8 emitted it: every track with its
+    position, every trajectory with its points, every assessment with its
+    score, every tile with its level. None of it is compared with anything
+    here. Kept because :class:`StageCounts` cannot support a position error,
+    an ADE or a churn figure, and Phase 11 computes those offline from the
+    record rather than by re-running perception (ADR-050).
+
+    The point cloud and the map grids are **not** here: the summaries are.
+    """
+
+    detection: DetectionResult
+    tracking: TrackingResult
+    prediction: PredictionResult
+    risk: RiskAssessmentResult
+    fixed_map: SpatialMapSummary
+    adaptive_map: AdaptiveSpatialMapSummary
+    plan: ResolutionPlan
+    comparison: MappingComparison = Field(
+        description="Fixed-versus-adaptive workload of this frame, paired by construction."
+    )
+    processing_ms: float = Field(
+        ge=0.0, description="Measured Phase 2 preprocessing time for the frame."
+    )
+
+    def counts(self) -> StageCounts:
+        """The Phase 10 count record these outputs reduce to."""
+        return StageCounts(
+            processed_points=self.detection.input_point_count,
+            detections=len(self.detection.objects),
+            tracks=len(self.tracking.tracks),
+            trajectories=len(self.prediction.trajectories),
+            risk_level=self.risk.highest_risk_level.value,
+            adaptive_cells=self.adaptive_map.accounting.total_cell_count,
+            fixed_cells=self.fixed_map.accounting.total_cell_count,
+            regions_by_level=dict(self.adaptive_map.tiles_by_level),
+            stage_ms={
+                "processing": self.processing_ms,
+                "detection": self.detection.duration_ms,
+                "tracking": self.tracking.duration_ms,
+                "prediction": self.prediction.duration_ms,
+                "mapping": self.fixed_map.duration_ms,
+                "risk": self.risk.duration_ms,
+                "controller": self.plan.duration_ms,
+                "adaptive_mapping": self.adaptive_map.mapping_duration_ms,
+            },
+        )
+
+
+class SensorConfiguration(AdaptXModel):
+    """The LiDAR the run used, as configured - not as measured.
+
+    Recorded so a result is reproducible without the environment that made
+    it, and so evaluation can relate the sensor frame to the ego frame: the
+    mount offset is the one thing that separates them.
+    """
+
+    channels: int = Field(ge=1)
+    range_m: float = Field(gt=0.0)
+    points_per_second: int = Field(ge=1)
+    rotation_frequency_hz: float = Field(gt=0.0)
+    upper_fov_deg: float
+    lower_fov_deg: float
+    dropoff_general_rate: float = Field(ge=0.0, le=1.0)
+    mount: Vector3 = Field(
+        description="Sensor origin relative to the ego origin, ADAPT-X frame (metres)."
+    )
+    include_intensity: bool
+
+
 class ScenarioFrameRecord(AdaptXModel):
     """One frame of a run, with the identifiers that join it to everything else."""
 
@@ -82,6 +163,26 @@ class ScenarioFrameRecord(AdaptXModel):
     pipeline: StageCounts | None = Field(
         default=None, description="Null when the frame was recorded without processing."
     )
+    outputs: PipelineFrameOutputs | None = Field(
+        default=None,
+        description=(
+            "The pipeline's result contracts for the frame, when they were recorded. "
+            "Null for a counts-only record or an unprocessed frame."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_outputs_agree_with_counts(self) -> ScenarioFrameRecord:
+        if self.outputs is None:
+            return self
+        if self.pipeline is None:
+            raise ValueError("a frame with recorded outputs must also carry its stage counts")
+        if self.outputs.counts() != self.pipeline:
+            raise ValueError(
+                f"frame {self.frame_index}: the recorded outputs do not reduce to the "
+                "recorded stage counts; the record is inconsistent"
+            )
+        return self
 
 
 class ScenarioRunResult(TimestampedModel):
@@ -103,6 +204,9 @@ class ScenarioRunResult(TimestampedModel):
     map_name: str | None = None
     simulator_version: str = Field(min_length=1)
     fixed_delta_seconds: float = Field(gt=0.0)
+    sensor: SensorConfiguration | None = Field(
+        default=None, description="The LiDAR configuration the run used; null on older records."
+    )
 
     frames: list[ScenarioFrameRecord] = Field(default_factory=list)
     ground_truth: list[GroundTruthFrame] = Field(default_factory=list)
@@ -138,6 +242,12 @@ class ScenarioRunResult(TimestampedModel):
     def planned_frame_count(self) -> int:
         """Frames the definition asked for."""
         return self.resolved.definition.frame_count
+
+    @property
+    def has_outputs(self) -> bool:
+        """Whether every processed frame carries the pipeline's result contracts."""
+        processed = [record for record in self.frames if record.pipeline is not None]
+        return bool(processed) and all(record.outputs is not None for record in processed)
 
     @property
     def completed(self) -> bool:
