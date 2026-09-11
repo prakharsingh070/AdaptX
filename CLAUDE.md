@@ -14,7 +14,9 @@ The central innovation is risk-aware adaptive perception: low-risk regions use c
 
 LiDAR / CARLA -> point-cloud processing -> ground and noise filtering -> object detection -> object tracking -> trajectory prediction -> 2.5D occupancy mapping -> risk and uncertainty estimation -> predictive risk -> adaptive resolution controller -> adaptive 2.5D map -> benchmarking -> dashboard.
 
-Stages up to and including the adaptive resolution controller are implemented as deterministic, explainable baselines. Nothing after it is implemented.
+Stages up to and including the adaptive resolution controller are implemented as
+deterministic, explainable baselines, and CARLA can now feed them simulated LiDAR.
+Nothing after that is implemented.
 
 ## Core Modules
 
@@ -157,8 +159,22 @@ every component in `services/system_service.py` agree with the list below.
   slower in wall-clock time than the fixed mapper in every scene - cost scales with region
   count, not cells. The fixed-resolution mapper is retained unchanged as the baseline. No
   learned policy, no ego planned path, no per-cell risk field, no occlusion model.
-- Phase 9: CARLA - TODO (next)
-- Phase 10: Scenario generation and replay - TODO
+- Phase 9: CARLA - DONE as a deterministic simulation boundary (CARLA is a DATA
+  SOURCE upstream of the pipeline, not a second perception stack; `CarlaSimulationSession`
+  owns connect -> configure -> spawn -> attach LiDAR -> tick -> close with actor cleanup on
+  failure and world settings restored; CARLA's left-handed frame converts to ADAPT-X's
+  right-handed frame EXACTLY ONCE in `carla/conversion.py`, which imports no simulator and
+  is therefore fully testable without one; simulation time is authoritative - never the wall
+  clock - so frame intervals are exactly `fixed_delta_seconds`; frames are labelled
+  `source=simulation` and enter the existing Phase 2 ingest path unchanged; ground truth is
+  published on a SEPARATE path and never reaches detection, tracking, prediction, risk or
+  adaptive resolution; one hard-coded smoke scenario via `python -m adaptx.carla.smoke`;
+  ADR-042/043/044/045). NO LIVE CARLA RUN HAS BEEN EXECUTED: the `carla` package is not
+  installed here, so the live smoke test skips and Experiment 008 records only the
+  conversion cost of ADAPT-X's own code. Phases 1-8 were not modified to accommodate CARLA.
+  Ground truth now exists, which makes accuracy measurable for the first time - but nothing
+  measures it yet; that is Phase 11.
+- Phase 10: Scenario generation and replay - TODO (next)
 - Phase 11: Benchmarking - TODO
 - Phase 12: Dashboard and final integration - TODO
 

@@ -70,7 +70,11 @@ indent-style = "space"
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# `-m "not carla"` makes the marker description below true: the default run
+# never needs a simulator. Select those tests explicitly with `-m carla`, which
+# overrides this. They also skip themselves when CARLA is absent, so choosing
+# them on a machine without it reports "skipped", never a false failure.
+addopts = '-ra --strict-markers -m "not carla"'
 asyncio_mode = "auto"
 markers = [
     "carla: tests that require a real CARLA server (deselected by default)",

@@ -4,12 +4,20 @@ The ``carla`` Python package is an optional dependency. It is imported lazily
 inside :meth:`CarlaClient.connect` so that importing ADAPT-X, starting the API
 and running the test suite never require CARLA.
 
-Scope in Phase 1
-----------------
-This class establishes the connection and reports the loaded world. Sensor
-attachment, actor spawning and ego-state extraction raise
-:class:`~adaptx.core.exceptions.SimulatorUnavailableError` with an explicit
-"not implemented in Phase 1" message rather than returning invented data.
+Scope
+-----
+This class owns the **connection**: reaching a server, reporting the loaded
+world, and answering the status endpoint. That is all it has ever done, and
+Phase 9 did not widen it.
+
+Running a simulation - deterministic settings, actors, the LiDAR sensor,
+ticking and cleanup - belongs to
+:class:`adaptx.carla.session.CarlaSimulationSession`, which is a session with a
+lifecycle rather than a connection handle (ADR-042). The actor and sensor
+methods on this contract therefore say where the operation actually lives
+instead of returning invented data. Two objects rather than one, because
+"am I connected?" and "is a simulation running?" are genuinely different
+questions with different lifetimes.
 """
 
 from __future__ import annotations
@@ -27,9 +35,10 @@ from adaptx.models.vehicle import VehicleState
 
 logger = get_logger(__name__)
 
-_PHASE_1_NOTE = (
-    "not implemented in Phase 1: the CARLA boundary establishes connection and "
-    "world information only"
+_SESSION_NOTE = (
+    "not available on the connection client: simulation operations belong to "
+    "adaptx.carla.session.CarlaSimulationSession, which owns actor and sensor "
+    "lifetimes and cleans them up (Phase 9)"
 )
 
 
@@ -111,23 +120,23 @@ class CarlaClient(CarlaSimulatorClient):
 
     def get_vehicle_state(self) -> VehicleState:
         self._require_world()
-        raise SimulatorUnavailableError(f"get_vehicle_state {_PHASE_1_NOTE}")
+        raise SimulatorUnavailableError(f"get_vehicle_state {_SESSION_NOTE}")
 
     def get_sensor_data(self) -> PointCloudFrame | None:
         self._require_world()
-        raise SimulatorUnavailableError(f"get_sensor_data {_PHASE_1_NOTE}")
+        raise SimulatorUnavailableError(f"get_sensor_data {_SESSION_NOTE}")
 
     def spawn_vehicle(self, blueprint_id: str, *, role: str = "") -> CarlaActorRef:
         self._require_world()
-        raise SimulatorUnavailableError(f"spawn_vehicle {_PHASE_1_NOTE}")
+        raise SimulatorUnavailableError(f"spawn_vehicle {_SESSION_NOTE}")
 
     def spawn_actor(self, blueprint_id: str, *, role: str = "") -> CarlaActorRef:
         self._require_world()
-        raise SimulatorUnavailableError(f"spawn_actor {_PHASE_1_NOTE}")
+        raise SimulatorUnavailableError(f"spawn_actor {_SESSION_NOTE}")
 
     def destroy_actor(self, actor_id: int) -> bool:
         self._require_world()
-        raise SimulatorUnavailableError(f"destroy_actor {_PHASE_1_NOTE}")
+        raise SimulatorUnavailableError(f"destroy_actor {_SESSION_NOTE}")
 
     def _require_client(self) -> Any:
         if self._client is None:

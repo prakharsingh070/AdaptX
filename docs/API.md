@@ -188,6 +188,29 @@ No value here is estimated, extrapolated or defaulted.
 
 ## `GET /api/v1/carla/status`
 
+Reports **three independent facts**, because any two of them can disagree and collapsing
+them into one word would lose information:
+
+| Field | Question it answers |
+|---|---|
+| `client_available` | Is the optional `carla` package importable? |
+| `status` | Is a server actually connected? |
+| `simulation.state` | Is a deterministic simulation configured and stepping? |
+
+A machine with the package installed but no server running is `client_available: true`,
+`DISCONNECTED`, `IDLE`.
+
+`simulation` carries the Phase 9 session: lifecycle state, map, timestep, simulator frame
+and clock, ego and sensor actor ids, actors spawned, and the point count of the most recent
+frame. **Counts only** — never point data, never ground truth, never an actor list.
+
+`simulation.state` is one of `IDLE`, `CONFIGURING`, `READY`, `RUNNING`, `STOPPED`, `ERROR`.
+
+> **Phase 9 adds no endpoint that starts or steps a simulation.** Spawning actors and
+> ticking a simulator from an unauthenticated HTTP surface is not something this API should
+> offer (ADR-042), so the simulation is driven by `python -m adaptx.carla.smoke` and this
+> endpoint only *reports* what a session is doing.
+
 **200 OK**
 
 ```json
@@ -199,7 +222,21 @@ No value here is estimated, extrapolated or defaulted.
   "host": "localhost",
   "port": 2000,
   "world": null,
-  "detail": "CARLA is disabled"
+  "detail": "CARLA is disabled",
+  "simulation": {
+    "state": "IDLE",
+    "map_name": null,
+    "synchronous_mode": false,
+    "fixed_delta_seconds": null,
+    "frames_stepped": 0,
+    "simulation_frame": null,
+    "simulation_time_s": null,
+    "ego_actor_id": null,
+    "sensor_actor_id": null,
+    "actor_count": 0,
+    "last_point_count": null,
+    "detail": ""
+  }
 }
 ```
 

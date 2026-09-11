@@ -64,10 +64,22 @@ class LoggingSettings(BaseModel):
 
 
 class CarlaSettings(BaseModel):
-    """CARLA simulator connection settings.
+    """CARLA simulator connection, determinism and sensor settings (Phase 9).
 
     CARLA is optional. When ``enabled`` is false the backend never attempts a
     connection and reports ``DISCONNECTED``.
+
+    Coordinate convention
+    ---------------------
+    Every distance and offset here is in the **ADAPT-X** frame (ADR-009):
+    +x forward, +y left, +z up, metres. CARLA's own frame is left-handed with
+    +y to the right, and the conversion happens exactly once at the boundary
+    (ADR-043). Configuration is never expressed in CARLA's frame, so a reader
+    never has to ask which convention a number is in.
+
+    These are **baseline engineering values** chosen as a plausible starting
+    point for a roof-mounted automotive scanner. None has been tuned, and none
+    is a measured or optimal figure.
     """
 
     enabled: bool = False
@@ -77,6 +89,116 @@ class CarlaSettings(BaseModel):
     # Development-only in-process fake simulator. Data produced through it is
     # labelled SYNTHETIC_TEST and must never be presented as sensor output.
     use_mock: bool = False
+
+    # -- world and determinism --------------------------------------------
+    town: str | None = Field(
+        default=None,
+        description=(
+            "Map to load, e.g. 'Town03'. None keeps whatever the server already "
+            "has loaded, which avoids a slow reload when it is already correct."
+        ),
+    )
+    synchronous_mode: bool = Field(
+        default=True,
+        description=(
+            "Run the simulator in lockstep with ADAPT-X. Required for "
+            "determinism: tracking measures velocity from frame intervals, and "
+            "adaptive resolution counts frames (ADR-044)."
+        ),
+    )
+    fixed_delta_seconds: float = Field(
+        default=0.05,
+        gt=0.0,
+        le=0.1,
+        description=(
+            "Simulation timestep. CARLA's physics becomes unreliable above "
+            "0.1 s, so that is the hard ceiling. 0.05 s is 20 Hz."
+        ),
+    )
+    seed: int = Field(
+        default=20260101,
+        ge=0,
+        description="Seed for any simulator randomness, so a run is reproducible.",
+    )
+
+    # -- actors ------------------------------------------------------------
+    ego_blueprint: str = Field(default="vehicle.tesla.model3", min_length=1)
+    target_blueprint: str = Field(
+        default="vehicle.audi.tt",
+        min_length=1,
+        description="The second actor in the smoke scenario, moved on a scripted path.",
+    )
+
+    # -- LiDAR sensor ------------------------------------------------------
+    lidar_channels: int = Field(default=32, ge=1, le=128)
+    lidar_range_m: float = Field(default=100.0, gt=0.0)
+    lidar_points_per_second: int = Field(default=560_000, ge=1)
+    lidar_rotation_frequency_hz: float = Field(
+        default=20.0,
+        gt=0.0,
+        description=(
+            "Sweeps per second. Should equal 1/fixed_delta_seconds, or a tick "
+            "delivers a partial sweep; see `sweep_matches_timestep`."
+        ),
+    )
+    lidar_upper_fov_deg: float = Field(default=10.0)
+    lidar_lower_fov_deg: float = Field(default=-30.0)
+    lidar_dropoff_general_rate: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "CARLA's random point dropout. Left at 0.0 so a run is reproducible; "
+            "raising it models sensor noise at the cost of determinism."
+        ),
+    )
+
+    # Sensor mount relative to the ego origin, in the ADAPT-X frame.
+    lidar_x_m: float = Field(default=0.0, description="Forward of the ego origin.")
+    lidar_y_m: float = Field(default=0.0, description="Left of the ego origin.")
+    lidar_z_m: float = Field(default=1.8, description="Above the ego origin (roof mount).")
+
+    sensor_timeout_s: float = Field(
+        default=5.0,
+        gt=0.0,
+        description="How long to wait for a sensor frame after a tick before failing loudly.",
+    )
+    include_intensity: bool = Field(
+        default=True,
+        description=(
+            "Keep CARLA's per-point intensity as a fourth column. The frame "
+            "contract already supports XYZI and every processing stage slices "
+            "the first three columns, so this costs downstream nothing."
+        ),
+    )
+
+    # -- smoke scenario ----------------------------------------------------
+    smoke_frames: int = Field(
+        default=20,
+        ge=2,
+        description=(
+            "Frames the Phase 9 smoke run steps through. At least 2, because a "
+            "single frame cannot produce a measured velocity."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_lidar(self) -> CarlaSettings:
+        if self.lidar_lower_fov_deg >= self.lidar_upper_fov_deg:
+            raise ValueError("carla.lidar_lower_fov_deg must be < carla.lidar_upper_fov_deg")
+        return self
+
+    @property
+    def sweep_matches_timestep(self) -> bool:
+        """Whether one tick delivers exactly one full LiDAR sweep.
+
+        False means each tick returns a partial rotation, which is a valid
+        configuration but makes point counts per frame vary. Reported rather
+        than corrected: silently overriding a configured value would hide it.
+        """
+        return math.isclose(
+            self.lidar_rotation_frequency_hz, 1.0 / self.fixed_delta_seconds, rel_tol=1e-6
+        )
 
 
 class LiDARSettings(BaseModel):

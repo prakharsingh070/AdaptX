@@ -1416,6 +1416,163 @@ it does, by excluding and recording rather than skipping silently.
 
 **Status:** Accepted
 
+## ADR-042: CARLA is a Data Source Behind an Adapter Boundary
+
+**Decision:** CARLA sits **upstream** of the pipeline, not beside it. Everything
+simulator-specific lives in `adaptx.carla` and stops there; the boundary emits a
+`RawPointCloudFrame` and hands it to the existing ingest path. No module outside that
+package imports `carla`, and no downstream stage receives a simulator object.
+
+Two objects divide the work, because they answer different questions with different
+lifetimes. `CarlaClient` owns the **connection** and backs the status endpoint.
+`CarlaSimulationSession` owns a **simulation**: deterministic settings, actors, the sensor,
+ticking and cleanup.
+
+**Reason:** The alternative that destroys the project is a second perception stack - a CARLA
+path that detects, tracks and maps separately from the sensor path. Everything downstream
+would then have two behaviours to maintain and two sets of results to reconcile, and the
+Phase 11 comparison would be measuring the plumbing rather than the perception.
+
+Keeping the boundary at ingest means the simulator changes exactly one thing: where the
+points came from. Phases 2-8 needed no modification at all to consume CARLA, which is the
+evidence the boundary is in the right place.
+
+The client/session split exists because "am I connected to a server?" and "is a simulation
+running?" are genuinely independent - a connected server with no session is a real and
+ordinary state - and because actor lifetimes belong to whatever spawned them, not to a
+long-lived connection handle.
+
+**Alternatives considered:** Extending `CarlaSimulatorClient` with sensors and ticking (one
+object owning a connection *and* actor lifetimes, so a status query and a simulation would
+share state); a CARLA-specific ingest endpoint (a second path through preprocessing);
+converting CARLA data into `PointCloudFrame` directly (skips Phase 2A validation, which is
+where a frame earns its finite-value guarantee, ADR-010).
+
+**Impact:** `python -m adaptx.carla.smoke` drives the boundary. The pipeline is untouched.
+Tests assert structurally that no module outside `adaptx.carla` imports `carla`, and that
+importing the API never requires the package.
+
+**Risks:** The session duplicates a little of what the client could do. That is the price of
+not having one object own two lifetimes, and it is paid once.
+
+**Status:** Accepted
+
+## ADR-043: One Coordinate Conversion, at the Boundary, in a CARLA-Free Module
+
+**Decision:** CARLA's left-handed frame (+y **right**) becomes ADAPT-X's right-handed frame
+(+y **left**) exactly once, in `adaptx.carla.conversion`. That module imports no simulator:
+it takes plain floats, bytes and arrays. Configuration - including the sensor mount offset -
+is expressed in the **ADAPT-X** convention, and the one value travelling outward is converted
+by the same function.
+
+**Reason:** ADR-009 predicted this conversion and named Phase 9 as its trigger. What it could
+not predict is the failure mode, which is why the placement matters: **a dropped sign flip
+is silent**. Every object appears on the wrong side of the vehicle, nothing raises, no
+contract is violated, and the pipeline produces confident output about a mirrored world.
+
+That makes testability the deciding constraint. Putting the conversion in a module with no
+`import carla` means the arithmetic can be tested exhaustively on any machine, including one
+with no simulator - which is every machine this project has run on so far. Had it lived in
+the session, it would have been reachable only through a stand-in simulator, and the tests
+would have been testing the stand-in.
+
+Configuring the mount in ADAPT-X coordinates follows from the same rule: a reader should
+never have to ask which convention a number is in. One function converts it outward at the
+moment it is handed to CARLA.
+
+**Alternatives considered:** Converting inside the session (untestable without CARLA);
+converting downstream, per consumer (the scattering ADR-009 exists to prevent); configuring
+the mount in CARLA's frame (mixes conventions in the one file a user actually edits);
+adopting CARLA's frame project-wide (contradicts ADR-009, ISO 8855 and the yaw definition
+already in the Phase 1 models).
+
+**Impact:** Yaw converts with the same handedness change expressed as an angle
+(`heading = -yaw`), so positions and orientations cannot disagree. An end-to-end test places
+a target to the ego's left and asserts detection reports it on the left - which fails if the
+flip is ever removed.
+
+**Risks:** CARLA's pitch and roll are not converted, because nothing consumes them yet. A
+tilted mount would need them, and that is the trigger to extend this module rather than to
+work around it.
+
+**Status:** Accepted
+
+## ADR-044: Synchronous Simulation and Simulation-Authoritative Time
+
+**Decision:** CARLA runs in synchronous mode with a fixed timestep, stepped explicitly. Frame
+timestamps come from the simulator clock, anchored to a fixed epoch - never from
+`time.time()`, `datetime.now()`, or a sleep. Scenario motion is scripted by setting
+transforms, not driven by physics or autopilot.
+
+**Reason:** Three phases already depend on temporal semantics, and all three break quietly
+under a free-running simulator. Phase 4 measures velocity from the interval between frames.
+Phase 5 extrapolates over that interval. Phase 8 counts frames for its dwell time. Wall-clock
+timestamps would make velocity a function of how busy the machine was, and a re-run of the
+same scenario would produce different tracks, different trajectories and a different
+resolution allocation.
+
+Simulation time is a duration since server start, so it is anchored to a fixed epoch to
+become an absolute, ordered instant. The epoch's value is arbitrary and means nothing; that
+it never changes is the point.
+
+Scripted motion rather than physics for the same reason: CARLA's physics is not
+frame-reproducible, and Phase 9 needs repeatable observations rather than realistic dynamics.
+
+**Alternatives considered:** Asynchronous mode (non-deterministic sensor delivery, and
+tracking silently degrades); wall-clock timestamps (velocity becomes a measure of machine
+load); autopilot or the traffic manager for motion (introduces simulator randomness the
+scenario cannot control); sleeping between ticks (slower and still not deterministic).
+
+**Impact:** The session captures world settings before changing them and restores them on
+close, including after a failed setup - a server left in synchronous mode blocks on a client
+that has gone away and looks to the next user like a hung simulator. Tests assert the
+interval is exactly `fixed_delta_seconds` and that two runs produce identical frames.
+
+**Risks:** Synchronous mode means ADAPT-X paces the simulator, so a slow pipeline slows the
+simulation. That is the correct trade for reproducibility, and it makes wall-clock throughput
+a meaningless figure - which is why none is claimed.
+
+**Status:** Accepted
+
+## ADR-045: Ground Truth is a Separate Path and Never Enters Perception
+
+**Decision:** The simulator's own knowledge of the scene is published as `GroundTruthFrame`
+on a path parallel to the LiDAR frame, sharing its `frame_id` and timestamp so the two can be
+joined later. It is **never** passed to detection, tracking, prediction, mapping, risk or
+adaptive resolution. Its contracts are distinct from the perception models and carry no
+confidence field.
+
+**Reason:** Ground truth is the reason CARLA is worth having: it is the first thing in this
+project that can say what was actually there, and therefore the precondition for measuring
+accuracy at all (Phase 11). That value exists only while it stays out of the pipeline. A
+detector that can see the answer measures nothing, and the resulting accuracy figure would
+look exactly like a real one.
+
+The risk is not that someone would do this deliberately; it is that it is *convenient*.
+Correcting a track id from ground truth, or labelling a detection with the true class, each
+look like a small improvement and each silently invalidate every measurement taken
+afterwards.
+
+Separate contracts rather than reused ones for the same reason. `DetectedObject` and
+`TrackedObject` carry confidence, uncertainty and lifecycle - the apparatus of something
+inferred. Ground truth is exact, so a confidence field on it would be meaningless, and its
+presence would invite treating a known quantity as an estimated one.
+
+**Alternatives considered:** Reusing `DetectedObject` for ground truth (makes known and
+inferred indistinguishable at a glance); attaching ground truth to the frame (puts it one
+attribute access away from every stage); a ground-truth-assisted mode for debugging (the mode
+that eventually gets left on).
+
+**Impact:** An integration test runs the chain twice - once reading ground truth every frame,
+once never reading it - and asserts identical output. Another asserts structurally, in a
+subprocess, that no perception module imports the CARLA package at all.
+
+**Risks:** Ground truth in the ego frame depends on the same conversion as everything else, so
+a conversion bug would move both together and the comparison would flatter the perception.
+The conversion tests are the mitigation.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title
