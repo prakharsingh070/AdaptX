@@ -226,6 +226,25 @@ class TestSystemService:
         assert "NOT A PROBABILITY OF COLLISION" in adaptive.detail
         assert "never validated against labelled data" in adaptive.detail
 
+    def test_carla_is_partial_and_admits_no_live_run(self, context: ApplicationContext) -> None:
+        """Phase 9 added the simulation boundary, and it is unexercised live.
+
+        An adapter existing is not the same as an adapter having been run
+        against a real server. The component must say which, must never
+        report IMPLEMENTED, and must point at the live-state field rather than
+        duplicate it.
+        """
+        components = {c.name: c for c in context.system.status().components}
+        carla = components["carla"]
+
+        assert carla.implementation is ImplementationStatus.PARTIAL
+        assert carla.implementation is not ImplementationStatus.IMPLEMENTED
+        assert carla.phase == 9
+        assert carla.required is False
+        assert "NO LIVE CARLA RUN HAS BEEN EXECUTED" in carla.detail
+        assert "never reaches detection" in carla.detail
+        assert "DATA SOURCE" in carla.detail
+
     def test_prediction_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext
     ) -> None:

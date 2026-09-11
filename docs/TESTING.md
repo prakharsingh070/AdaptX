@@ -8,6 +8,14 @@ document covers the suite that exists today and how to extend it.
 
 ## Running the suite
 
+CARLA is optional and the default run never needs it:
+
+```bash
+pytest                 # everything except the live CARLA tests
+pytest -m carla        # live tests; skip cleanly without a server
+```
+
+
 ```bash
 .venv\Scripts\python.exe -m pytest
 ```
@@ -218,6 +226,33 @@ enforced by CI rather than by review:
   "probability", "calibrated", "validated", "guaranteed" or "safe".
 - **The baseline survives.** The Phase 6 mapper still reports `is_adaptive: false`, still uses
   `source: fixed`, and `POST /api/v1/lidar/map` is unchanged.
+
+### CARLA simulation boundary (Phase 9)
+
+CARLA is optional and is **not installed** in this environment. The suite is split so that
+never becomes a false failure:
+
+- **Conversion** (`test_carla_conversion.py`) needs no simulator at all, because
+  `adaptx.carla.conversion` imports none. Axis flips, handedness (a cross product check),
+  yaw sense, round-trip ego/world transforms, buffer decoding, and simulation-time
+  anchoring. This is the largest group on purpose: a dropped sign flip mirrors the world
+  **silently**.
+- **Lifecycle** (`test_carla_session.py`) runs against `tests/fixtures/fake_carla.py`, a
+  stand-in. Spawn order, cleanup after a failed setup, world settings restored, a stubborn
+  actor not stranding the rest, sensor timeouts, stale-frame rejection, and frames advancing
+  by exactly one timestep.
+- **Integration** (`test_carla_pipeline.py`) pushes simulated frames through the real
+  Phase 2-8 chain. The sharpest case places a target to the ego's **left** and asserts
+  detection reports it on the left - which fails if the boundary conversion is ever removed.
+- **Separation** - the chain is run twice, once reading ground truth every frame and once
+  never reading it, asserting identical output. A second check confirms in a subprocess that
+  no perception module imports the CARLA package at all.
+- **Live** (`test_carla_live.py`) is the only test that touches a real server. It is
+  deselected by default (`-m "not carla"`) *and* skips itself when the package or server is
+  absent. Run it with `pytest -m carla`.
+
+What the stand-in **cannot** prove: anything about CARLA itself - its API compatibility, its
+sensor model or its performance. No figure produced against it is a CARLA measurement.
 
 ## Conventions for new tests
 

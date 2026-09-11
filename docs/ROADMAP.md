@@ -298,12 +298,46 @@ cells. Cost scales with **region count, not cell count** (~120 µs per region); 
 - Tuning the weights and thresholds against outcomes, which needs outcomes to be recorded.
 - Reference: [`knowledge-base/10_adaptive-resolution.md`](knowledge-base/10_adaptive-resolution.md).
 
-## Phase 9 — CARLA · **To do**
+## Phase 9 — CARLA · **Done (simulation boundary)**
 
-- Complete `CarlaClient`: sensor attachment, ego-state extraction, actor spawning and
-  cleanup (each currently raises an explicit "not implemented in Phase 1" error).
-- Document CARLA version, map, synchronous mode, fixed timestep, sensor transforms and
-  seeds.
+CARLA became an upstream **data source**, not a second perception stack.
+
+- `CarlaSimulationSession` — the lifecycle: connect, apply deterministic world settings,
+  spawn the ego, attach the LiDAR, tick, and close. Every actor it spawns is destroyed on
+  close **including after a failed setup**, and world settings are restored, so a crashed
+  run cannot leave a server wedged in synchronous mode (ADR-042).
+- `carla/conversion.py` — CARLA's left-handed frame (+y right) becomes ADAPT-X's
+  right-handed frame (+y left) **exactly once**. The module imports no simulator, which is
+  what makes the one silent failure mode in this phase — a dropped sign flip mirrors the
+  world without raising — testable on a machine with no CARLA (ADR-043).
+- **Simulation time is authoritative** (ADR-044). Synchronous mode, fixed timestep, explicit
+  ticks; never a wall clock, never a sleep. Phase 4 velocity, Phase 5 intervals and Phase 8
+  dwell counting all depend on it, and all three degrade silently without it.
+- Frames are labelled `source=simulation` and enter the **existing** Phase 2 ingest path.
+  Phases 1–8 were not modified to accommodate CARLA, which is the evidence the boundary is
+  in the right place.
+- **Ground truth is a separate path** (ADR-045). `GroundTruthFrame` shares the LiDAR frame's
+  id and timestamp so the two join later, and reaches no perception stage. A test runs the
+  chain with and without reading it and asserts identical output.
+- One hard-coded smoke scenario: `python -m adaptx.carla.smoke`. Not a scenario framework.
+- CARLA remains **optional**: the backend starts, all 17 endpoints respond and the suite
+  passes with the package absent.
+
+**No live CARLA run has been executed.** The `carla` package is not installed in this
+environment, so the live smoke test skips and Experiment 008 measures only ADAPT-X's own
+conversion code. Nothing in this phase is a CARLA performance or accuracy claim.
+
+**Phase 9 is not an accuracy phase.** What it delivers is the *precondition* for one:
+repeatable simulation, deterministic time, and labelled ground truth. Measuring accuracy
+against that ground truth is Phase 11.
+
+### Phase 9B — deferred CARLA work · **To do**
+
+- Pitch and roll conversion, once a tilted sensor mount needs them (ADR-043).
+- Traffic manager and populated scenes, which need a seeded, reproducible configuration —
+  that is Phase 10, not this one.
+- Camera or other sensors; only LiDAR is attached.
+- A recorded dataset, so perception can be exercised without a live server.
 - Reference: [`knowledge-base/11_carla.md`](knowledge-base/11_carla.md).
 
 ## Phase 10 — Scenario generation and event replay · **To do**

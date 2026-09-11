@@ -1,127 +1,116 @@
-# Next Phase — CARLA Integration (Phase 9)
+# Next Phase — Scenario Generation and Replay (Phase 10)
 
 Handoff for the next work item. Read [`PROJECT_STATE.md`](PROJECT_STATE.md) first.
 
-> **Numbering is settled.** Prediction is Phase 5 (done), 2.5D mapping Phase 6 (done), risk
-> and uncertainty Phase 7 (done), adaptive resolution Phase 8 (done), CARLA **Phase 9**.
-> `CLAUDE.md`, `ROADMAP.md` and `services/system_service.py` all agree. Do not renumber.
+> **Numbering is settled.** Prediction is Phase 5, mapping 6, risk 7, adaptive resolution 8,
+> CARLA 9 — all done. Scenario generation and replay is **Phase 10**. `CLAUDE.md`,
+> `ROADMAP.md` and `services/system_service.py` agree. Do not renumber.
 
 ---
 
-## The perception chain is complete. Nothing has ever seen real data.
+## There is a simulator, and exactly one hard-coded scene
 
-Phases 1–8 built the whole pipeline: processing, detection, tracking, prediction, mapping,
-risk, and the adaptive resolution controller that ties them together. Every stage works, is
-tested, and is measured.
+Phase 9 made CARLA a usable data source: deterministic stepping, a converted coordinate
+frame, simulation-authoritative time, and ground truth on a separate path. What it
+deliberately did **not** build is any way to *describe* a scene.
 
-Every stage has also only ever been fed geometry this repository generated for itself.
+The whole scenario today is three constants and a loop in `carla/smoke.py`:
 
-That is the single root of almost every limitation in `PROJECT_STATE.md` §15. Detection
-accuracy, tracking correctness, prediction accuracy, map correctness, whether the risk
-ordering is sensible, whether the resolution allocation is *appropriate* — all of them are
-recorded as "unmeasured and unmeasurable", and all for the same reason: **no labelled data
-exists**.
+```python
+APPROACH_START_M = 45.0
+APPROACH_SPEED_MPS = 8.0
+APPROACH_LEFT_M = 3.5
+```
 
-Phase 9 is the first thing in the roadmap that can change that. CARLA knows where every
-object actually is, where it actually goes, and what is actually occupied. It is the
-precondition for measuring correctness rather than cost.
+One ego, one target, a straight line. It exists to prove the integration works and it says
+so in its own docstring.
+
+**Do not grow it into the framework.** Replace it. A scenario system that started as a
+smoke test carries the smoke test's assumptions - one target, no traffic, scripted
+transforms - into everything built on top.
 
 ## Objective
 
-Complete `adaptx.carla.client.CarlaClient`. Every method below currently raises an explicit
-"not implemented in Phase 1" error, which is the honest placeholder it was built as:
+Two capabilities that share a contract:
 
-- sensor attachment and LiDAR frame retrieval
-- ego-state extraction
-- actor spawning and cleanup
-- world/settings configuration
+**Scenario generation.** A seeded, declarative description of a scene that produces the same
+simulation every time it is run: actors and their types, initial poses, motion, duration,
+timestep, weather, and the map. Reproducible from the description alone, which is what
+`knowledge-base/12_scenario-generation.md` means by repeatable.
 
-The boundary already exists and is already exercised by `CarlaMockClient`. Phase 9 fills it
-in; it does not redesign it.
+**Event replay.** The record of what happened, and the ability to play it back.
+`knowledge-base/14_event-replay.md` lists the events: object detected, track updated, risk
+changed, prediction updated, predicted conflict created, resolution increased, resolution
+decreased. Each with a timestamp, a type and its metadata.
 
-## What already works, and must keep working
+Those two are related but not the same, and it is worth deciding early whether replay
+re-runs the *simulation* or re-plays a *recording*. They have very different costs and very
+different guarantees.
 
-- `CarlaService` and the `/api/v1/carla/status` endpoint.
-- `CarlaMockClient` — the in-process fake. It must stay, and must stay clearly labelled: data
-  produced through it is `SYNTHETIC_TEST` and must never be presented as sensor output.
-- The whole perception chain, which consumes `RawPointCloudFrame` and does not care where it
-  came from. **A CARLA frame should enter through the existing ingest path**, not a parallel
-  one.
+## What already exists and must be reused
+
+- `CarlaSimulationSession` — the lifecycle. A scenario drives it; it does not need changing.
+  `spawn_ahead_of_ego` and `place_ahead_of_ego` already take ADAPT-X coordinates.
+- `GroundTruthFrame` — recorded per frame, joinable to the LiDAR frame by `frame_id`. This is
+  most of what a replay record needs about the world.
+- `CarlaSettings.seed` — declared and currently consumed by nothing. Phase 10 is what makes
+  it real.
+- `DataSource.REPLAY` — a provenance value that has existed since Phase 1 and has never been
+  produced. Replayed frames are `replay`, not `simulation` and never `live_sensor`.
 
 ## The trap in this phase
 
-**CARLA is an optional dependency and must stay optional.** The `carla` package is not
-installed, is large, is version-locked to a simulator binary, and is unavailable on many
-machines — including CI.
+**A scenario is configuration, not code.** The moment scenarios are Python functions, they
+stop being reproducible from a description and start being reproducible from a git commit.
+Seeds, actor lists and motion belong in data the runner reads.
 
-- Nothing outside `adaptx.carla` may import `carla`.
-- The backend must start, all 17 endpoints must respond, and the full test suite must pass
-  with the package absent. That is the current state and it is not negotiable.
-- Tests for the real client belong behind a marker that skips cleanly when the import fails.
-  The mock stays the default everywhere else.
-
-## Provenance is the whole point
-
-`DataSource` already distinguishes `live_sensor`, `simulation`, `replay`, `synthetic_test`
-and `unavailable`. A CARLA frame is `simulation` — never `live_sensor`. This is the rule that
-stops a demo screenshot becoming an accidental claim about real hardware, and it is asserted
-by existing tests.
-
-## Reproducibility
-
-`knowledge-base/11_carla.md` requires the CARLA version, map, synchronous mode, fixed
-timestep, sensor transforms and seeds to be documented. Record them where a result can find
-them — a run that cannot be reproduced cannot be a measurement.
-
-Synchronous mode with a fixed timestep matters more than it looks: **tracking and adaptive
-resolution both depend on frame ordering and timestamps**. Velocity is measured from the
-interval between frames, and the resolution dwell time counts frames. Free-running
-asynchronous mode would make both non-deterministic.
-
-## Ground truth is the prize — take it if it is cheap
-
-CARLA can report actual actor positions, extents and velocities. If that is straightforward
-to capture alongside the sensor frame, capture it: it is the raw material for the first real
-accuracy measurement this project could make.
-
-But keep it **strictly separate from the perception path**. Ground truth is for evaluation,
-never an input. A detector that can see the answer measures nothing.
-
-If it turns out not to be cheap, leave it for Phase 11 and say so.
+Second: **determinism is a property to test, not to assume.** Phase 9 asserts that two runs
+of the same scenario produce identical frames. Phase 10 must keep that true with more actors,
+and physics or the traffic manager will break it if either is introduced without a seed. If
+you enable the traffic manager, seed it and set it synchronous, and assert reproducibility.
 
 ## MUST NOT implement
 
-- Scenario generation and replay (Phase 10) — CARLA is the environment, not the scenarios.
-- Benchmarking against scenarios (Phase 11).
+- Benchmarking or evaluation suites (Phase 11) — including any comparison of perception
+  against ground truth, however tempting once scenarios exist.
 - The dashboard (Phase 12).
-- Vehicle control, autopilot behaviour, planning or actuation of any kind.
-- Any change to the perception algorithms of Phases 1–8. If real data exposes a defect,
-  **report it** — a measured defect is a finding, and Phase 9 is the first chance to have one.
-- New dependencies beyond `carla` itself, which is already declared as an optional extra.
+- Changes to Phase 1–9 algorithms unless a measured defect justifies it.
+- ML, RL, GPU, collision avoidance or vehicle control.
+- New dependencies without an ADR.
 
 ## Backward-compatibility rules
 
-1. Do not change the coordinate convention (ADR-009). CARLA's axes differ; convert at the
-   boundary and document it. This is exactly the trigger ADR-013 named for a transform stage.
-2. Do not modify Phase 1–8 algorithms unless a measured defect justifies it.
-3. Do not change existing endpoint behaviour — extend additively.
-4. Do not weaken or delete tests. If a premise genuinely changes, retarget it narrowly and
-   report it, as Phases 3–8 each did.
-5. Keep the honesty rules: no fabricated metrics; unmeasured values are `null` with a reason;
-   `source` provenance is mandatory; simulation is labelled as simulation everywhere it
-   appears; and nothing describes the risk score or the detail priority as a probability,
-   calibrated or validated.
-6. `IMPLEMENTED` stays reserved for mature functionality. A working CARLA client is still
-   `PARTIAL`.
+1. Do not change the coordinate convention (ADR-009) or the single-conversion rule (ADR-043).
+2. Simulation time stays authoritative (ADR-044). A replay's timestamps come from the
+   recording, never the wall clock.
+3. Ground truth stays out of perception (ADR-045). Scenarios make it more tempting, not less.
+4. CARLA stays optional (ADR-042): the backend and the default test run must work without it.
+5. Do not weaken or delete tests. Retarget narrowly and report it, as Phases 3–9 each did.
+6. Keep the honesty rules: no fabricated metrics, provenance mandatory, replayed data
+   labelled `replay`, and nothing described as validated that has not been.
 
 ## Testing
 
-- The client with `carla` absent: every method fails explicitly, and the backend still starts.
-- The mock, unchanged, still satisfies the interface.
-- Axis conversion, against hand-computed values.
-- Frames ingested from CARLA are labelled `simulation` and reach the pipeline through the
-  existing path.
-- Determinism under synchronous mode with a fixed timestep and a fixed seed.
-- The full existing suite, unchanged.
+- A scenario produces identical frames across two runs from the same seed.
+- A scenario is reconstructible from its description alone.
+- Replayed frames are labelled `replay` and reach the pipeline through the existing path.
+- Events carry timestamp, type and metadata, and are ordered.
+- The whole suite still runs without CARLA installed.
 
-Record the setup and any measurement in `docs/experiments/experiment-log.md`.
+Record the scenario format and any measurement in `docs/experiments/experiment-log.md`.
+
+## One piece of unfinished business from Phase 9
+
+The live CARLA smoke test has **never been executed** — the package is not installed in this
+environment, so `pytest -m carla` reports 6 skipped. Running it is cheap and worth doing
+before building on the adapter:
+
+```bash
+pip install -e .[carla]
+./CarlaUE4.sh -RenderOffScreen
+pytest -m carla
+python -m adaptx.carla.smoke --frames 20 --json runs/live.json
+```
+
+If the real API disagrees with the adapter anywhere, that is a Phase 9 defect and should be
+fixed as one rather than worked around in Phase 10.

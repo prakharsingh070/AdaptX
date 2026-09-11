@@ -514,12 +514,89 @@ to end at four resolutions in one grid, and threshold jitter proven not to flip 
 
 ---
 
+## Phase 9 — CARLA simulation boundary · verified (no live run)
+
+The first phase whose deliverable sits *upstream* of the pipeline rather than inside it.
+CARLA became a data source; nothing below the boundary changed.
+
+**Phases 1-8 were not modified.** That is the result worth leading with. A simulated frame
+enters the same `RawPointCloudFrame` contract, the same Phase 2A validation and the same
+chain through to the adaptive map, and no stage branches on where the points came from. The
+alternative - a CARLA-specific perception path - would have doubled every downstream
+behaviour and made the Phase 11 comparison measure the plumbing instead of the perception
+(ADR-042).
+
+**Two objects, because there are two questions.** `CarlaClient` answers *am I connected?*
+and backs the status endpoint. `CarlaSimulationSession` answers *is a simulation running?*
+and owns actor and sensor lifetimes. A connected server with no session is a real and
+ordinary state, and one object owning both would have had to lie about it. The status
+endpoint now reports three independent facts - package importable, server connected,
+simulation stepping - rather than collapsing them into one word.
+
+**One coordinate conversion, in a module that imports no simulator (ADR-043).** ADR-009
+predicted this flip back in Phase 2A and named Phase 9 as its trigger. What decided the
+*placement* was the failure mode: a dropped sign flip mirrors the world **silently**. Every
+object appears on the wrong side, nothing raises, no contract is violated, and the pipeline
+produces confident output about a scene that never existed. Putting the arithmetic in a
+CARLA-free module made it exhaustively testable on a machine with no simulator - which is
+every machine this project has run on. Yaw converts by the same handedness change expressed
+as an angle, so positions and orientations cannot disagree.
+
+That test suite earned its keep immediately: it caught **my own** inverted expectation about
+which way "left" points for a yaw-90 ego. The code was right; the test's expected value was
+not, and re-deriving it from ADR-009 rather than from the code's output is the only reason
+that was visible.
+
+**Simulation time is authoritative (ADR-044).** Synchronous mode, fixed timestep, explicit
+ticks - never a wall clock, never a sleep. Three phases already depended on this without
+knowing it: Phase 4 measures velocity from frame intervals, Phase 5 extrapolates over them,
+Phase 8 counts frames for its dwell time. Wall-clock timestamps would have made velocity a
+function of machine load. Motion is scripted rather than physical for the same reason.
+
+**Ground truth is a separate path (ADR-045)**, sharing the LiDAR frame's id and timestamp so
+the two join later, and reaching no perception stage. The risk was never that someone would
+wire it in deliberately - it is that doing so is *convenient*. Correcting a track id from
+ground truth looks like an improvement and silently invalidates every accuracy figure taken
+afterwards. Two tests guard it: the chain runs with and without reading ground truth and
+must produce identical output, and a subprocess check confirms no perception module imports
+the CARLA package at all.
+
+**Cleanup was treated as a correctness property, not housekeeping.** The session destroys
+every actor it spawned including after a *failed* setup, tolerates one actor refusing to
+die without stranding the rest, and restores world settings on close - because a server left
+in synchronous mode blocks on a client that has gone away and looks to the next user like a
+hung simulator.
+
+**No live CARLA run was executed.** The package is not installed here, so the live smoke
+test reports 6 skipped with the reason, and Experiment 008 measures only ADAPT-X's own
+conversion code (~0.2 ms for a 28,000-point frame; the cost is the float32-to-float64 copy,
+not the sign flip). The lifecycle tests run against a hand-written stand-in that models
+CARLA's left-handed frame but does no physics and no real ray casting. **Nothing in this
+phase is a CARLA performance or accuracy claim**, and the adapter's API compatibility with a
+real server remains unconfirmed.
+
+**One test-configuration bug was fixed rather than worked around.** An integration test moved
+the target 4 m per 0.05 s tick - 80 m/s - and tracking correctly refused to associate across
+a 2.5 m gate, creating a new track every frame. The tracker was right; the scenario was
+absurd. Slowing it to the scenario's real 8 m/s fixed it.
+
+**Limitations:** no live validation; CARLA pitch and roll are not converted, only yaw; the
+smoke scenario is one hard-coded scene with scripted motion and must be replaced by Phase 10
+rather than grown; ground truth now exists and nothing measures against it, which is Phase
+11's job and emphatically not a Phase 9 result.
+
+**Status:** 1326 tests (1189 before), 6 deselected live, ruff and mypy clean, 17 endpoints
+unchanged, zero regressions.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled
 `is_baseline`, with its failure modes documented **and asserted by tests** so they stay
-visible. No phase has added a dependency beyond the Phase 1 set - eight phases, zero new
-dependencies.
+visible. Phase 9 declared `carla` as an **optional extra** rather than a dependency: the
+backend, the endpoints and the whole test suite still run without it, so the required set is
+unchanged after nine phases.
 
 Phase 8 added a second pattern worth naming: **the honest negative**. The phase the project
 is named for produced a result that is partly unflattering — slower than the baseline, and

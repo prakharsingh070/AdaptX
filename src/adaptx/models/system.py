@@ -47,6 +47,70 @@ class CarlaStatus(StrEnum):
     DISCONNECTED = "DISCONNECTED"
 
 
+class SimulationState(StrEnum):
+    """Where a simulation session is in its lifecycle (Phase 9).
+
+    Deliberately separate from :class:`~adaptx.models.system.CarlaStatus`,
+    which answers a different question. Three facts about CARLA are
+    independent and all three are worth reporting truthfully:
+
+    * is the integration *available* (``client_available``);
+    * is a server *connected* (``CarlaStatus``);
+    * is a simulation *running* (this).
+
+    Collapsing them into one enum would force a session that has been
+    configured but not stepped to claim one of the other two states.
+
+    ``IDLE``
+        No session has been opened.
+    ``CONFIGURING``
+        Applying world settings and spawning actors. Not yet steppable.
+    ``READY``
+        Actors and sensor in place, waiting for the first tick.
+    ``RUNNING``
+        At least one frame has been stepped.
+    ``STOPPED``
+        Closed cleanly; actors destroyed and world settings restored.
+    ``ERROR``
+        Setup or stepping failed. Cleanup has run; the reason is in ``detail``.
+    """
+
+    IDLE = "IDLE"
+    CONFIGURING = "CONFIGURING"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
+    ERROR = "ERROR"
+
+
+class SimulationSessionStatus(AdaptXModel):
+    """Compact description of a simulation session, safe for status and telemetry.
+
+    Counts and identifiers only. **Never point data**: a single LiDAR frame is
+    tens of thousands of points, and a status channel is not where frame
+    geometry belongs - the same rule every other ADAPT-X summary follows.
+    """
+
+    state: SimulationState = SimulationState.IDLE
+    map_name: str | None = None
+    synchronous_mode: bool = False
+    fixed_delta_seconds: float | None = None
+    frames_stepped: int = Field(default=0, ge=0)
+    simulation_frame: int | None = Field(
+        default=None, description="Simulator frame number of the most recent tick."
+    )
+    simulation_time_s: float | None = Field(
+        default=None, ge=0.0, description="Simulator clock at the most recent tick."
+    )
+    ego_actor_id: int | None = None
+    sensor_actor_id: int | None = None
+    actor_count: int = Field(default=0, ge=0, description="Actors this session spawned.")
+    last_point_count: int | None = Field(
+        default=None, ge=0, description="Points in the most recent LiDAR frame."
+    )
+    detail: str = ""
+
+
 class ComponentReadiness(StrEnum):
     """Whether a subsystem can serve requests."""
 
@@ -94,7 +158,22 @@ class LiDARSourceStatus(AdaptXModel):
 
 
 class CarlaConnectionStatus(AdaptXModel):
-    """State of the CARLA integration."""
+    """State of the CARLA integration.
+
+    Three independent facts, reported as three fields rather than collapsed
+    into one, because any two of them can disagree:
+
+    ``client_available``
+        Is the optional ``carla`` package importable at all?
+    ``status``
+        Is a server actually connected?
+    ``simulation``
+        Is a deterministic simulation session configured and stepping?
+
+    A machine with the package installed but no server running is
+    ``client_available: true``, ``DISCONNECTED``, ``IDLE`` - and saying so is
+    more useful than any single word could be.
+    """
 
     status: CarlaStatus = CarlaStatus.DISCONNECTED
     enabled: bool = False
@@ -108,6 +187,13 @@ class CarlaConnectionStatus(AdaptXModel):
     port: int | None = None
     world: str | None = None
     detail: str = ""
+    simulation: SimulationSessionStatus = Field(
+        default_factory=SimulationSessionStatus,
+        description=(
+            "Phase 9 simulation session: lifecycle state, simulator frame and "
+            "clock, actor counts. Counts only - never point data."
+        ),
+    )
 
 
 class SystemStatus(TimestampedModel):

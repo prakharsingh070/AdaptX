@@ -196,6 +196,34 @@ def _declared_components() -> list[ComponentStatus]:
             phase=8,
         ),
         ComponentStatus(
+            name="carla",
+            readiness=ComponentReadiness.READY,
+            implementation=ImplementationStatus.PARTIAL,
+            detail=(
+                "deterministic CARLA simulation boundary. CARLA is a DATA "
+                "SOURCE upstream of the pipeline, never a second perception "
+                "stack: a session applies synchronous mode and a fixed "
+                "timestep, spawns the ego, attaches a LiDAR, ticks, and "
+                "destroys every actor it created on close - including after "
+                "a failed setup - restoring world settings. CARLA's "
+                "left-handed frame is converted to the ADAPT-X frame exactly "
+                "once at the boundary; frame timestamps are simulation time, "
+                "never the wall clock; frames are labelled source=simulation "
+                "and enter the existing ingest path unchanged. Ground truth "
+                "is recorded on a separate path and never reaches detection, "
+                "tracking, prediction, risk or adaptive resolution. The live "
+                "connection and session state are reported under `carla`, "
+                "not here. NO LIVE CARLA RUN HAS BEEN EXECUTED IN THIS "
+                "REPOSITORY: the package is optional, is absent in the "
+                "development environment, and the adapter has been exercised "
+                "only against a stand-in. Nothing about CARLA performance or "
+                "perception accuracy is claimed. One hard-coded smoke scenario; "
+                "no scenario framework, no traffic, no camera, no pitch/roll "
+                "conversion"
+            ),
+            phase=9,
+        ),
+        ComponentStatus(
             name="prediction",
             readiness=ComponentReadiness.READY,
             implementation=ImplementationStatus.PARTIAL,

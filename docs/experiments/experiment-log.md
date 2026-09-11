@@ -681,3 +681,85 @@ Experiments 004 and 006.
 - **Any real-world figure.** These are generated scenes with hand-specified risk on one
   machine.
 
+---
+
+## Experiment 008 - Phase 9 CARLA ingest conversion cost
+
+**Date:** 2026-09-11
+
+### What was NOT executed
+
+**No live CARLA run took place.** The `carla` package is not installed in this environment
+and no CARLA server was reachable, so the live smoke test
+(`tests/integration/test_carla_live.py`, `pytest -m carla`) reported **6 skipped**.
+
+Nothing below is a CARLA measurement. In particular this entry contains **no** figure for
+simulator throughput, sensor delivery latency, frame rate, actor capacity or ground-truth
+accuracy, because none was measured. When a server is available, `python -m adaptx.carla.smoke
+--json <path>` records a live run and its output is labelled as such.
+
+The lifecycle tests that did run exercise the adapter against
+`tests/fixtures/fake_carla.py`, a hand-written stand-in. It does no physics, no rendering and
+no real ray casting. It proves the *integration logic*; it says nothing about CARLA.
+
+### What was measured
+
+The conversion at the ingest boundary - decoding a CARLA-format LiDAR buffer and turning it
+into a `RawPointCloudFrame` in the ADAPT-X frame. This is ADAPT-X code operating on synthetic
+byte buffers of the shape CARLA produces (flat little-endian float32 xyzi), with no simulator
+in the loop at any point.
+
+**Scenario:** Buffers of increasing size, packed exactly as a CARLA `LidarMeasurement`
+packs them. 28,000 points is one full sweep at the configured defaults - 560,000 points per
+second at 20 Hz - so it is the size a real frame would be under this configuration.
+
+**Random seed:** 20260101, fixed.
+
+**Hardware and software:** Windows 11, 16 logical CPUs, Python 3.13.7, NumPy 2.5.3,
+adaptx 0.1.0. Single-threaded.
+
+**CARLA version:** not installed.
+
+**Measurement window:** 3 warm-up passes discarded, 15 timed repeats, median reported.
+
+**Results:**
+
+| Points | Decode ms | Convert ms | Frame build ms | Total ms | Points/s |
+|---|---|---|---|---|---|
+| 7,000 | 0.003 | 0.041 | 0.057 | 0.060 | 117 M |
+| 28,000 | 0.005 | 0.165 | 0.203 | 0.208 | 135 M |
+| 56,000 | 0.011 | 1.134 | 1.212 | 1.223 | 46 M |
+| 112,000 | 0.013 | 2.276 | 2.394 | 2.407 | 47 M |
+
+*Frame build* includes the conversion, so *Total* is decode plus frame build; the separate
+*Convert* column is shown to attribute the cost.
+
+**Synthetic buffers, no simulator. Not a CARLA performance claim.**
+
+**Findings:**
+
+- **Decoding is effectively free** - 5 to 13 microseconds regardless of size. `np.frombuffer`
+  reinterprets the buffer rather than parsing it, so no per-point work happens at all.
+- **The cost is the copy, not the arithmetic.** The sign flip is one vectorised column
+  operation; what it costs is materialising a float64 array from a float32 buffer. That is a
+  deliberate choice - every other frame in the project is float64, and matching it avoids a
+  dtype seam at the boundary.
+- **At the configured frame size the conversion costs about 0.2 ms.** For scale, the Phase 2
+  pipeline takes roughly 200 ms per 100k points (Experiment 002), so the boundary is not
+  where time goes.
+- The throughput drop between 28k and 56k points is consistent with the working set leaving
+  cache. It is recorded as measured; no attempt was made to tune it, because at 0.2 ms per
+  frame there is nothing worth tuning.
+
+**Not measured, and not measurable here:**
+
+- **Anything about CARLA.** No server ran.
+- **Sensor delivery behaviour** - whether a tick reliably yields one full sweep, and what the
+  real point count per frame is. Both depend on the server.
+- **End-to-end latency with a real simulator in the loop.** Synchronous mode means ADAPT-X
+  paces the simulator, so wall-clock throughput would measure the pipeline, not CARLA
+  (ADR-044).
+- **Detection, tracking or prediction accuracy.** Ground truth is now recorded beside every
+  frame, which makes accuracy measurable **for the first time** - but measuring it is
+  Phase 11, and nothing here attempts it.
+
