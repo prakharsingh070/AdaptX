@@ -24,16 +24,23 @@ from enum import StrEnum
 import numpy as np
 from pydantic import Field, model_validator
 
+from adaptx.control.corridor import PathRelation
 from adaptx.control.models import ControlCommand
 from adaptx.live.models import LiveFrameInfo
 from adaptx.models.adaptive_map import AdaptiveSpatialMapSummary, MappingComparison
 from adaptx.models.adaptive_resolution import ResolutionBudget, TileResolutionDecision
-from adaptx.models.common import AdaptXModel, CoordinateFrame, DataSource, TimestampedModel
+from adaptx.models.common import (
+    AdaptXModel,
+    CoordinateFrame,
+    DataSource,
+    ObjectClass,
+    TimestampedModel,
+)
 from adaptx.models.prediction import PredictedTrajectory
 from adaptx.models.risk import RiskLevel
 from adaptx.models.risk_assessment import RiskAssessment
 from adaptx.models.spatial_map import SpatialMapSummary
-from adaptx.models.tracking import TrackedObject
+from adaptx.models.tracking import TrackedObject, TrackStatus
 from adaptx.models.vehicle import VehicleState
 
 #: Default ceiling on points in a scene sample. Six thousand points draw
@@ -96,14 +103,63 @@ def sample_points(
     stride = max(1, -(-total // max_points))  # ceiling division
     kept = np.asarray(points[::stride, :3], dtype=np.float64)
     rounded = np.round(kept, 2)
-    return PointSample(
+    # Built from a (N, 3) array this function shaped itself, so the row check
+    # the validator would run over every point (4-5 ms per 6000 rows, measured
+    # in the live loop) is skipped here; a sample arriving as JSON is still
+    # validated in full.
+    return PointSample.model_construct(
         total_count=total,
         sample_count=int(rounded.shape[0]),
         is_downsampled=stride > 1,
         stride=stride,
         stage=stage,
+        coordinate_frame=CoordinateFrame.EGO,
         xyz=rounded.tolist(),
     )
+
+
+class TrackedObjectSnapshot(AdaptXModel):
+    """One tracked object as the dashboard lists it: every field from the pipeline.
+
+    Built by the backend from the track (Phase 4), its risk assessment (Phase 7)
+    and its predicted path (Phase 5); the dashboard formats and draws it. The
+    frame is the sensor frame, +X forward and +Y left, origin at the LiDAR
+    (ADR-009), so ``longitudinal_distance_m`` is the track's ``x`` and
+    ``lateral_distance_m`` its ``y`` (positive = left); ``distance_m`` is the
+    risk engine's planar (XY) distance to the ego reference. Velocities are
+    **ego-relative** - there is no ego-motion compensation (Experiment 014).
+    ``confidence`` is the detector's geometric fit score, not a probability,
+    and is null when the class is UNKNOWN. What is not measured is null.
+    """
+
+    track_id: int = Field(ge=0)
+    object_class: ObjectClass
+    tracking_state: TrackStatus
+    distance_m: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Planar distance from the risk assessment; null if unassessed.",
+    )
+    longitudinal_distance_m: float = Field(description="Track x: ahead (+) / behind (-).")
+    lateral_distance_m: float = Field(description="Track y: left (+) / right (-).")
+    speed_mps: float | None = Field(
+        default=None, ge=0.0, description="Tracked speed, ego-relative; null until measured."
+    )
+    relative_speed_mps: float | None = Field(
+        default=None,
+        description="Closing speed from the risk assessment: positive = approaching the ego.",
+    )
+    risk_level: RiskLevel
+    risk_score: float | None = None
+    in_ego_path: bool
+    path_relation: PathRelation
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    hits: int = Field(ge=0)
+    age_frames: int = Field(ge=0)
+    predicted_horizon_s: float | None = Field(
+        default=None, gt=0.0, description="Horizon of the predicted path, if one exists."
+    )
+    predicted_points: int = Field(default=0, ge=0)
 
 
 class SceneSnapshot(TimestampedModel):
@@ -133,6 +189,10 @@ class SceneSnapshot(TimestampedModel):
     trajectories: list[PredictedTrajectory] = Field(default_factory=list)
     assessments: list[RiskAssessment] = Field(default_factory=list)
     highest_risk_level: RiskLevel
+    objects: list[TrackedObjectSnapshot] = Field(
+        default_factory=list,
+        description="One entry per track: the joined, backend-built object record.",
+    )
     tiles: list[TileResolutionDecision] = Field(
         default_factory=list, description="Every tile's decision for this frame."
     )
@@ -170,6 +230,9 @@ class SceneSnapshot(TimestampedModel):
                 raise ValueError(
                     f"assessment for track {assessment.track_id} has no track in the snapshot"
                 )
+        for item in self.objects:
+            if item.track_id not in track_ids:
+                raise ValueError(f"object record for track {item.track_id} has no track")
         if self.scenario_id is None and self.origin.startswith(("scenario:", "live:")):
             raise ValueError("a scenario-origin snapshot must name its scenario")
         if self.origin.startswith("live:") and self.live is None:
@@ -196,5 +259,6 @@ __all__ = [
     "PointSample",
     "PointStage",
     "SceneSnapshot",
+    "TrackedObjectSnapshot",
     "sample_points",
 ]

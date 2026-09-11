@@ -338,6 +338,19 @@ class DetectionSettings(BaseModel):
         ge=0.0,
         description="Largest horizontal extent must reach this to be an object.",
     )
+    max_bottom_height_m: float | None = Field(
+        default=0.8,
+        ge=0.0,
+        description=(
+            "Reject a cluster whose lowest point sits more than this above the road "
+            "surface the ground stage estimated: overhead signs, foliage and awnings "
+            "are not road users. Only applied when ground segmentation ran (the floor "
+            "is otherwise unknown). MEASURED on CARLA 0.9.16 (post-Phase-12 live "
+            "perception upgrade): a walker's cluster bottom is 0.0-0.63 m above the "
+            "road out to 20 m; the fragments the classifier had been calling "
+            "'pedestrian' sat 0.9-3.5 m up. None disables the rule."
+        ),
+    )
     max_footprint_m: float = Field(
         default=15.0,
         gt=0.0,
@@ -401,11 +414,24 @@ class TrackingSettings(BaseModel):
         description="Consecutive misses a confirmed track survives before it is dropped.",
     )
     max_missed_frames_tentative: int = Field(
-        default=1,
+        default=2,
         ge=0,
         description=(
             "Misses an unconfirmed track survives. Lower than the confirmed "
-            "limit so a spurious detection does not linger as a ghost track."
+            "limit so a spurious detection does not linger as a ghost track. "
+            "Raised from 1 to 2 after the live perception upgrade measured a parked "
+            "car at 20-26 m detected on alternate frames (16-21 points): with one "
+            "miss allowed it got a new id five times; with two it confirms."
+        ),
+    )
+    class_decay_observations: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Consecutive UNKNOWN observations after which a track's class falls back "
+            "to UNKNOWN. Before this, a label stuck for the track's life once earned: "
+            "measured live, a fragment labelled 'pedestrian' at 0.5 x 0.4 x 1.7 m kept "
+            "the label after growing into a 2.8 x 0.3 x 1.4 m wall segment."
         ),
     )
     class_switch_hits: int = Field(

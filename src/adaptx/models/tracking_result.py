@@ -31,6 +31,9 @@ class TrackingConfiguration(AdaptXModel):
     max_missed_frames: int
     max_missed_frames_tentative: int
     class_switch_hits: int
+    class_decay_observations: int = Field(
+        default=3, description="Consecutive UNKNOWN observations before a class is dropped."
+    )
     velocity_smoothing: float
     max_timestep_s: float
     min_speed_for_heading_mps: float

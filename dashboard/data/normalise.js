@@ -24,6 +24,9 @@ export function sceneFromSnapshot(snapshot) {
     trajectories: snapshot.trajectories ?? [],
     assessments: snapshot.assessments ?? [],
     highestRiskLevel: snapshot.highest_risk_level,
+    // Backend-built per-object records (distance, longitudinal/lateral,
+    // speed, relative speed, risk, path relation, confidence). Joined by id.
+    records: snapshot.objects ?? [],
     tiles: snapshot.tiles ?? [],
     budget: snapshot.budget ?? null,
     fixedMap: snapshot.fixed_map ?? null,
@@ -106,11 +109,14 @@ export function sceneFromRunFrame(runName, runSummary, runFrame) {
 function buildScene(fields) {
   const trajectoriesById = new Map(fields.trajectories.map((t) => [t.track_id, t]));
   const assessmentsById = new Map(fields.assessments.map((a) => [a.track_id, a]));
+  const recordsById = new Map((fields.records ?? []).map((r) => [r.track_id, r]));
   const objects = fields.tracks.map((track) => ({
     trackId: track.track_id,
     track,
     trajectory: trajectoriesById.get(track.track_id) ?? null,
     assessment: assessmentsById.get(track.track_id) ?? null,
+    // null for recorded runs: records did not exist when they were written.
+    record: recordsById.get(track.track_id) ?? null,
   }));
   return { ...fields, objects, riskCounts: countLevels(fields.assessments) };
 }

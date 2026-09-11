@@ -1422,3 +1422,89 @@ One machine, one map, one spawn point, three seeds; simulation only; nothing tun
 claim of real-time (0.3x measured), no claim of collision-free behaviour (0 in these runs,
 counted by the sensor); the classifier still labels poles "pedestrian" and cars
 "obstacle"; the dashboard's own cost is in Experiment 013.
+
+## Experiment 015 - Live perception upgrade: what the classifier and tracker do to real actors
+
+**Date:** 2026-09-12
+
+### Question
+
+On the live server, what does the pipeline label the scripted walker, the parked car and
+the bicycle, how stable are their track ids, why does roadside geometry read
+"pedestrian", and what does each fix (ADR-057) change? Also: where does the loop's time
+go, and what does memoising the tile geometry save?
+
+### Setup
+
+As Experiment 014 (CARLA 0.9.16, Town10HD_Opt, spawn point 1, 0.05 s, ground segmentation
+on, `.venv312`, no browser). A probe recorded every published track (class, extents,
+cluster bottom, points, status) per frame and, **offline and only to label which cluster
+was the scripted actor**, read the session's ground truth beside it - the loop itself
+never did. Actor = the nearest track within 1.5 m (walker) / 3 m (car, bicycle).
+
+### Before (Phase 12 + live extension, unchanged pipeline)
+
+| | walker (pedestrian_crossing) | parked Audi TT (static_obstacle) |
+|---|---|---|
+| frames matched / unmatched | 177 / 96 | 289 / 102 |
+| classes on the actor | pedestrian 135, unknown 42 | **obstacle 289, vehicle 0** |
+| id switches | 2 | 5 - all between 26 and 20 m, tentative, 16-21 points on alternate frames |
+| cluster at 5-10 m (l x w x h, bottom above road, points) | 0.52 x 0.27 x 1.53, 0.25 m, 61 | 1.98 x 1.84 x 1.13, 0.18 m, 217 |
+| cluster at 15-20 m | 0.22 x 0.27 x 1.32, 0.49 m, 11 | 0.76 x 1.75 x 0.64, 0.49 m, 37 |
+| "pedestrian" track-frames with no walker in the scene | **671** in 60 s | - |
+| top false "pedestrian" shapes | 0.5 x 0.4 x 1.7 m with its bottom **1.06 m** above the road; 0.4 x 0.4 x 3.0 m, bottom 2.7 m; 2.8 x 0.3 x 1.4 m (a wall segment that inherited an earlier label) | |
+| clutter track-frames by class (no actor) | unknown 6171, obstacle 3068, cyclist 1352, vehicle 1052, pedestrian 671 | |
+
+Also found: the pedestrian scenario's walker had **never spawned** at spawn point 1
+(+7 m left at 32 m ahead is inside street furniture and CARLA refuses the spawn); the
+"holds" Experiment 014 attributed to it were on clutter. The placement is now +5 m and a
+deterministic offset ladder retries a refused spawn.
+
+### After (ADR-057: elevated filter 0.8 m, class decay 3, vehicle band 1.5 m, tentative misses 2)
+
+| | walker | parked Audi TT | bicycle (no rider, cyclist_crossing) |
+|---|---|---|---|
+| frames matched / unmatched | 144 / 176 (the faster ego passes it sooner) | 357 / 83 | 142 / 137 |
+| classes on the actor | **pedestrian 101**, unknown 43 | **vehicle 269**, obstacle 78 (beyond ~12 m), unknown 10 | cyclist 28, obstacle 43, unknown 39, pedestrian 25, vehicle 7 |
+| id switches | 1 | **2** (was 5); confirmed from 20-25 m | 13 |
+| clutter track-frames by class | unknown 4510, cyclist 52, obstacle 36, **pedestrian 37** (was 671), vehicle 4 | | |
+
+The elevated filter removed 94 % of the false "pedestrians" and 96 % of the false
+"cyclists"; the partial-view band made the car a vehicle from 12 m in; two allowed
+misses kept the far car's identity. The riderless bicycle (1.0-1.9 x 1.2 x 1.1 m as
+clustered) fits no band cleanly and crosses at 3 m/s, so it is mostly UNKNOWN/OBSTACLE
+and switches identity 13 times: **cyclist classification is not supported by this
+geometry** and is reported as such.
+
+### Loop cost, before and after
+
+Profiled (cProfile, 60 frames) before: `process()` 135 ms/frame, of which adaptive
+resolution **78 ms** (plan 45 + build 32), detection 26, preprocessing 20; the leading
+callee was `TileGrid.tile_bounds`, called ~1,230 times per frame for 144 tiles, each
+building a `MapBounds` model. Memoising tile bounds and cell shapes per grid (values
+unchanged) and skipping re-validation of the internally built point sample gave:
+
+| static_obstacle, 130 s wall | loop median / p90 / max | pipeline med / p90 | snapshot med | sim/wall | frames |
+|---|---|---|---|---|---|
+| before (Experiment 014) | 160 / 187 / 266 ms | 126 / 153 | 6.5 ms | 0.31 | 757 |
+| after | **120 / 138 / 197 ms** | **84 / 102** | 3.4 ms | **0.42** | 1020 |
+
+Other scenarios after: mixed_obstacles 121 ms (0.41), pedestrian_roadside 119 ms (0.42),
+cyclist_crossing 122 ms (0.41), multiple_vehicles 120 ms (0.42). Tick + LiDAR wait stays
+32-38 ms. The next hotspot is `_build_tile` in the adaptive mapper (per-tile `MapTile`
+models with array validators, ~24 ms/frame under the profiler); untouched.
+
+### Behaviour after
+
+Every scenario: 0 collisions; the ego reaches 7.0-7.65 m/s (was 5.1: fewer false in-path
+objects), holds 7.45-7.98 m short of the in-path object, resumes when it leaves. The
+roadside walker enters the corridor, holds the ego (STOPPED at 7.8 m), leaves it, and
+the ego resumes 0.5 s later - with `entered_path` / `left_path` events derived from the
+same corridor rule the controller used.
+
+### Limitations
+
+One map, one spawn point, one seed per scenario; the offline actor matching is by
+nearest track within a radius and can pick a neighbouring pole; nothing was tuned
+against an evaluation figure and Phase 11's reports were not re-run under the new
+defaults; the frame-median floor assumes a level road; velocities remain ego-relative.

@@ -4,7 +4,7 @@
 
 import { el, card, kv, notice, clear, levelTag, notImplemented, table } from "../ui.js";
 import { state, subscribe, currentScene, currentMode, selectTrack } from "../app.js";
-import { fmt, fmtInt, fmtMs, fmtPercent, fmtTime, fmtSeconds, fmtMetres, NOT_MEASURED, NOT_AVAILABLE, NOT_IMPLEMENTED, isMissing } from "../data/format.js";
+import { fmt, fmtInt, fmtMs, fmtPercent, fmtTime, fmtSeconds, fmtMetres, NOT_MEASURED, NOT_AVAILABLE, NOT_IMPLEMENTED, isMissing, classGlyph, classLabel, pathLabel } from "../data/format.js";
 import { countClasses } from "../data/normalise.js";
 import { tileFactorMap } from "../render/charts.js";
 import { mountViewport } from "./viewport.js";
@@ -64,10 +64,36 @@ function detectedObjectsCard() {
   const scene = currentScene();
   if (!scene) return card("Detected Objects", notice("No frame yet."), { tag: { text: currentMode(), cls: currentMode() === "live" ? "live" : "stored" } });
   const classes = countClasses(scene.tracks);
-  const pairs = ["vehicle", "pedestrian", "cyclist", "obstacle", "unknown"].map((k) => [k, classes[k] ?? 0]);
-  pairs.push(["detections this frame", scene.detectionCount]);
-  pairs.push(["live tracks", scene.tracks.length]);
-  return card("Tracked Objects by class", [kv(pairs), el("div", { class: "note", text: "Classes are the geometric classifier's labels, not ground truth. Static scene geometry appears as obstacle/unknown tracks." })], { tag: { text: scene.mode, cls: scene.mode === "live" ? "live" : "stored" } });
+  const counts = el("div", { class: "class-counts" }, ["vehicle", "pedestrian", "cyclist", "obstacle", "unknown"].map((k) =>
+    el("span", { class: `class-count cls-${k}`, title: k }, [`${classGlyph(k)} ${classes[k] ?? 0}`])));
+  // Backend-built records, nearest first by the risk engine's assessed
+  // distance (a sort of a received field). Tracks without a record (recorded
+  // runs) or without an assessment sort last.
+  const withRecords = scene.objects.filter((o) => o.record);
+  const ordered = [...withRecords].sort((a, b) => (a.record.distance_m ?? Infinity) - (b.record.distance_m ?? Infinity));
+  const LIMIT = 8;
+  const cards = el("div", { class: "object-cards" });
+  for (const o of ordered.slice(0, LIMIT)) {
+    const r = o.record;
+    const level = String(r.risk_level ?? "unknown").toLowerCase();
+    cards.append(el("div", { class: `object-card lvl-border-${["low", "medium", "high", "critical"].includes(level) ? level : "unknown"} ${o.trackId === state.selectedTrackId ? "selected" : ""}`, onclick: () => selectTrack(o.trackId) }, [
+      el("div", { class: "object-card-head" }, [
+        el("span", { class: "glyph", text: classGlyph(r.object_class) }),
+        el("span", { class: "title", text: `${classLabel(r.object_class)} #${r.track_id}` }),
+        levelTag(r.risk_level),
+      ]),
+      el("div", { class: "object-card-body" }, [
+        el("span", { text: isMissing(r.distance_m) ? NOT_AVAILABLE : fmtMetres(r.distance_m, 1) }),
+        el("span", { text: isMissing(r.speed_mps) ? "speed: " + NOT_AVAILABLE : `${fmt(r.speed_mps, { digits: 1 })} m/s` }),
+        el("span", { class: r.in_ego_path ? "path in" : "path", text: pathLabel(r.path_relation) }),
+        el("span", { class: "muted", text: r.tracking_state }),
+      ]),
+    ]));
+  }
+  const body = [counts, cards.childElementCount ? cards : notice(withRecords.length ? "No tracked object." : "Per-object records exist for live frames only; recorded runs predate them.")];
+  if (ordered.length > LIMIT) body.push(el("div", { class: "note", text: `Nearest ${LIMIT} of ${ordered.length} tracks; the Object Inspector lists all.` }));
+  body.push(el("div", { class: "note", text: `${scene.detectionCount ?? "—"} detections this frame · ${scene.tracks.length} tracks. Classes are the geometric classifier's labels, not ground truth; distance and speed are the pipeline's own (ego-relative, no ego-motion compensation).` }));
+  return card("Detected Objects", body, { tag: { text: scene.mode, cls: scene.mode === "live" ? "live" : "stored" } });
 }
 
 function riskDistributionCard() {
@@ -167,14 +193,16 @@ function trackingPredictionCard() {
   const ordered = [...scene.objects].sort((a, b) => (a.assessment?.distance_m ?? Infinity) - (b.assessment?.distance_m ?? Infinity));
   const shown = ordered.slice(0, LIMIT);
   const rows = shown.map((o) => [
-    { num: `#${o.trackId}` }, o.track.object_class, { num: o.assessment ? fmtMetres(o.assessment.distance_m, 1) : NOT_AVAILABLE },
+    { num: `#${o.trackId}` }, `${classGlyph(o.track.object_class)} ${classLabel(o.track.object_class)}`, { num: o.assessment ? fmtMetres(o.assessment.distance_m, 1) : NOT_AVAILABLE },
+    { num: o.record ? `${fmt(o.record.longitudinal_distance_m, { digits: 1 })} / ${fmt(o.record.lateral_distance_m, { digits: 1, sign: true })}` : NOT_AVAILABLE },
     { num: o.track.velocity ? `${fmt(o.track.velocity.x, { digits: 1 })}, ${fmt(o.track.velocity.y, { digits: 1 })} m/s` : NOT_AVAILABLE },
+    o.record ? el("span", { class: o.record.in_ego_path ? "path in" : "path", text: pathLabel(o.record.path_relation) }) : NOT_AVAILABLE,
     o.trajectory ? `${o.trajectory.points.length} pts / ${fmtSeconds(o.trajectory.horizon_s, 1)}` : "no path",
     o.assessment ? levelTag(o.assessment.risk_level) : el("span", { class: "muted", text: "—" }),
   ]);
   const selected = shown.findIndex((o) => o.trackId === state.selectedTrackId);
   return card("Object Tracking & Prediction", [
-    rows.length ? table(["track", "class", "dist (assessed)", "velocity x, y", "predicted path", "risk"], rows, { onRow: (i) => selectTrack(shown[i].trackId), selectedIndex: selected }) : notice("No live tracks in this frame."),
+    rows.length ? table(["track", "class", "dist", "long. / lat. (m)", "velocity x, y", "ego path", "predicted path", "risk"], rows, { onRow: (i) => selectTrack(shown[i].trackId), selectedIndex: selected }) : notice("No live tracks in this frame."),
     el("div", { class: "note", text: `${scene.objects.length > LIMIT ? `Nearest ${LIMIT} of ${scene.objects.length} tracks by assessed distance; the Object Inspector lists all. ` : ""}Confidence values are geometric fit scores; nothing here is a probability.` }),
   ], { tag: { text: scene.mode, cls: scene.mode === "live" ? "live" : "stored" } });
 }

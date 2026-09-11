@@ -224,10 +224,15 @@ class TestLiveLoop:
         assert final.state.value == "STOPPED", final.detail
         states = [s.control.state.value for s in trace if s.control is not None]
         assert "SLOWING" in states or "HOLDING" in states, states
-        held = [s for s in trace if s.control is not None and s.control.state.value == "STOPPED"]
-        assert held, "the ego never came to a hold"
-        nearest = held[-1].control.nearest_in_path_m
-        assert nearest is not None and nearest < 9.0, "held on the in-path object"
+        held = [
+            s
+            for s in trace
+            if s.control is not None
+            and s.control.state.value == "STOPPED"
+            and s.control.nearest_in_path_m is not None
+        ]
+        assert held, "the ego never came to a hold on an in-path object"
+        assert held[0].control.nearest_in_path_m < 9.0, "held short of the in-path object"
         assert final.collision_count == 0, "stopped short of the car, no contact"
 
     def test_the_live_session_leaves_no_actors_and_restores_the_world(self) -> None:
@@ -248,3 +253,81 @@ class TestLiveLoop:
         assert len(world.get_actors()) <= before + 2  # this probe's own ego + lidar
         after.close()
         assert world.get_settings().synchronous_mode == original
+
+
+class TestLivePerception:
+    """Live perception upgrade acceptance: classes, distances and identity, on the server.
+
+    Reads the published snapshots only - the same records the dashboard draws.
+    Ground truth is not consulted; what is asserted is that the pipeline
+    labelled and measured the scripted actors the way Experiment 015 recorded.
+    """
+
+    def _records(self, scenario: str, seconds: float) -> list[Any]:
+        import time
+
+        settings = require_live_server()
+        settings.lidar.ground_enabled = True
+        settings.live.camera_enabled = False
+        context = build_context(settings)
+        live = context.live
+        seen: set[int] = set()
+        frames: list[Any] = []
+        started = time.perf_counter()
+        live.start(scenario, 42)
+        try:
+            while time.perf_counter() - started < seconds:
+                time.sleep(0.05)
+                sequence, snapshot = context.scene.latest()
+                if snapshot is None or sequence in seen:
+                    continue
+                seen.add(sequence)
+                frames.append(snapshot)
+                if live.status().state.value != "RUNNING":
+                    break
+        finally:
+            live.stop()
+        return frames
+
+    def test_the_parked_car_is_a_vehicle_with_a_stable_id_and_a_real_distance(self) -> None:
+        frames = self._records("static_obstacle", 60.0)
+        # The in-path object the controller held on: one track id for the approach.
+        in_path = [
+            r
+            for s in frames
+            for r in s.objects
+            if r.in_ego_path and r.distance_m is not None and r.distance_m < 20.0
+        ]
+        assert in_path, "nothing in the path was ever closer than 20 m"
+        classes = {r.object_class.value for r in in_path}
+        assert "vehicle" in classes, classes
+        vehicle_ids = [r.track_id for r in in_path if r.object_class.value == "vehicle"]
+        assert len(set(vehicle_ids)) <= 2, f"identity churn on the parked car: {set(vehicle_ids)}"
+        distances = [r.distance_m for r in in_path if r.track_id == vehicle_ids[-1]]
+        assert min(distances) < 9.0, "the ego held short of it"
+        assert all(r.longitudinal_distance_m > 0 for r in in_path), "ahead of the ego"
+        now = [r for r in in_path if r.path_relation.value == "IN_PATH"]
+        assert now, "the car was IN_PATH at some point"
+        assert all(abs(r.lateral_distance_m) <= 1.8 for r in now), "IN_PATH is in the corridor"
+
+    def test_the_crossing_walker_is_a_pedestrian_whose_distance_and_path_change(self) -> None:
+        frames = self._records("pedestrian_crossing", 55.0)
+        walkers = [
+            r
+            for s in frames
+            for r in s.objects
+            if r.object_class.value == "pedestrian" and r.tracking_state.value == "confirmed"
+        ]
+        assert walkers, "no confirmed pedestrian track"
+        by_id: dict[int, list[Any]] = {}
+        for r in walkers:
+            by_id.setdefault(r.track_id, []).append(r)
+        longest = max(by_id.values(), key=len)
+        assert len(longest) >= 20, "the walker was tracked for at least a second"
+        relations = {r.path_relation.value for r in longest}
+        assert relations & {"IN_PATH", "CROSSING"}, relations
+        lateral = [r.lateral_distance_m for r in longest]
+        assert max(lateral) - min(lateral) > 1.0, "its lateral position changed as it crossed"
+        speeds = [r.speed_mps for r in longest if r.speed_mps is not None]
+        assert speeds, "a tracked speed exists once velocity is measured"
+        assert all(r.confidence is not None for r in longest), "a classified track has a fit score"

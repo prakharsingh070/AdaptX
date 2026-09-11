@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+import numpy as np
 from pydantic import ConfigDict, Field, model_validator
 
 from adaptx.models.common import AdaptXModel, TimestampedModel
@@ -244,3 +245,18 @@ class PointCloudProcessingResult(AdaptXModel):
     def ground_summary(self) -> PointCloudSummary | None:
         """Metadata of the ground frame, or ``None`` when segmentation did not run."""
         return None if self.ground_frame is None else self.ground_frame.summary()
+
+
+def floor_estimate_m(result: PointCloudProcessingResult) -> float | None:
+    """The road surface height the ground stage found, in the frame's own coordinates.
+
+    The median ``z`` of the points ground segmentation removed - a single
+    number for the whole frame, which assumes the road near the ego is
+    roughly level. ``None`` when the stage did not run or removed nothing,
+    so a caller that needs a floor (the detector's elevated-cluster rule)
+    knows it has none rather than assuming one.
+    """
+    ground = result.ground_frame
+    if ground is None or ground.point_count == 0:
+        return None
+    return float(np.median(ground.points[:, 2]))

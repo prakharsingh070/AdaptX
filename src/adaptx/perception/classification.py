@@ -28,9 +28,23 @@ Class                   Height        Footprint length  Footprint width
 ======================  ============  ================  ===============
 ``PEDESTRIAN``          0.90 - 2.20   0.20 - 1.20       0.20 - 1.20
 ``BICYCLE``             0.60 - 2.00   1.20 - 2.60       0.20 - 1.00
-``VEHICLE``             1.00 - 2.60   2.60 - 6.50       1.30 - 2.60
+``VEHICLE``             1.00 - 2.60   1.50 - 6.50       1.30 - 2.60
 ``OBSTACLE``            0.15 - 1.00   0.20 - 3.00       0.20 - 3.00
 ======================  ============  ================  ===============
+
+The vehicle band's lower length bound was 2.60 until the post-Phase-12 live
+perception upgrade. Measured on CARLA 0.9.16, a car seen from behind by a
+roof LiDAR never shows its length: an Audi TT (4.2 x 1.9 x 1.4 m) clustered
+as 2.0 x 1.88 x 1.12 m at 5-10 m and 0.8-1.2 x 1.7-1.8 x 0.5-0.9 m at
+15-25 m, and so was never once a ``VEHICLE`` - it was ``UNKNOWN`` or, by the
+obstacle band, ``OBSTACLE``. A cluster 1.3-2.6 m across and 1.0-2.6 m tall
+is a vehicle-sized face; nothing else in the bands is that wide *and* that
+tall (a bicycle is under 1.0 m wide, a pedestrian under 1.2 m, an obstacle
+under 1.0 m tall), so the relaxed band overlaps no other and creates no new
+ambiguity. What it cannot do is separate a car's rear from a bus shelter's
+side: that remains a limitation of geometry. Below 1.0 m of visible height
+(far range, few beams) the same car still reads ``OBSTACLE``; the tracker's
+class hysteresis promotes it to ``VEHICLE`` as the view improves.
 
 The project's existing :class:`~adaptx.models.common.ObjectClass` names the
 bicycle class ``CYCLIST``; that contract is reused rather than duplicated.
@@ -109,7 +123,7 @@ def _axis_fit(value: float, low: float, high: float) -> float:
 BANDS: tuple[DimensionBand, ...] = (
     DimensionBand(ObjectClass.PEDESTRIAN, 0.90, 2.20, 0.20, 1.20, 0.20, 1.20),
     DimensionBand(ObjectClass.CYCLIST, 0.60, 2.00, 1.20, 2.60, 0.20, 1.00),
-    DimensionBand(ObjectClass.VEHICLE, 1.00, 2.60, 2.60, 6.50, 1.30, 2.60),
+    DimensionBand(ObjectClass.VEHICLE, 1.00, 2.60, 1.50, 6.50, 1.30, 2.60),
     DimensionBand(ObjectClass.OBSTACLE, 0.15, 1.00, 0.20, 3.00, 0.20, 3.00),
 )
 
@@ -117,7 +131,7 @@ BANDS: tuple[DimensionBand, ...] = (
 class GeometricClassifier:
     """Assigns a class from cluster dimensions alone. Baseline, not learned."""
 
-    name = "geometric_bands_v1"
+    name = "geometric_bands_v2"
     #: True while classification is a heuristic rather than a trained model.
     is_baseline = True
 

@@ -379,7 +379,7 @@ class TestLifecycle:
 
     def test_an_object_returning_after_deletion_gets_a_new_id(self) -> None:
         """No re-identification exists: a retired track does not come back."""
-        stage = tracker(min_hits_to_confirm=1, max_missed_frames=1)
+        stage = tracker(min_hits_to_confirm=1, max_missed_frames=1, max_missed_frames_tentative=1)
         stage.update([detection((10.0, 0.0, 0.0))], at(0.0))
         stage.update([], at(0.1))
         stage.update([], at(0.2))

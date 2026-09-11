@@ -53,7 +53,7 @@ from adaptx.core.lifecycle import ApplicationContext, build_context
 from adaptx.core.logging import get_logger
 from adaptx.models.common import DataSource, Vector3
 from adaptx.models.point_cloud import RawPointCloudFrame
-from adaptx.models.processing import PointCloudProcessingResult
+from adaptx.models.processing import PointCloudProcessingResult, floor_estimate_m
 from adaptx.scenarios.interfaces import ScenarioSimulator
 from adaptx.scenarios.models import (
     Placement,
@@ -164,7 +164,7 @@ def pipeline_processor(
         processed = context.preprocessor.run(frame)
         if on_processed is not None:
             on_processed(processed)
-        detection = context.detector.detect(processed.frame)
+        detection = context.detector.detect(processed.frame, floor_z_m=floor_estimate_m(processed))
         tracking = context.tracking.update(
             detection.objects,
             processed.frame.timestamp,

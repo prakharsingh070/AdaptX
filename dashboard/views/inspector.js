@@ -4,7 +4,7 @@
 
 import { el, card, kv, notice, clear, levelTag, table } from "../ui.js";
 import { state, subscribe, currentScene, selectTrack } from "../app.js";
-import { fmt, fmtMetres, fmtSeconds, fmtVector, fmtPercent, NOT_AVAILABLE, isMissing } from "../data/format.js";
+import { fmt, fmtMetres, fmtSeconds, fmtVector, fmtPercent, NOT_AVAILABLE, isMissing, classGlyph, classLabel, pathLabel } from "../data/format.js";
 import { findObject } from "../data/normalise.js";
 
 export function inspectorPanel(object, scene) {
@@ -20,7 +20,26 @@ export function inspectorPanel(object, scene) {
       table(["track", "class", "status", "assessed dist.", "risk"], rows, { onRow: (i) => selectTrack(scene.objects[i].trackId) }),
     ]);
   }
-  const t = object.track, a = object.assessment, tr = object.trajectory;
+  const t = object.track, a = object.assessment, tr = object.trajectory, r = object.record;
+  const recordCard = r
+    ? card(`${classGlyph(r.object_class)} ${classLabel(r.object_class)} #${r.track_id}`, [
+      kv([
+        ["class", classLabel(r.object_class)],
+        ["distance (planar)", isMissing(r.distance_m) ? null : fmtMetres(r.distance_m, 1), { missing: "Not available (no risk assessment)" }],
+        ["longitudinal (ahead +)", fmtMetres(r.longitudinal_distance_m, 1)],
+        ["lateral (left +)", fmt(r.lateral_distance_m, { digits: 1, sign: true, unit: " m" })],
+        ["speed (ego-relative)", isMissing(r.speed_mps) ? null : `${fmt(r.speed_mps, { digits: 1 })} m/s`, { missing: "Not available (velocity not yet measured)" }],
+        ["relative speed (closing +)", isMissing(r.relative_speed_mps) ? null : `${fmt(r.relative_speed_mps, { digits: 1, sign: true })} m/s`],
+        ["risk", levelTag(r.risk_level)],
+        ["risk score", isMissing(r.risk_score) ? null : fmt(r.risk_score, { digits: 3 }), { missing: "Not available (UNKNOWN)" }],
+        ["ego path", el("span", { class: r.in_ego_path ? "path in" : "path", text: pathLabel(r.path_relation) })],
+        ["track state", `${r.tracking_state} · ${r.hits} hits · ${r.age_frames} frames`],
+        ["prediction", r.predicted_points ? `${fmtSeconds(r.predicted_horizon_s, 1)} horizon · ${r.predicted_points} points` : null, { missing: "Not available (no predicted path)" }],
+        ["confidence (geometric fit)", isMissing(r.confidence) ? null : fmtPercent(r.confidence, 0), { missing: NOT_AVAILABLE }],
+      ]),
+      el("div", { class: "note", text: "Backend-built record: every value is a Phase 4/5/7 output joined by track id. Sensor frame, +X forward, +Y left; velocities are ego-relative (no ego-motion compensation). Confidence is a geometric fit score, not a probability." }),
+    ], { tag: { text: "LIVE", cls: "live" } })
+    : null;
   const trackCard = card(`Track #${t.track_id}`, kv([
     ["class", t.object_class],
     ["status", t.status],
@@ -98,7 +117,7 @@ export function inspectorPanel(object, scene) {
       ])),
     ]);
   }
-  return el("div", {}, [trackCard, riskCard, pathCard]);
+  return el("div", {}, [recordCard, trackCard, riskCard, pathCard]);
 }
 
 export function renderInspector(root) {

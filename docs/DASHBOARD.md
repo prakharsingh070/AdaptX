@@ -150,6 +150,38 @@ safety fallback that ends the session and records the contact.
 Ground truth stays out of the live snapshot exactly as before: the contract has no field
 for it, and the loop never calls `session.ground_truth()`.
 
+### 3.5 The object record (live perception upgrade, ADR-057)
+
+Every live snapshot carries one `TrackedObjectSnapshot` per track, built in the backend
+from the track (Phase 4), its risk assessment (Phase 7) and its predicted path (Phase 5),
+joined by `track_id`:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `object_class`, `tracking_state`, `hits`, `age_frames` | tracker | the geometric classifier's label with the tracker's hysteresis and decay; UNKNOWN stays UNKNOWN |
+| `distance_m` | risk assessment | planar (XY) distance from the ego reference; null when unassessed |
+| `longitudinal_distance_m`, `lateral_distance_m` | track position | `x` (ahead +) and `y` (left +) in the sensor frame, +X forward, +Y left (ADR-009) |
+| `speed_mps` | tracker | scalar of the tracked velocity, **ego-relative**; null until measured |
+| `relative_speed_mps` | risk assessment | closing speed, positive = approaching |
+| `risk_level`, `risk_score` | risk engine | the object's own level; score null when UNKNOWN |
+| `path_relation`, `in_ego_path` | `control.corridor` | IN_PATH / CROSSING / BEHIND / OUTSIDE against the ego corridor (`ADAPTX_CONTROL__PATH_HALF_WIDTH_M`), the same rule that governs the speed |
+| `confidence` | detector via tracker | geometric fit score, **not a probability**; null for UNKNOWN |
+| `predicted_horizon_s`, `predicted_points` | predictor | the constant-velocity path, if one exists |
+
+The Detected Objects cards, the tracking table's path column, the scene labels
+(`#12 VEHICLE 14.8m HIGH` with `IN PATH` beneath) and the inspector's top block all read
+this record. Recorded runs predate it and carry none; playback shows the raw contracts.
+
+**Classification, honestly.** Classes come from dimension bands (`perception/
+classification.py`, now `geometric_bands_v2`): PEDESTRIAN 0.9-2.2 m tall and under 1.2 m
+across; CYCLIST 0.6-2.0 m tall, 1.2-2.6 m long, under 1.0 m wide; VEHICLE 1.0-2.6 m tall,
+1.3-2.6 m across, 1.5-6.5 m along; OBSTACLE under 1.0 m tall. Anything fitting no band
+or several is UNKNOWN. The detector first drops clusters whose bottom is more than 0.8 m
+above the road the ground stage found (overhead signs, foliage - measured to be what the
+old "pedestrians" were), and the tracker drops a label after three UNKNOWN observations.
+Known confusions remain: a bus shelter's side reads VEHICLE; a bollard reads PEDESTRIAN;
+a riderless CARLA bicycle is mostly UNKNOWN/OBSTACLE (Experiment 015).
+
 ## 4. Data contracts consumed
 
 | Contract | Owner | Used by |
@@ -264,10 +296,11 @@ so in the Routing card.
 - Browser rendering performance is measured separately from the pipeline (Experiment 013)
   and says nothing about ADAPT-X's speed.
 - The frontend boundary test is a source scan for arithmetic and metric names, not a proof.
-- **The live loop runs at about 0.3x wall-clock speed** on the validation machine
-  (Experiment 014: ~160 ms per 50 ms frame, of which ~120 ms is the pipeline). The header
-  says `PIPELINE LAGGING` with the measured ratio; the simulation is consistent, just slow.
-  With the dashboard open in the same machine it is slower still (~0.25x).
+- **The live loop runs at about 0.42x wall-clock speed** on the validation machine
+  (Experiment 015: ~120 ms per 50 ms frame, of which ~85 ms is the pipeline; it was 0.31x
+  before the tile-geometry memoisation). The header says `PIPELINE LAGGING` with the
+  measured ratio; the simulation is consistent, just slow. With the dashboard open in the
+  same process it is slower still.
 - Velocities are ego-relative (no ego-motion compensation): with the ego moving, every
   static object reports a velocity of minus the ego's, and the risk engine's closing-speed
   factor rises for all of them. The controller keys on in-path objects to contain this.
@@ -277,8 +310,11 @@ so in the Routing card.
 - A killed backend (not a stopped session) leaves actors on the CARLA server; `Stop`
   cleans up, a crash does not. A fresh client sees a stale actor list on a server left
   synchronous - switch it asynchronous and wait a frame before cleaning.
-- The classifier still labels poles "pedestrian" and cars "obstacle" (Experiments
-  011/012); the events and tables show those labels as produced.
+- Classification is geometric (ADR-057): a parked car is VEHICLE from ~12 m and OBSTACLE
+  beyond; a walker is PEDESTRIAN in about 70 % of its tracked frames and UNKNOWN when its
+  cluster merges with furniture; a riderless bicycle is mostly not a CYCLIST and switches
+  identity while crossing; a bollard can read PEDESTRIAN (Experiment 015). Labels and
+  fit scores are shown as produced.
 - Not production software: no auth, no persistence beyond a per-tab memory of which report,
   run and overlays were chosen, no multi-user state.
 

@@ -270,6 +270,20 @@ every component in `services/system_service.py` agree with the list below.
   by claim, NOT real-time. Velocities are ego-relative (no ego-motion compensation); the
   corridor is straight; routing and planning NOT IMPLEMENTED. A killed backend leaks
   actors - stop the session.
+- Live perception upgrade (post-Phase-12, NOT a Phase 13) - DONE and measured (ADR-057,
+  Experiment 015): every live object carries a BACKEND-BUILT record - class, tracking
+  state, planar distance, longitudinal/lateral distance, ego-relative and closing speed,
+  risk level and score, IN_PATH/CROSSING/BEHIND/OUTSIDE by the controller's own corridor
+  rule (`control.corridor`, shared), fit-score confidence (null for UNKNOWN) - and the
+  dashboard only formats it. Measured perception fixes: the detector rejects clusters
+  whose bottom is > 0.8 m above the ground stage's floor (false "pedestrians" 671 -> 37 a
+  minute: they were overhead signs and foliage), a track's label lapses after 3 UNKNOWN
+  observations, the vehicle band accepts a car's rear face (parked car VEHICLE 0 -> 269 of
+  357 frames), tentative tracks survive 2 misses (id switches 5 -> 2). Tile geometry
+  memoised: loop 160 -> 120 ms (0.42x wall-clock, still LAGGING). NOT SUPPORTED: a
+  riderless CARLA bicycle is mostly UNKNOWN/OBSTACLE and switches identity while
+  crossing; a bollard can read PEDESTRIAN. Phase 11's evaluation reports were measured
+  under the OLD defaults and are not re-run. Ground truth is read by NO live path.
 - The roadmap defines no Phase 13; open work is the deferred items in `docs/ROADMAP.md`.
 
 ## Start Here

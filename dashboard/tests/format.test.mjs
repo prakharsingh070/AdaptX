@@ -50,3 +50,15 @@ test("an empty distribution says so instead of printing zeros", () => {
   assert.match(text, /n=3/);
   assert.match(text, /p95 n\/a/);
 });
+
+test("object labels and glyphs pass the pipeline's class through, UNKNOWN included", async () => {
+  const { classGlyph, classLabel, pathLabel, objectLabel, fmt } = await import("../data/format.js");
+  assert.equal(classGlyph("unknown"), "?");
+  assert.equal(classLabel(null), "UNKNOWN");
+  assert.equal(pathLabel("IN_PATH"), "IN PATH");
+  assert.equal(pathLabel(null), "Not available");
+  assert.equal(objectLabel({ distance_m: 14.83 }, { track_id: 12, object_class: "cyclist" }, "high"), "#12 CYCLIST 14.8m HIGH");
+  assert.equal(objectLabel(null, { track_id: 3, object_class: "unknown" }, null), "#3 UNKNOWN");
+  assert.equal(fmt(2.1, { digits: 1, sign: true }), "+2.1");
+  assert.equal(fmt(-2.1, { digits: 1, sign: true }), "-2.1");
+});

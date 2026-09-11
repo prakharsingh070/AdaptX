@@ -36,6 +36,7 @@ Rules, in the order they are applied:
 from __future__ import annotations
 
 from adaptx.config.settings import ControlSettings
+from adaptx.control.corridor import governs, path_relation
 from adaptx.control.models import (
     ControlCommand,
     ControlConfiguration,
@@ -129,21 +130,19 @@ class RiskGovernedSpeedPolicy:
         """
         s = self._settings
         positions = {t.track_id: t.position for t in tracking.tracks}
-        crossing = {
-            t.track_id
-            for t in prediction.trajectories
-            if any(
-                p.position.x > 0.0 and abs(p.position.y) <= s.path_half_width_m for p in t.points
-            )
-        }
+        predicted = {t.track_id: [p.position for p in t.points] for t in prediction.trajectories}
 
+        # One corridor rule, shared with the scene snapshot (control.corridor),
+        # so what the dashboard labels IN PATH is what governs the speed.
         in_path: list[RiskAssessment] = []
         for assessment in risk.assessments:
             position = positions.get(assessment.track_id)
             if position is None:
                 continue
-            ahead_now = position.x > 0.0 and abs(position.y) <= s.path_half_width_m
-            if ahead_now or assessment.track_id in crossing:
+            relation = path_relation(
+                position, predicted.get(assessment.track_id, ()), s.path_half_width_m
+            )
+            if governs(relation):
                 in_path.append(assessment)
         nearest = min(in_path, key=lambda a: a.distance_m, default=None)
 

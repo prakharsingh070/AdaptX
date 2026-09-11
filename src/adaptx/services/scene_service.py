@@ -17,19 +17,23 @@ from threading import Lock
 
 import numpy as np
 
+from adaptx.config.settings import ControlSettings
+from adaptx.control.corridor import governs, path_relation
 from adaptx.control.models import ControlCommand
 from adaptx.core.logging import get_logger
 from adaptx.live.models import LiveFrameInfo
 from adaptx.models.adaptive_map import AdaptiveSpatialMapSummary, MappingComparison
 from adaptx.models.adaptive_resolution import ResolutionPlan
-from adaptx.models.common import DataSource
+from adaptx.models.common import DataSource, ObjectClass
 from adaptx.models.detection import DetectionResult
 from adaptx.models.prediction_result import PredictionResult
+from adaptx.models.risk import RiskLevel
 from adaptx.models.risk_assessment import RiskAssessmentResult
 from adaptx.models.scene import (
     DEFAULT_MAX_SAMPLE_POINTS,
     PointStage,
     SceneSnapshot,
+    TrackedObjectSnapshot,
     sample_points,
 )
 from adaptx.models.spatial_map import SpatialMapSummary
@@ -64,12 +68,23 @@ def build_snapshot(
     ego: VehicleState | None = None,
     control: ControlCommand | None = None,
     live: LiveFrameInfo | None = None,
+    path_half_width_m: float | None = None,
 ) -> SceneSnapshot:
-    """Bundle one frame's pipeline outputs for display. Nothing is derived."""
+    """Bundle one frame's pipeline outputs for display.
+
+    Nothing is computed that the pipeline did not: the per-object records
+    join each track with its assessment and predicted path by id and label it
+    against the ego corridor with the same rule the controller uses
+    (``path_half_width_m``; the control default when not given).
+    """
+    half_width = (
+        ControlSettings().path_half_width_m if path_half_width_m is None else path_half_width_m
+    )
     return SceneSnapshot(
         ego=ego,
         control=control,
         live=live,
+        objects=object_records(tracking, prediction, risk, half_width),
         timestamp=frame_timestamp,
         frame_id=frame_id,
         sensor_id=sensor_id,
@@ -105,6 +120,48 @@ def build_snapshot(
             "adaptive_mapping": adaptive_map.mapping_duration_ms,
         },
     )
+
+
+def object_records(
+    tracking: TrackingResult,
+    prediction: PredictionResult,
+    risk: RiskAssessmentResult,
+    path_half_width_m: float,
+) -> list[TrackedObjectSnapshot]:
+    """One record per track, joined by id. Every value is a pipeline output."""
+    assessments = {a.track_id: a for a in risk.assessments}
+    trajectories = {t.track_id: t for t in prediction.trajectories}
+    records: list[TrackedObjectSnapshot] = []
+    for track in tracking.tracks:
+        assessment = assessments.get(track.track_id)
+        trajectory = trajectories.get(track.track_id)
+        relation = path_relation(
+            track.position,
+            [] if trajectory is None else [p.position for p in trajectory.points],
+            path_half_width_m,
+        )
+        records.append(
+            TrackedObjectSnapshot(
+                track_id=track.track_id,
+                object_class=track.object_class,
+                tracking_state=track.status,
+                distance_m=None if assessment is None else assessment.distance_m,
+                longitudinal_distance_m=track.position.x,
+                lateral_distance_m=track.position.y,
+                speed_mps=track.speed_mps,
+                relative_speed_mps=None if assessment is None else assessment.closing_speed_mps,
+                risk_level=RiskLevel.UNKNOWN if assessment is None else assessment.risk_level,
+                risk_score=None if assessment is None else assessment.risk_score,
+                in_ego_path=governs(relation),
+                path_relation=relation,
+                confidence=None if track.object_class is ObjectClass.UNKNOWN else track.confidence,
+                hits=track.hits,
+                age_frames=track.age_frames,
+                predicted_horizon_s=None if trajectory is None else trajectory.horizon_s,
+                predicted_points=0 if trajectory is None else len(trajectory.points),
+            )
+        )
+    return records
 
 
 class SceneService:
