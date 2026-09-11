@@ -21,6 +21,8 @@ from adaptx.api.schemas import (
 )
 from adaptx.core.exceptions import InvalidPointCloudError
 from adaptx.models.resolution import ResolutionDecision
+from adaptx.models.scene import PointStage
+from adaptx.services.scene_service import build_snapshot
 
 router = APIRouter(prefix="/lidar", tags=["lidar"])
 
@@ -540,6 +542,30 @@ def adaptive_map_frame(
         context.adaptive_mapping.compare_with_fixed(adaptive_map, spatial_map)
         if payload.include_fixed_comparison and spatial_map is not None
         else None
+    )
+
+    # The dashboard's live scene: what this request produced, handed over
+    # for display after the fact. Nothing above depends on it (ADR-055).
+    context.scene.publish(
+        build_snapshot(
+            frame_id=processed.frame.frame_id,
+            sensor_id=processed.frame.sensor_id,
+            source=processed.frame.source,
+            frame_timestamp=processed.frame.timestamp,
+            origin="api",
+            points=processed.frame.points,
+            point_stage=PointStage.PROCESSED,
+            detection=detection,
+            tracking=tracking,
+            prediction=prediction,
+            risk=risk,
+            plan=plan,
+            adaptive_map=adaptive_map.summary(controller_duration_ms=plan.duration_ms),
+            fixed_map=None if spatial_map is None else spatial_map.summary(),
+            comparison=comparison,
+            processing_ms=processed.metrics.duration_ms,
+            max_points=context.settings.dashboard.scene_max_points,
+        )
     )
 
     return LiDARAdaptiveMapResponse(

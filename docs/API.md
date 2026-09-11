@@ -13,7 +13,15 @@ yet.
 
 `POST /api/v1/lidar/adaptive-map` is the Phase 8 endpoint. Its detail priority is an
 **engineering prioritisation score**, not a probability of collision and not a safety
-margin.
+margin. Since Phase 12 it also publishes a `SceneSnapshot` of what it produced for the
+dashboard (see *Scene* below); the response is unchanged.
+
+Phase 12 added, additively: `GET /api/v1/scene/latest`, `POST /api/v1/scene/frame`, the
+read-only stored-evidence endpoints under `/api/v1/reports` and `/api/v1/runs`, the
+`WS /ws/scene` channel, and the static console at `/dashboard/` (`/` redirects there).
+**None of them computes anything and none controls the simulator.** The post-Phase-12 live
+extension added `/api/v1/live/*`: reads plus five high-level session controls (start,
+pause, resume, stop, reset) - see *Live simulation session* below.
 
 ---
 
@@ -1436,6 +1444,114 @@ async def main():
 
 asyncio.run(main())
 ```
+
+---
+
+## `WS /ws/scene` (Phase 12)
+
+Pushes the latest `SceneSnapshot` to a dashboard client whenever the scene service's
+sequence changes (polled every 40 ms). Same envelope as telemetry:
+
+```json
+{"type": "hello", "sequence": 3, "timestamp": "…", "data": {"has_scene": true, "poll_interval_s": 0.04}}
+{"type": "scene", "sequence": 4, "timestamp": "…", "data": { …SceneSnapshot… }}
+```
+
+A late client receives `hello` and then the current scene at once. The channel carries
+frame geometry - a point sample, tracks, trajectories, assessments, tile decisions, map
+summaries - which is exactly what `/ws/telemetry` deliberately does not. It never carries
+ground truth: the snapshot contract has no field for it.
+
+---
+
+## `GET /api/v1/scene/latest` (Phase 12)
+
+```json
+{"sequence": 0, "has_scene": false, "scene": null, "detail": "no frame has been processed yet"}
+```
+
+Once something has run the full chain (`POST /api/v1/lidar/adaptive-map`) or a scenario run
+has published frames, `has_scene` is true and `scene` is the `SceneSnapshot`:
+
+| Field | Meaning |
+|---|---|
+| `frame_id`, `sensor_id`, `source`, `frame_timestamp` | The sensor frame's identity and provenance, as recorded |
+| `origin` | `"api"` or `"scenario:<id>"`; `scenario_id`, `frame_index`, `scenario_time_s` when from a scenario |
+| `points` | `PointSample`: `xyz` (≤ `dashboard.scene_max_points`, default 6000, stride-sampled, 2 dp), `total_count`, `sample_count`, `is_downsampled`, `stride`, `stage` (`raw` from the CLI, `processed` from the endpoint), `coordinate_frame` |
+| `detection_count`, `tracks`, `trajectories`, `assessments`, `highest_risk_level` | Phase 3/4/5/7 outputs **as produced** - `velocity` null until measured, `risk_score` null when `UNKNOWN` |
+| `tiles`, `budget`, `fixed_map`, `adaptive_map`, `comparison` | Phase 8 decisions and Phase 6/8 summaries (no cells) |
+| `stage_ms` | Measured per-stage durations |
+
+## `POST /api/v1/scene/frame` (Phase 12)
+
+Accepts a `SceneSnapshot` a producer already built - used by
+`python -m adaptx.scenarios run <id> --publish http://127.0.0.1:8000` after the scenario's
+own pipeline processed the frame. Responds `202` with `{"accepted": true, "sequence": n,
+"frame_id": …}` and an `X-Scene-Sequence` header; `422` for a malformed snapshot, including
+one carrying a `ground_truth` key. **Nothing is computed**: the snapshot is validated, stored
+as the latest and broadcast.
+
+---
+
+## Stored evidence (Phase 12, read-only)
+
+Reports and runs are JSON files in `ADAPTX_DASHBOARD__REPORT_DIR` (default `reports/`) and
+`ADAPTX_DASHBOARD__RUN_DIR` (default `runs/`). Names are plain file names ending in
+`.json`; anything else is refused before the file system is touched. A file that is not a
+valid `EvaluationReport` / `ScenarioRunResult` is a `404` whose message carries the
+validation error. Files are never written or modified.
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/v1/reports` | `{"directory": "...", "files": [{"name", "size_bytes", "modified"}]}` |
+| GET | `/api/v1/reports/{name}` | The `EvaluationReport` (Phase 11 contract, unchanged) |
+| GET | `/api/v1/reports/compare?first=&second=` | The Phase 11 `ComparisonReport` from `compare_reports` |
+| GET | `/api/v1/runs` | Listing, as for reports |
+| GET | `/api/v1/runs/{name}` | `RunSummary`: scenario, seed, state, map, simulator version, timestep, frame counts, `has_outputs`, actors, sensor, `frame_ids`, `scenario_times_s` - **without the frames** |
+| GET | `/api/v1/runs/{name}/frames/{index}` | `RunFrame`: `frame` (the `ScenarioFrameRecord` with its `outputs`) and `ground_truth` (the `GroundTruthFrame`). **This is the only path that serves ground truth**, for evaluation playback; `404` outside the run |
+
+The backend keeps the last `dashboard.run_cache_size` (default 2) parsed runs in memory so
+frame requests do not re-parse a 40 MB record.
+
+---
+
+## Live simulation session (post-Phase-12 extension, ADR-056)
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/v1/live/status` | `LiveStatus`: `state` (IDLE / STARTING / RUNNING / PAUSED / STOPPING / STOPPED / COLLIDED / ERROR), `controls_enabled`, scenario id/name/seed, `session_time_s`, frames processed / snapshots published, the `SimulationSessionStatus`, `carla_connected`, `ego` (`VehicleState`, SIMULATION-labelled odometry), `ego_speed_mps`, the last `ControlCommand` and `controller_state`, `control_configuration` (every threshold, `is_baseline: true`), measured `timing` (`LiveTiming`), `collision_count`, `active_actors`, `traffic_count`, `camera_available`, `last_error`, `event_sequence`, `detail` |
+| GET | `/api/v1/live/scenarios` | The catalogue: `scenario_id`, `name`, `description`, `default_seed`, `traffic_vehicles`, `event_count` |
+| GET | `/api/v1/live/events?since=&limit=` | `LiveEvent`s newer than `since` (kinds: `session_started`, `scenario`, `object_detected`, `track_lost`, `risk_level_changed`, `controller`, `resolution_changed`, `collision`, `paused`, `resumed`, `session_ended`), each with simulation time and frame; derived by the loop from the pipeline's outputs and the session, never from ground truth |
+| GET | `/api/v1/live/camera` | The newest ego RGB frame as `image/png` (`404` when none). Display only |
+| POST | `/api/v1/live/start` `{scenario_id?, seed?}` | `202` + `LiveStatus`. Opens the session synchronously (so a dead server is a `503` at once), spawns the scenario, starts the loop. `409` while a session is active; `409` when controls are disabled |
+| POST | `/api/v1/live/pause`, `/resume`, `/stop`, `/reset` | `LiveStatus`. Pause stops ticking; stop destroys every actor and restores the world; reset stops and restarts the same scenario and seed |
+
+These five are the **only** non-read endpoints of the extension and are allowlisted by
+full path in the route audit; nothing spawns, destroys, moves, ticks or drives an actor
+over HTTP. `ADAPTX_LIVE__CONTROLS_ENABLED=false` refuses all five with `409`.
+
+The `SceneSnapshot` a live session publishes has `origin = "live:<scenario_id>"` and
+three additional optional fields: `ego` (the ego's own odometry), `control` (the command
+the baseline controller issued after this frame: `throttle`, `brake`, `steer` [+ = left],
+`target_speed_mps`, `setpoint_mps`, `state`, `governing_level` [in path], `scene_level`,
+`governing_track_id`, `nearest_in_path_m`, `reason`, `is_baseline`) and `live`
+(`scenario_id`, `seed`, `simulation_frame`, `simulation_time_s`, `session_time_s`,
+`controller_state`, `collision_count`, `active_actor_count`, `traffic_count`, and
+`timing`: `step_ms`, `pipeline_ms`, `control_ms`, `snapshot_ms` [previous frame],
+`loop_ms`, `fixed_delta_s`, `realtime_factor`, `lagging`, `frames_processed`,
+`loop_ms_median`, `loop_ms_max`). `WS /ws/scene` envelopes now carry `skipped`: how
+many published frames were superseded between two pushes to that client.
+
+`GET /api/v1/carla/status` now reports `CONNECTED` while a live session is open and
+`ERROR` (a new `CarlaStatus` value) when the session failed, with the session's detail.
+
+---
+
+## `/dashboard/` (Phase 12)
+
+The static console, served with `Cache-Control: no-cache`. `/` redirects to it. It makes
+only `GET` requests to the endpoints above and to the status endpoints, and opens the two
+WebSockets. See `docs/DASHBOARD.md`.
 
 ---
 

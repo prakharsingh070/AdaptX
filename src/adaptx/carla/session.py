@@ -39,9 +39,12 @@ away - which is the failure that makes a CARLA server *appear* hung.
 from __future__ import annotations
 
 import importlib
+import math
 import queue
+import threading
+from collections import deque
 from types import ModuleType
-from typing import Any
+from typing import Any, NamedTuple
 
 from adaptx.carla.conversion import (
     adaptx_offset_to_carla,
@@ -61,9 +64,10 @@ from adaptx.carla.ground_truth import (
     classify_blueprint,
 )
 from adaptx.config.settings import CarlaSettings
+from adaptx.control.models import EgoObservation
 from adaptx.core.exceptions import SimulatorUnavailableError
 from adaptx.core.logging import get_logger
-from adaptx.models.common import DataSource, Dimensions
+from adaptx.models.common import AdaptXModel, DataSource, Dimensions
 from adaptx.models.point_cloud import RawPointCloudFrame
 from adaptx.models.system import SimulationSessionStatus, SimulationState
 from adaptx.models.vehicle import VehicleState
@@ -77,6 +81,55 @@ LIDAR_BLUEPRINT = "sensor.lidar.ray_cast"
 #: Height above the resting pose at which an actor is spawned before being
 #: set down: the server refuses a spawn whose collision volume meets the road.
 SPAWN_CLEARANCE_M = 0.5
+
+#: Safety-fallback sensor (live extension): reports a contact the controller
+#: failed to prevent. Never a perception input.
+COLLISION_BLUEPRINT = "sensor.other.collision"
+
+#: Visualisation-only front camera (live extension). No perception stage
+#: reads it; LiDAR remains the only perception input.
+CAMERA_BLUEPRINT = "sensor.camera.rgb"
+
+#: Camera mount relative to the ego origin, in the ADAPT-X frame. A fixed
+#: presentation choice (windscreen height, slightly forward), not a
+#: calibrated value.
+CAMERA_MOUNT_M = (1.2, 0.0, 1.5)
+
+#: How many collision events are kept.
+COLLISION_HISTORY = 50
+
+
+class WorldAnchor(NamedTuple):
+    """An opaque world pose (CARLA frame) captured from the ego at one instant.
+
+    A live scenario spawns an obstacle "30 m ahead of where the ego is
+    *now*" and then keeps it there while the ego drives on. Placing relative
+    to the *current* ego pose every frame would drag the obstacle along, so
+    the pose is captured once and every later placement is relative to it.
+    Callers never read the fields; they hand the anchor back.
+    """
+
+    x: float
+    y: float
+    z: float
+    yaw_deg: float
+
+
+class CollisionEvent(AdaptXModel):
+    """One contact reported by the collision sensor - a safety record, not perception."""
+
+    simulation_frame: int
+    other_type_id: str
+    impulse: float
+
+
+class CameraImage(NamedTuple):
+    """The latest RGB camera frame, raw BGRA bytes as CARLA delivers them."""
+
+    frame: int
+    width: int
+    height: int
+    bgra: bytes
 
 
 def _stand_offset(actor: Any) -> float:
@@ -117,10 +170,27 @@ class CarlaSimulationSession:
     """
 
     def __init__(
-        self, settings: CarlaSettings, carla_module: ModuleType | Any | None = None
+        self,
+        settings: CarlaSettings,
+        carla_module: ModuleType | Any | None = None,
+        *,
+        drive_ego: bool = False,
+        traffic_manager_port: int = 8050,
     ) -> None:
         self._settings = settings
         self._carla = carla_module
+        # Phase 10 scenarios keep the ego physics-less and grounded (ADR-054)
+        # because the ego never drives. The live extension drives it, so its
+        # physics stays on and it settles onto the road like any vehicle.
+        self._drive_ego = drive_ego
+        self._tm_port = traffic_manager_port
+        self._traffic_manager: Any | None = None
+        self._collision_sensor: Any | None = None
+        self._collisions: deque[CollisionEvent] = deque(maxlen=COLLISION_HISTORY)
+        self._camera: Any | None = None
+        self._camera_latest: CameraImage | None = None
+        self._sensor_lock = threading.Lock()
+        self._last_control: tuple[float, float, float] | None = None
         self._client: Any | None = None
         self._world: Any | None = None
         self._original_settings: Any | None = None
@@ -245,13 +315,44 @@ class CarlaSimulationSession:
         never having been created. A failure to destroy one actor does not
         prevent the rest from being destroyed.
         """
+        if self._ego is not None and self._drive_ego:
+            self._safely(self.release_ego, "release ego control")
+        for name in ("_collision_sensor", "_camera"):
+            extra = getattr(self, name)
+            if extra is not None:
+                self._safely(extra.stop, f"stop {name[1:]}")
+                self._safely(extra.destroy, f"destroy {name[1:]}")
+                setattr(self, name, None)
         if self._sensor is not None:
             self._safely(self._sensor.stop, "stop LiDAR sensor")
             self._safely(self._sensor.destroy, "destroy LiDAR sensor")
             self._sensor = None
+        if self._traffic_manager is not None:
+            # Measured on CARLA 0.9.16: destroying a Traffic-Manager vehicle
+            # while the world is still synchronous and nobody ticks aborts the
+            # client process (STATUS_STACK_BUFFER_OVERRUN) and leaks every
+            # actor. The order the CARLA examples use is the one that works:
+            # world back to asynchronous FIRST, then the TM, then autopilot
+            # off, and only then destroy.
+            if self._world is not None and self._original_settings is not None:
+                self._safely(
+                    lambda: self._world.apply_settings(self._original_settings),
+                    "restore world settings before releasing traffic",
+                )
+            self._safely(
+                lambda: self._traffic_manager.set_synchronous_mode(False),
+                "release traffic manager",
+            )
+            for actor in self._actors:
+                if getattr(actor, "set_autopilot", None) is not None and actor is not self._ego:
+                    self._safely(lambda a=actor: a.set_autopilot(False), "autopilot off")
+            # One asynchronous server frame so the mode change and the
+            # autopilot release are applied before anything is destroyed.
+            if self._world is not None:
+                self._safely(self._world.wait_for_tick, "settle after releasing traffic")
+            self._traffic_manager = None
 
-        for actor in reversed(self._actors):
-            self._safely(actor.destroy, f"destroy actor {getattr(actor, 'id', '?')}")
+        self._destroy_actors()
         self._actors.clear()
         self._ego = None
         self._ego_spawn_index = None
@@ -269,6 +370,8 @@ class CarlaSimulationSession:
         self._original_settings = None
 
         _drain(self._queue)
+        self._camera_latest = None
+        self._last_control = None
 
         self._world = None
         self._client = None
@@ -501,6 +604,299 @@ class CarlaSimulationSession:
             (forward_m, left_m, up_m), ego_xyz, float(transform.rotation.yaw)
         )
 
+    # -- live extension: anchored placement ---------------------------------
+    def anchor(self) -> WorldAnchor:
+        """The ego's pose now, to place actors relative to later."""
+        transform = self._ego_transform()
+        return WorldAnchor(
+            float(transform.location.x),
+            float(transform.location.y),
+            float(transform.location.z),
+            float(transform.rotation.yaw),
+        )
+
+    def spawn_relative_to(
+        self,
+        anchor: WorldAnchor,
+        blueprint_id: str,
+        *,
+        forward_m: float,
+        left_m: float = 0.0,
+        up_m: float = 0.0,
+        physics: bool = False,
+    ) -> Any:
+        """Spawn an actor at an ADAPT-X offset from a captured anchor pose.
+
+        Like :meth:`spawn_ahead_of_ego`, but relative to where the ego *was*
+        when the anchor was taken, so a driving ego does not drag the actor
+        along. ``physics=False`` places the actor (ADR-047/054); ``True``
+        leaves it to the simulator, for traffic that drives itself.
+        """
+        carla = self._require_carla()
+        world = self._require_world()
+        blueprint = self._find_blueprint(blueprint_id)
+        cx, cy, cz = ego_offset_to_carla_world(
+            (forward_m, left_m, up_m + SPAWN_CLEARANCE_M),
+            (anchor.x, anchor.y, anchor.z),
+            anchor.yaw_deg,
+        )
+        transform = carla.Transform(
+            carla.Location(x=cx, y=cy, z=cz), carla.Rotation(yaw=anchor.yaw_deg)
+        )
+        actor = world.try_spawn_actor(blueprint, transform)
+        if actor is None:
+            raise SimulatorUnavailableError(
+                f"could not spawn '{blueprint_id}' {forward_m} m ahead of the anchor; "
+                "the location is probably occupied or off-road",
+                details={"blueprint": blueprint_id, "forward_m": forward_m},
+            )
+        self._actors.append(actor)
+        self._stand_offsets[int(actor.id)] = _stand_offset(actor)
+        if physics:
+            actor.set_simulate_physics(True)
+        else:
+            actor.set_simulate_physics(False)
+            self.place_relative_to(actor, anchor, forward_m=forward_m, left_m=left_m, up_m=up_m)
+        return actor
+
+    def place_relative_to(
+        self,
+        actor: Any,
+        anchor: WorldAnchor,
+        *,
+        forward_m: float,
+        left_m: float = 0.0,
+        up_m: float = 0.0,
+        yaw_offset_deg: float = 0.0,
+    ) -> None:
+        """Move a placed actor to an ADAPT-X offset from a captured anchor pose."""
+        carla = self._require_carla()
+        stand = self._stand_offsets.get(int(actor.id), 0.0)
+        cx, cy, cz = ego_offset_to_carla_world(
+            (forward_m, left_m, up_m + stand), (anchor.x, anchor.y, anchor.z), anchor.yaw_deg
+        )
+        actor.set_transform(
+            carla.Transform(
+                carla.Location(x=cx, y=cy, z=cz),
+                carla.Rotation(yaw=anchor.yaw_deg + yaw_offset_deg),
+            )
+        )
+
+    def destroy_actor(self, actor: Any) -> None:
+        """Remove one scenario actor now rather than at close. Idempotent."""
+        if actor in self._actors:
+            self._actors.remove(actor)
+            self._stand_offsets.pop(int(actor.id), None)
+            self._safely(actor.destroy, f"destroy actor {getattr(actor, 'id', '?')}")
+
+    # -- live extension: traffic --------------------------------------------
+    def spawn_traffic_vehicle(self, blueprint_id: str, spawn_index: int) -> Any | None:
+        """Spawn a vehicle at a map spawn point and hand it to the Traffic Manager.
+
+        Traffic drives itself: CARLA's Traffic Manager, in lockstep with the
+        session and seeded from the settings, so the same seed replays the
+        same traffic on the same server build. Returns ``None`` when the
+        point is occupied - traffic is best-effort, a scenario is not.
+        Perception never learns that an actor is autopiloted.
+        """
+        world = self._require_world()
+        spawn_points = world.get_map().get_spawn_points()
+        if spawn_index < 0 or spawn_index >= len(spawn_points):
+            return None
+        if spawn_index == self._ego_spawn_index:
+            return None
+        blueprint = self._find_blueprint(blueprint_id)
+        if blueprint.has_attribute("role_name"):
+            blueprint.set_attribute("role_name", "traffic")
+        actor = world.try_spawn_actor(blueprint, spawn_points[spawn_index])
+        if actor is None:
+            return None
+        self._actors.append(actor)
+        actor.set_simulate_physics(True)
+        actor.set_autopilot(True, self._traffic_manager_port())
+        return actor
+
+    def _traffic_manager_port(self) -> int:
+        if self._traffic_manager is None:
+            client = self._client
+            if client is None:
+                raise SimulatorUnavailableError("the simulation session is not connected")
+            manager = client.get_trafficmanager(self._tm_port)
+            manager.set_synchronous_mode(self._settings.synchronous_mode)
+            manager.set_random_device_seed(self._settings.seed)
+            self._traffic_manager = manager
+        return int(self._traffic_manager.get_port())
+
+    # -- live extension: ego control ----------------------------------------
+    def apply_ego_control(self, *, throttle: float, brake: float, steer_left: float) -> None:
+        """Actuate the ego. ``steer_left`` is ADAPT-X-positive-left; flipped here.
+
+        The one place a control command meets ``carla.VehicleControl``. The
+        sign flip is the same handedness conversion as every other value that
+        crosses this boundary (ADR-043): CARLA's positive steer is to the
+        right.
+        """
+        if not self._drive_ego:
+            raise SimulatorUnavailableError(
+                "this session was opened with drive_ego=False; the ego is placed, not driven"
+            )
+        if self._ego is None:
+            raise SimulatorUnavailableError("no ego vehicle has been spawned")
+        carla = self._require_carla()
+        control = carla.VehicleControl(
+            throttle=float(max(0.0, min(1.0, throttle))),
+            brake=float(max(0.0, min(1.0, brake))),
+            steer=float(max(-1.0, min(1.0, -steer_left))),
+        )
+        self._ego.apply_control(control)
+        self._last_control = (control.throttle, control.brake, control.steer)
+
+    def release_ego(self) -> None:
+        """Neutral throttle, brake on. Safe to call on a closed session."""
+        if self._ego is None or not self._drive_ego:
+            return
+        carla = self._require_carla()
+        self._ego.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0, steer=0.0))
+        self._last_control = (0.0, 1.0, 0.0)
+
+    def ego_observation(self, lookahead_m: float) -> EgoObservation:
+        """The ego's odometry and the lane centre ahead, for the controller.
+
+        Speed and heading are the simulator's report of the ego itself - its
+        odometry, not a perception of anything. The lane figures come from
+        the map's driving-lane waypoint under the ego and one ``lookahead_m``
+        further along: road geometry, which a real vehicle would take from
+        its HD map. Nothing here describes another actor.
+        """
+        if self._ego is None:
+            raise SimulatorUnavailableError("no ego vehicle has been spawned")
+        transform = self._ego_transform()
+        velocity = self._ego.get_velocity()
+        speed = math.hypot(float(velocity.x), float(velocity.y))
+        ego_yaw = float(transform.rotation.yaw)
+        heading = carla_yaw_to_heading_rad(ego_yaw)
+
+        error: float | None = None
+        offset: float | None = None
+        try:
+            world = self._require_world()
+            waypoint = world.get_map().get_waypoint(transform.location)
+            ahead = waypoint.next(lookahead_m) if waypoint is not None else []
+            if waypoint is not None and ahead:
+                target = ahead[0].transform
+                ego_xyz = (
+                    float(transform.location.x),
+                    float(transform.location.y),
+                    float(transform.location.z),
+                )
+                target_xyz = (
+                    float(target.location.x),
+                    float(target.location.y),
+                    float(target.location.z),
+                )
+                relative = carla_world_to_ego(target_xyz, ego_xyz, ego_yaw)
+                # Bearing to the lane-centre point ahead, in the ego frame:
+                # positive means the target is to the left.
+                error = math.atan2(relative.y, max(relative.x, 1e-3))
+                centre = waypoint.transform.location
+                offset = carla_world_to_ego(
+                    (float(centre.x), float(centre.y), float(centre.z)), ego_xyz, ego_yaw
+                ).y
+        except Exception as exc:  # pragma: no cover - map query failures are non-fatal
+            logger.debug("lane query failed", extra={"context": {"error": str(exc)}})
+        return EgoObservation(
+            speed_mps=speed,
+            heading_rad=heading,
+            lane_heading_error_rad=error,
+            lane_offset_m=offset,
+        )
+
+    @property
+    def last_control(self) -> tuple[float, float, float] | None:
+        """The last (throttle, brake, carla_steer) applied, for the record."""
+        return self._last_control
+
+    # -- live extension: safety and visualisation sensors -------------------
+    def attach_collision_sensor(self) -> None:
+        """Attach the collision sensor to the ego. A safety fallback, not perception."""
+        carla = self._require_carla()
+        world = self._require_world()
+        blueprint = self._find_blueprint(COLLISION_BLUEPRINT)
+        sensor = world.try_spawn_actor(blueprint, carla.Transform(), attach_to=self._ego)
+        if sensor is None:
+            raise SimulatorUnavailableError("could not attach the collision sensor")
+
+        def on_collision(event: Any) -> None:
+            impulse = getattr(event, "normal_impulse", None)
+            magnitude = (
+                math.sqrt(float(impulse.x) ** 2 + float(impulse.y) ** 2 + float(impulse.z) ** 2)
+                if impulse is not None
+                else 0.0
+            )
+            record = CollisionEvent(
+                simulation_frame=int(getattr(event, "frame", self._sim_frame or 0)),
+                other_type_id=str(getattr(getattr(event, "other_actor", None), "type_id", "?")),
+                impulse=magnitude,
+            )
+            with self._sensor_lock:
+                self._collisions.append(record)
+
+        sensor.listen(on_collision)
+        self._collision_sensor = sensor
+
+    def collisions(self) -> list[CollisionEvent]:
+        """Every contact recorded so far, oldest first."""
+        with self._sensor_lock:
+            return list(self._collisions)
+
+    def attach_camera(self, *, width: int, height: int, fov_deg: float) -> None:
+        """Attach a forward RGB camera to the ego, for display only."""
+        carla = self._require_carla()
+        world = self._require_world()
+        blueprint = self._find_blueprint(CAMERA_BLUEPRINT)
+        for key, value in {
+            "image_size_x": str(width),
+            "image_size_y": str(height),
+            "fov": str(fov_deg),
+        }.items():
+            if blueprint.has_attribute(key):
+                blueprint.set_attribute(key, value)
+        cx, cy, cz = adaptx_offset_to_carla(*CAMERA_MOUNT_M)
+        sensor = world.try_spawn_actor(
+            blueprint, carla.Transform(carla.Location(x=cx, y=cy, z=cz)), attach_to=self._ego
+        )
+        if sensor is None:
+            raise SimulatorUnavailableError("could not attach the RGB camera")
+
+        def on_image(image: Any) -> None:
+            # Latest only: a camera in synchronous mode delivers one image per
+            # tick, and the dashboard asks for whichever is newest.
+            latest = CameraImage(
+                frame=int(image.frame),
+                width=int(image.width),
+                height=int(image.height),
+                bgra=bytes(image.raw_data),
+            )
+            with self._sensor_lock:
+                self._camera_latest = latest
+
+        sensor.listen(on_image)
+        self._camera = sensor
+
+    def camera_image(self) -> CameraImage | None:
+        """The newest camera frame, or ``None`` before one arrived."""
+        with self._sensor_lock:
+            return self._camera_latest
+
+    @property
+    def sensor_actor_ids(self) -> list[int]:
+        """Ids of every sensor the session attached."""
+        return [
+            int(sensor.id)
+            for sensor in (self._sensor, self._collision_sensor, self._camera)
+            if sensor is not None
+        ]
+
     # -- internals ---------------------------------------------------------
     def _connect(self) -> None:
         carla = self._require_carla()
@@ -628,6 +1024,11 @@ class CarlaSimulationSession:
         """
         carla = self._require_carla()
         world = self._require_world()
+        if self._drive_ego:
+            # A driven ego needs physics; it settles the 0.6 m spawn clearance
+            # itself. The spawn transform stays the pre-tick reference.
+            actor.set_simulate_physics(True)
+            return
         actor.set_simulate_physics(False)
         waypoint = world.get_map().get_waypoint(spawn_transform.location)
         if waypoint is None:
@@ -782,6 +1183,29 @@ class CarlaSimulationSession:
         if self._world is None:
             raise SimulatorUnavailableError("the simulation session is not connected")
         return self._world
+
+    def _destroy_actors(self) -> None:
+        """Destroy every owned actor, as one server-side batch where the API allows.
+
+        ``apply_batch_sync`` with ``DestroyActor`` commands is how the CARLA
+        examples tear traffic down; a per-actor ``destroy()`` is the fallback
+        for stand-ins and older builds. Either way one failure never stops
+        the rest.
+        """
+        actors = list(reversed(self._actors))
+        command = getattr(self._carla, "command", None)
+        client = self._client
+        if actors and command is not None and client is not None:
+            try:
+                client.apply_batch_sync([command.DestroyActor(actor) for actor in actors], True)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "batch destroy failed; destroying one by one",
+                    extra={"context": {"error": str(exc)}},
+                )
+        for actor in actors:
+            self._safely(actor.destroy, f"destroy actor {getattr(actor, 'id', '?')}")
 
     @staticmethod
     def _safely(action: Any, description: str) -> None:

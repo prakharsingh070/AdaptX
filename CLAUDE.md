@@ -16,9 +16,10 @@ LiDAR / CARLA -> point-cloud processing -> ground and noise filtering -> object 
 
 Stages up to and including the adaptive resolution controller are implemented as
 deterministic, explainable baselines; CARLA can feed them simulated LiDAR, a scenario
-framework describes, seeds and runs controlled scenes against it, and an offline
-evaluation layer measures the recorded runs against simulator ground truth. Nothing after
-that is implemented - no replay, no dashboard.
+framework describes, seeds and runs controlled scenes against it, an offline
+evaluation layer measures the recorded runs against simulator ground truth, and a
+dashboard displays what the pipeline produced and what the evaluation measured. Event
+replay is not implemented.
 
 ## Core Modules
 
@@ -240,7 +241,36 @@ every component in `services/system_service.py` agree with the list below.
   CONSTANT 1.70 m centroid-to-origin offset), no identity switch occurs in any scenario, and
   the pipeline runs at 80 ms/frame instead of 140. WHICH DEFAULT IS RIGHT IS AN OPEN PHASE 2/3
   DECISION with its own experiment, not settled here.
-- Phase 12: Dashboard and final integration - TODO (next)
+- Phase 12: Dashboard - DONE as a consumer console (`dashboard/`: static ES modules served
+  by the backend at `/dashboard`, no framework, no build step, no dependency; a live 3-D /
+  top-down Canvas scene of the last `SceneSnapshot` over `/ws/scene`, object inspector,
+  spatial map, adaptive resolution, and a viewer for stored Phase 11 reports and recorded
+  runs with frame playback; scenario CLI `--publish URL` streams a live run into it;
+  `adaptx.evidence` serves stored reports and runs read-only; ADR-055, `docs/DASHBOARD.md`).
+  THE DASHBOARD COMPUTES NOTHING: every number is a backend field, the only arithmetic in
+  the browser is pixel layout, and a source scan asserts it. NO ENDPOINT CONTROLS THE
+  SIMULATOR. Ground truth appears only in evaluation playback, labelled. Routing, decision,
+  planning and a spatial risk field are shown as NOT IMPLEMENTED; GPU as NOT MEASURED.
+  Browser cost measured on one machine only (Experiment 013). No live history, no replay.
+  LIVE-VALIDATED on 2026-09-11: a published cyclist_crossing run streamed 80 frames from
+  CARLA 0.9.16 into the browser.
+- Post-Phase-12 live simulation extension (NOT a Phase 13) - DONE as a baseline
+  (`adaptx.live` owns a long-lived driven-ego CARLA session on one thread and is the only
+  caller of `world.tick()`; every LiDAR frame runs through the UNCHANGED Phase 2-8 chain;
+  `adaptx.control` is a risk-governed speed BASELINE - target speed per in-path risk level,
+  safe-distance hold, emergency brake, resume dwell, lane-centre steering from map
+  geometry - that reads the risk, tracking and prediction outputs and the ego's own
+  odometry and NEVER ground truth; six live scenarios with seeded Traffic Manager traffic
+  and timed scripted actors anchored to the ego's pose; collision sensor as a SAFETY
+  FALLBACK; RGB camera for display only; five high-level session controls
+  start/pause/resume/stop/reset and NO actor endpoint; ADR-056). MEASURED LIVE (Experiment
+  014): the ego slows for the parked car the pipeline detects, holds 6.3-7.7 m short of
+  it, resumes when it leaves, 0 collisions; the loop runs at ~0.3x wall-clock speed and
+  the dashboard says PIPELINE LAGGING. NOT autonomous driving, NOT safe, NOT collision-free
+  by claim, NOT real-time. Velocities are ego-relative (no ego-motion compensation); the
+  corridor is straight; routing and planning NOT IMPLEMENTED. A killed backend leaks
+  actors - stop the session.
+- The roadmap defines no Phase 13; open work is the deferred items in `docs/ROADMAP.md`.
 
 ## Start Here
 

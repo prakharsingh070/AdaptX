@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "adaptx-backend",
+      "runtimeExecutable": "F:/AdaptX/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-c", "import sys; sys.path.insert(0, 'src'); import uvicorn; uvicorn.run('adaptx.api.app:create_app', factory=True, host='127.0.0.1', port=8000, log_level='warning')"],
+      "port": 8000
+    },
+    {
+      "name": "adaptx-backend-carla",
+      "runtimeExecutable": "F:/AdaptX/.venv312/Scripts/python.exe",
+      "runtimeArgs": ["-c", "import os, sys; os.environ.setdefault('ADAPTX_CARLA__ENABLED', 'true'); os.environ.setdefault('ADAPTX_CARLA__HOST', '127.0.0.1'); os.environ.setdefault('ADAPTX_CARLA__EGO_SPAWN_INDEX', '1'); os.environ.setdefault('ADAPTX_LIDAR__GROUND_ENABLED', 'true'); sys.path.insert(0, 'src'); import uvicorn; uvicorn.run('adaptx.api.app:create_app', factory=True, host='127.0.0.1', port=8000, log_level='warning')"],
+      "port": 8000
+    }
+  ]
+}

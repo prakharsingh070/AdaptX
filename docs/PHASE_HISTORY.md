@@ -786,6 +786,137 @@ unchanged, no new dependencies. Uncommitted on `phase-11-evaluation`, branched f
 
 ---
 
+## Phase 12 — Dashboard · verified · live-streamed from CARLA
+
+**Objective.** Make ADAPT-X observable without giving it a second brain: a console that
+shows what the pipeline produced, where the adaptive map spends its detail, and what the
+Phase 11 evaluation measured — including everything it measured badly — while computing
+nothing of its own.
+
+**Design first.** `docs/DASHBOARD.md` was written before any code: purpose, the choice of
+static vanilla ES modules over a framework (zero dependencies, no build step), the two
+labelled modes, where a live scene comes from, the point sample, the contracts consumed,
+the eight views, the screen transform (+X up, +Y left), playback, security assumptions, and
+the list of things the dashboard deliberately never computes.
+
+**Backend, additive.** `SceneSnapshot` bundles one frame's outputs with a deterministic
+stride sample of the point cloud and **has no field for ground truth** — a payload carrying
+one is refused. `SceneService` keeps the latest and a sequence; `/ws/scene` polls the
+sequence every 40 ms and pushes. The full-chain endpoint publishes what it produced; the
+scenario runner gained a per-frame observer and the CLI a `--publish URL` flag, so a live
+CARLA run streams into the browser through `POST /api/v1/scene/frame` — a hand-over, not a
+computation. `adaptx.evidence` reads stored reports and runs from configured directories,
+validates them, and serves them read-only: reports whole, runs as a summary plus one frame
+at a time with ground truth beside the frame, so a 42 MB record is never parsed by a
+browser. Comparison goes through the Phase 11 `compare_reports` unchanged. A `dashboard`
+component (PARTIAL, phase 12, "CONSUMER ONLY") joined system status; the evaluation
+component's text now says "computed only offline; stored reports served read-only".
+
+**Frontend.** `dashboard/`: `app.js` (state, channels, navigation, a per-tab memory of
+which report, run and overlays were chosen), `data/` (API wrappers, a reconnecting channel
+with a stale indicator, deep-frozen report and run stores with frame prefetch, `format.js`
+as the single place null becomes "Not available" and UNKNOWN stays "UNKNOWN", `normalise.js`
+joining tracks with assessments and paths by track id), `render/` (a top-down view with +X
+up and +Y left, a perspective camera behind and above the ego, height-coloured points,
+boxes coloured by risk level with UNKNOWN dashed, velocity vectors, predicted paths, tiles,
+small bar/line charts that draw the report's numbers untransformed), and eight views laid
+out after the mockup — with every panel the backend cannot feed reading *Not implemented*
+or *Not measured* in the same card footprint.
+
+**What the frontend was refused.** During validation the views had grown `Math.hypot`
+distances and an occupancy ratio of their own; all were removed and the assessment's own
+`distance_m` shown instead. A boundary test now scans the source for `Math.hypot`/`sqrt`/
+`atan2`, `.reduce(`, `predict(` and assignments to metric or threshold names outside
+`render/`, for a second `fetch` site or a non-GET request, for `ground_truth` outside the
+playback view model and the Run view, for "collision probability" / "production ready" /
+"real-time", and for "Not available" written anywhere but `format.js`. Every route path is
+audited for spawn / destroy / teleport / start / stop / control / tick.
+
+**Boundary finding.** The evidence reader was first placed in `services/` and the Phase 11
+test that no production package imports the evaluation layer caught it. It moved to its
+own package `adaptx.evidence`, downstream of evaluation; the test was retargeted to pin
+`api/routes/evidence.py` as the single API module that reaches evaluation, and the
+pipeline stages, runner and application context remain clean.
+
+**Live.** `python -m adaptx.scenarios run cyclist_crossing --publish http://127.0.0.1:8000`
+against CARLA 0.9.16 published 80 frames; the browser drew the streaming point sample
+(5,404 of ~27,000 points, stride 5), tiles, risk-coloured boxes and predicted paths; a click
+selected track #2 and the inspector showed MEDIUM 0.594 with its null factors as "Not
+available" and uncertainty beside, not inside, the score. A stored report loaded from the
+rail; a 42 MB run played back at the recorded timestep; the two-report comparison came from
+the backend; the backend was stopped and restarted with the page open and both channels
+went stale → disconnected → live on their own; a refresh kept the view, report, run and
+toggles. Browser costs are Experiment 013: ~10 ms to draw 6,000 points, ~30 ms per run
+frame, ~3 s for the backend to parse a 42 MB run once, ~200 ms for a random seek that waits
+behind prefetches.
+
+**Fixed along the way.** The perspective projection's pitch sign (everything drew below the
+canvas); a top-down fit against a hidden 0×0 canvas that collapsed the map; a paired chart
+that put cells and milliseconds on one axis (now per-category scaling with a note); browser
+module caching that hid edits (`Cache-Control: no-cache` on `/dashboard`); a circular import
+between the context and the evaluation layer (lazy imports in the evidence service).
+
+**Status:** 1621 tests (1565 before), 7 live CARLA tests pass from `.venv312`, 17 Node
+tests, ruff / format / mypy clean (131 source files), 24 endpoints + 2 WebSockets, no new
+dependency, ADR-055, Experiment 013. Uncommitted on `phase-12-dashboard`, branched from
+`origin/main` at `c0a89dd`.
+
+---
+
+## Post-Phase-12 extension — Live simulation loop · verified live · the pipeline drives the car
+
+**Objective.** Turn the console from a viewer of stored evidence into a window on a
+running system: CARLA → ego LiDAR → the unchanged Phase 2-8 chain → a decision → the
+CARLA vehicle → the dashboard, with nothing pre-recorded and nothing invented.
+Explicitly not a Phase 13.
+
+**Backend.** `adaptx.live` (`LiveSimulationService`: one thread, one session, the only
+caller of `world.tick()`, latest-only snapshots with skipped counts, events derived from
+output differences, measured timing every frame) and `adaptx.control`
+(`RiskGovernedSpeedPolicy`: target speed per in-path risk level, safe-distance hold,
+emergency brake, resume dwell, rate-limited setpoint, lane-centre steering; a
+`VehicleController` protocol). `CarlaSimulationSession` extended additively: `drive_ego`,
+`apply_ego_control` (the one sign flip), anchored placement, Traffic Manager traffic,
+collision sensor, RGB camera, batch destroy. A six-entry live scenario catalogue.
+`SceneSnapshot` gained `ego`, `control`, `live`. Nine `/api/v1/live/*` endpoints: reads
+plus five high-level controls. Components `live_simulation` and `vehicle_control`.
+
+**Frontend.** LIVE SIMULATION / STORED EVALUATION mode switch (live by default; CARLA
+DISCONNECTED shown plainly, never a recording), session controls in the rail, a Front
+View from the ego camera, Recent Events from the loop, System Status with measured FPS
+and sim/wall speed, Decision / Control and Performance cards, a Risk Map from the
+per-tile risk factor the resolution controller recorded, a corrected CARLA pill.
+
+**What the live server taught, in order.** Scene-maximum risk pinned the ego at the
+kerb (poles 5.5 m beside the road score HIGH/CRITICAL on proximity) → the governor keys
+on in-path objects. A proportional throttle stalled at 1.6 m/s under a 2 m/s target →
+hold throttle. Track identity churn on the parked car flickered the level → setpoint
+ramp, coalesced events. Destroying Traffic Manager vehicles in a synchronous world
+aborted the client process and leaked every actor → the CARLA examples' shutdown order.
+A fresh client sees a stale actor list on a server left synchronous → cleanup switches
+async and waits a frame. Velocities are ego-relative → recorded as a limitation, not
+patched.
+
+**Live.** Experiment 014: `static_obstacle` ×2 seeds, `mixed_obstacles` with six TM
+vehicles, `pedestrian_crossing`. The ego reached 5.1 m/s, slowed from ~16 m, held
+6.3-7.7 m short of the in-path object, resumed after it left; 0 collisions; loop median
+150-164 ms per 50 ms frame (0.30-0.33x wall-clock, LAGGING shown); from the dashboard's
+own Start and Stop buttons, with no actor left on the server and the world restored.
+
+**Tests.** Fake simulator extended (kinematics under `apply_control`, attached sensors,
+Traffic Manager, collision and camera sensors). New: `tests/unit/test_control_policy.py`
+(18), `tests/unit/test_live_scenarios.py` (10), `tests/integration/test_live_simulation.py`
+(12, including the obstacle-stop demo against the fake), three live cases in
+`test_carla_live.py`, frontend scans for random numbers, videos, a single camera URL site
+and mode separation, the route audit retargeted to allowlist the five controls, the Phase
+11 ground-truth boundary extended to `control` and `live`.
+
+**Status:** 1663 tests (1621 before), 10 live CARLA tests pass, 18 Node tests, ruff /
+format / mypy clean (141 source files), 33 API endpoints + 2 WebSockets, no new
+dependency, ADR-056, Experiment 014. Uncommitted on `phase-12-dashboard`.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled

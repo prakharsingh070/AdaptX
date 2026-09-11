@@ -1277,3 +1277,148 @@ pre-registered configuration and is reported as a variation. One environment var
 As Experiment 011, plus: the ground-on figures are a post-hoc variation; nothing was tuned
 inside any stage; the residual non-repeatability of moving actors is unexplained; one map,
 one pose, one seed; simulation only.
+
+## Experiment 013 - Browser cost of the dashboard: load, report parse, frame fetch, draw
+
+**Date:** 2026-09-11
+
+### Question
+
+Phase 12 renders on Canvas 2D with no framework and serves recorded runs one frame at a
+time. Is that fast enough to look at a 6000-point scene and to step through a 42 MB run
+without the tab freezing, and where does the time go? This measures the **display** cost
+only; it says nothing about perception, and it is one machine, one browser.
+
+### Setup
+
+- Backend: `uvicorn` in-process, Python 3.13.7, FastAPI 0.141.1, on `127.0.0.1:8000`, this
+  worktree, `reports/` holding the six Experiment 012 reports (24-32 KB each) and `runs/`
+  holding `cyclist_crossing_ground_on.json` (41.7 MB, 80 frames) and
+  `stationary_vehicle_ground_on.json` (20.4 MB, 40 frames).
+- Browser: the Claude desktop app's embedded Chromium 152 on Windows 11, viewport emulated
+  at 1536x1024, `devicePixelRatio` 1.25, 16 logical cores. Timings from `performance.now()`
+  and the Navigation/Resource Timing APIs, taken in the page's own console; 30 draws per
+  sample, min / median / max reported.
+- Scene for the draw benchmark: a synthetic road plane with two vehicles and a pedestrian
+  (16,132 points, `tests/fixtures/scenes`) pushed through `POST /api/v1/lidar/adaptive-map`
+  three times; the published snapshot carried a stride-3 sample of **5,378 points**, 1
+  object and 144 tiles. Playback scene: frames of the cyclist run (10-11 tracks, 144 tiles,
+  no point cloud - records carry none).
+
+### Results
+
+| Measure | Value |
+|---|---|
+| page `DOMContentLoaded` / `load` | 569 / 575 ms (20 modules, 31 KB transferred, `no-cache`) |
+| report fetch + text, 21 KB / 16 KB | 18.4 / 17.0 ms; `JSON.parse` 0.7 / 0.3 ms |
+| compare endpoint (two reports, 18 KB) | 26.5 ms |
+| run summary, **cold** (backend parses the record once) | **3,013 ms** for 41.7 MB; 1,709 ms for 20.4 MB |
+| run summary, warm (cached in the backend) | 17.4 ms |
+| one run frame (208-256 KB, 10-11 tracks) | fetch 27-52 ms (median 32.7), parse 1.8-3.0 ms |
+| `seek()` to a frame already prefetched | 2.2-4.1 ms |
+| `seek()` to an uncached frame, nothing in flight | 38.5-42.7 ms |
+| `seek()` jumping 10 frames while 8 prefetches are in flight | 185-947 ms (median 208) |
+| `selectRun` including first frame (warm summary) | 68.9 ms |
+| perspective draw, live scene, 5,378 points, 950x841 px | 6.2 / **9.6** / 21.6 ms |
+| top-down draw, same scene, 950x826 px | 5.4 / **8.3** / 9.5 ms |
+| perspective draw, playback scene, 10 tracks, no points | 0.8 / 1.5 / 5.0 ms |
+| top-down draw, playback scene | 0.5 / 0.9 / 1.8 ms |
+
+### Interpretation
+
+- A 6000-point sample draws in under 10 ms median on Canvas 2D, so a 20 Hz scenario stream
+  (50 ms per frame) has headroom on this machine; the point cap, not the renderer, is what
+  bounds the cost, and the cap is a setting. WebGL is not earned by these numbers.
+- Sequential playback is bounded by the prefetch: a cached seek is ~3 ms and the 8-frame
+  lookahead keeps up with the 50 ms timestep. The cost that matters is a **random seek while
+  prefetches are queued**: the backend's handlers are synchronous, so a jump waits behind
+  up to eight 30 ms frame requests - about 200 ms, and up to 0.9 s when the summary was
+  still being built. That is the price of serving from one process and is recorded, not
+  hidden.
+- The one multi-second cost is the backend parsing a 42 MB record the first time it is
+  chosen. It happens once per process per run (LRU of two) and the browser is not blocked
+  meanwhile - the rail shows the run as loading.
+- The page loads in ~0.6 s with no bundler; the 20 separate module requests are the cost of
+  having no build step and are acceptable on localhost, which is the only place this is
+  served.
+
+### Limitations
+
+One machine, one browser build, one viewport, localhost only; no GPU measurement (the
+dashboard reports GPU as NOT MEASURED because nothing measures it); the draw benchmark
+re-draws a static scene and excludes the DOM tables the views also rebuild on each frame;
+the embedded Chromium may differ from a user's browser; nothing here is a frame-rate claim
+for the perception pipeline, whose measured per-frame cost is in Experiment 012.
+
+## Experiment 014 - The live loop on CARLA 0.9.16: does the pipeline stop the car?
+
+**Date:** 2026-09-12
+
+### Question
+
+With a driven ego, real LiDAR, the unchanged Phase 2-8 chain and the baseline speed
+governor (ADR-056), does the ego slow and hold for an obstacle the pipeline detects, resume
+when it leaves, and what does the loop cost per frame? Nothing here is an accuracy figure;
+Experiments 011/012 hold those.
+
+### Setup
+
+CARLA 0.9.16, Town10HD_Opt, spawn point 1, synchronous 0.05 s, LiDAR as configured
+(32 channels, 100 m, 560k pts/s, 20 Hz, seeded), `ADAPTX_LIDAR__GROUND_ENABLED=true`
+(the ground-on variation of Experiment 012; the process default is off), control
+defaults (`max 8 / medium 5 / high 2 m/s`, safe 8 m, emergency 5 m, dwell 10 frames,
+hold throttle 0.22), collision sensor and 320x180 camera attached. Python 3.12
+(`.venv312`), no browser attached unless stated; the numbers were read from the
+published snapshots by a probe script.
+
+### Results
+
+| Scenario / seed | frames · sim s · wall s | loop ms med / p90 / max | pipeline ms med / p90 / max | step ms med | sim/wall | max speed | first hold (sim s, nearest) | min nearest while holding | collisions |
+|---|---|---|---|---|---|---|---|---|---|
+| static_obstacle / 42 | 757 · 37.9 · 130 | 160 / 187 / 266 | 126 / 153 / 228 | 32 | 0.31 | 5.05 m/s | 11.55 s, 7.96 m | 6.78 m | 0 |
+| static_obstacle / 43 | 375 · 18.8 · 60 | 150 / 174 / 211 | 115 / 140 / 173 | 32 | 0.33 | - | - | - | 0 |
+| mixed_obstacles / 42 (6 TM vehicles) | 554 · 27.7 · 104 | 162 / 191 / 225 | 121 / 150 / 184 | 38 | 0.31 | 5.08 m/s | 11.8 s, 7.9 m | 7.63 m | 0 |
+| pedestrian_crossing / 42 | 404 · 20.2 · 70 | 164 / 191 / 279 | 131 / 157 / 241 | 32 | 0.30 | 5.14 m/s | 9.5 s, 14.3 m (predicted crossing) | 6.27 m | 0 |
+
+Per-stage medians inside the pipeline (static_obstacle, 40 frames): processing 20 ms
+(ground segmentation on), detection 17, tracking 0.5, prediction 2, fixed mapping 2.3,
+risk 1.1, resolution controller 15.5, adaptive mapping 15.2 - about 74 ms of stage time
+inside a 90-125 ms `pipeline_ms`; the remainder is result-contract construction. Control
+1 ms; snapshot build + publish 6.5 ms; tick + LiDAR wait 32 ms (38 ms with traffic).
+Voxel downsampling did not help (processing 32 ms, detection unchanged).
+
+**The obstacle-stop demo, as it happened (static_obstacle / 42, session time):** parked
+car appears 45 m ahead at 1.0 s; ego accelerates to 5.0 m/s; the car is a `vehicle` or
+`obstacle` track from ~35 m with identity switches every few frames; SLOWING at HIGH from
+~16 m (target 2 m/s); HOLDING at 7.96 m (11.55 s); STOPPED at 7.65 m; obstacle removed at
+23.36 s; RESUMING at 23.65 s; cruising again by 26 s. The ego never contacted the car.
+After 27 s the ego reached road geometry ahead that the straight corridor rule treats as
+in-path and held/resumed repeatedly - the honest behaviour of a straight-corridor
+governor on a bending road, not a scenario event.
+
+**With the browser attached** (the dashboard on the same machine) the loop median rose to
+~190-210 ms (0.24-0.27x): snapshot serialisation for the WebSocket runs in the same
+process and competes for the GIL.
+
+### Findings that changed the design (recorded in ADR-056)
+
+- Scene-maximum risk pinned the ego: lamp posts 5.5 m and 9 m beside the road were HIGH
+  / CRITICAL on proximity, so the governor now keys the speed on in-path objects and
+  shows the scene level beside it.
+- A pure proportional throttle stalled at 1.62 m/s under a 2.0 m/s target; a 0.22 hold
+  throttle fixed it.
+- Destroying Traffic-Manager vehicles while the world was still synchronous aborted the
+  client process (`0xC0000409`) and leaked every actor; the CARLA examples' shutdown order
+  (world asynchronous, TM asynchronous, autopilot off, one asynchronous frame, batch
+  destroy) is now the session's order, verified twice in a row and by the live suite.
+- Fresh clients see a stale actor list on a server left in synchronous mode; cleanup
+  scripts must switch it asynchronous and wait a frame first.
+- Velocities are ego-relative: with the ego at 5 m/s every static object reports
+  ~-5 m/s along x, so closing-speed rises everywhere (no ego-motion compensation exists).
+
+### Limitations
+
+One machine, one map, one spawn point, three seeds; simulation only; nothing tuned; no
+claim of real-time (0.3x measured), no claim of collision-free behaviour (0 in these runs,
+counted by the sensor); the classifier still labels poles "pedestrian" and cars
+"obstacle"; the dashboard's own cost is in Experiment 013.

@@ -46,6 +46,8 @@ Phase 8.
 | CARLA simulation | **Partial** | Phase 9: CARLA is an upstream **data source**, not a second perception stack. Deterministic synchronous stepping, one coordinate conversion at the boundary, simulation-authoritative timestamps, and ground truth on a separate path that never reaches perception. Optional - the backend and test suite run without it. Live-validated against CARLA 0.9.16 from a Python 3.12 environment (no wheel exists for 3.13). |
 | Scenario framework | **Partial** | Phase 10: declarative, seeded, reproducible scenario definitions with timed scripted motion, run against the CARLA boundary with ground truth recorded beside every frame and fed to no pipeline stage. Four catalogue scenarios. **Records evidence, computes no accuracy.** Live-validated; placed actors do not simulate physics (ADR-054). Event replay deferred. |
 | Evaluation | **Partial** | Phase 11: offline evaluation of a recorded run against simulator ground truth — detection/tracking at several gates, ADE/FDE, risk against proximity events, map workload (accuracy **not** evaluated), adaptive vs fixed paired within one run. Missing metrics are null with a reason. **Measured (Experiments 011–012): the baselines lost.** Under the process defaults a parked car and a pedestrian are never detected (their returns cluster with the road; ground segmentation is off by default); with it on both are seen every frame, at a constant 1.7 m centroid offset for the car. Adaptive map at 0.5–0.7 of the fixed cells and 5–8× the build time, finer under the actor. Simulation evidence only; not safety or real-world validation. |
+| Live simulation + vehicle control | **Partial** | Post-Phase-12 extension: a long-lived CARLA session behind the dashboard drives the ego from the pipeline's own outputs with a **baseline** speed governor (in-path risk level → target speed, safe-distance hold, emergency brake); seeded traffic and scripted actors; collision sensor as safety fallback; ego camera for display. Reads no ground truth. **Measured live:** stops ~7.7 m short of a parked car and resumes when it leaves, 0 collisions, ~0.3× wall-clock speed (shown as LAGGING). Not autonomous driving, not safe by claim. See [`docs/DASHBOARD.md`](docs/DASHBOARD.md) §3.4 and ADR-056. |
+| Dashboard | **Partial** | Phase 12: a static browser console served at `/dashboard` — live 3-D / top-down scene of what the pipeline last produced, object inspector, spatial map, adaptive resolution, and a viewer for stored Phase 11 reports and recorded runs with frame playback. **Computes nothing** (every number is a backend field; a test scans the source), controls nothing in the simulator, shows ground truth only in evaluation playback. Routing / decision / planning / risk field: *Not implemented*; GPU: *Not measured*. See [`docs/DASHBOARD.md`](docs/DASHBOARD.md). |
 | Adaptive resolution | **Partial** | Phase 8: a controller allocates a cell size per **region** from risk, uncertainty, predicted-motion relevance, density, proximity and motion, and a tiled mapper applies it — so one map holds several resolutions. Stabilised against oscillation by asymmetric hysteresis plus a minimum dwell time. **Not** a probability; no learned policy, no ego planned path, no per-cell risk field. The fixed-resolution mapper is retained unchanged as the baseline. |
 
 The running system reports this itself at `GET /api/v1/system/status`; each component
@@ -109,6 +111,10 @@ The API then serves on <http://localhost:8000>, with interactive documentation a
 | Evaluate a recorded scenario run | `.venv\Scripts\python.exe -m adaptx.evaluation evaluate runs/approach.json --json reports/approach.json` |
 | Check two evaluations agree | `.venv\Scripts\python.exe -m adaptx.evaluation compare reports/a.json reports/b.json` |
 | Run, record and evaluate against CARLA | `.venv312\Scripts\python.exe -m adaptx.evaluation run vehicle_approach --json runs/approach.json --report reports/approach.json` |
+| Open the dashboard | start the dev server, then open <http://127.0.0.1:8000/> (redirects to `/dashboard/`) |
+| Run the backend with CARLA for the live console | `set ADAPTX_CARLA__ENABLED=true& set ADAPTX_CARLA__EGO_SPAWN_INDEX=1& set ADAPTX_LIDAR__GROUND_ENABLED=true& .venv312\Scripts\python.exe -m uvicorn adaptx.api.app:create_app --factory` then open <http://127.0.0.1:8000/>, pick a scenario, press **Start** |
+| Stream a recorded-style scenario into the dashboard | `.venv312\Scripts\python.exe -m adaptx.scenarios run cyclist_crossing --publish http://127.0.0.1:8000` |
+| Frontend unit tests | `cd dashboard && node --test tests/*.test.mjs` (Node 22, no package) |
 | Build the Docker image | `docker compose build` |
 | Start the Docker environment | `docker compose up` |
 
@@ -138,6 +144,14 @@ Convenience wrappers are available: `scripts/dev.ps1 <task>` on Windows and
 | GET | `/api/v1/risk/status` | Risk engine, thresholds, modelled factors and score semantics |
 | GET | `/api/v1/prediction/status` | Predictor, horizon and uncertainty semantics |
 | WS | `/ws/telemetry` | Live system status, measured metrics and perception summaries |
+| GET | `/api/v1/scene/latest` | The last scene the pipeline produced, for the dashboard (Phase 12) |
+| POST | `/api/v1/scene/frame` | Hand over a scene a pipeline already produced; computes nothing (Phase 12) |
+| GET | `/api/v1/reports`, `/api/v1/reports/{name}`, `/api/v1/reports/compare` | Stored evaluation reports, read-only (Phase 12) |
+| GET | `/api/v1/runs`, `/api/v1/runs/{name}`, `/api/v1/runs/{name}/frames/{i}` | Stored runs, summary and frame by frame, read-only (Phase 12) |
+| WS | `/ws/scene` | Pushes the latest scene when it changes (Phase 12) |
+| GET | `/api/v1/live/status`, `/scenarios`, `/events`, `/camera` | Live session state, catalogue, events, ego camera (live extension) |
+| POST | `/api/v1/live/start`, `/pause`, `/resume`, `/stop`, `/reset` | The five high-level session controls; nothing touches an actor (live extension) |
+| — | `/dashboard/` | The static console; `/` redirects to it (Phase 12) |
 
 Full request and response shapes are in [`docs/API.md`](docs/API.md) and in the generated
 OpenAPI schema at `/docs`.
@@ -206,7 +220,7 @@ src/adaptx/
 tests/          unit, integration and shared fixtures
 docs/           architecture, API, testing, roadmap, knowledge base, decisions
 data/           raw, processed and scenario data (git-ignored contents)
-dashboard/      dashboard application (not started)
+dashboard/      static browser console served at /dashboard (Phase 12, docs/DASHBOARD.md)
 ```
 
 ---
@@ -215,6 +229,7 @@ dashboard/      dashboard application (not started)
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — what is implemented now vs planned
 - [`docs/API.md`](docs/API.md) — endpoint reference
+- [`docs/DASHBOARD.md`](docs/DASHBOARD.md) — the dashboard: what it shows, what it never computes, how to run it
 - [`docs/TESTING.md`](docs/TESTING.md) — how to run and extend the suite
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — benchmark method and what the numbers mean
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — phase plan and current status

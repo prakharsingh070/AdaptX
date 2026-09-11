@@ -20,6 +20,7 @@ from adaptx.models.system import (
     CarlaConnectionStatus,
     CarlaStatus,
     SimulationSessionStatus,
+    SimulationState,
 )
 
 logger = get_logger(__name__)
@@ -105,19 +106,35 @@ class CarlaService:
         self._detail = "disconnected"
 
     def status(self) -> CarlaConnectionStatus:
-        """Return the current CARLA integration status."""
-        connected = self._client.is_connected
+        """Return the current CARLA integration status.
+
+        A session that is open (READY or RUNNING) is a connection, whether or
+        not the status client ever connected; a session in ERROR is reported
+        as ``ERROR`` with its own detail, so a server that died mid-run does
+        not read as merely "disconnected".
+        """
         simulation = (
             self._session.status() if self._session is not None else SimulationSessionStatus()
         )
+        session_open = simulation.state in (SimulationState.READY, SimulationState.RUNNING)
+        connected = self._client.is_connected or session_open
+        if simulation.state is SimulationState.ERROR:
+            status = CarlaStatus.ERROR
+            detail = simulation.detail or "the simulation session failed"
+        elif connected:
+            status = CarlaStatus.CONNECTED
+            detail = self._detail if self._client.is_connected else "live session open"
+        else:
+            status = CarlaStatus.DISCONNECTED
+            detail = self._detail
         return CarlaConnectionStatus(
-            status=CarlaStatus.CONNECTED if connected else CarlaStatus.DISCONNECTED,
+            status=status,
             enabled=self._settings.enabled,
             client_available=carla_package_available(),
             is_mock=self._client.is_mock,
             host=self._settings.host,
             port=self._settings.port,
-            world=self._world_name,
-            detail=self._detail,
+            world=self._world_name or simulation.map_name,
+            detail=detail,
             simulation=simulation,
         )

@@ -1961,6 +1961,170 @@ explained by it.
 
 **Status:** Accepted
 
+## ADR-055: The Dashboard Is a Consumer - Scene Snapshots, Stored Evidence and Canvas Rendering
+
+**Decision:** The Phase 12 dashboard is a static browser application (`dashboard/`, vanilla
+ES modules, no build step, no framework, no new dependency) served by the existing FastAPI
+process at `/dashboard`. It **displays and never computes**: every number it shows is a
+field of a backend contract, and the only arithmetic in the frontend is pixel layout inside
+`dashboard/render/`. It has two labelled modes that are never mixed:
+
+- **LIVE.** The pipeline's last output is bundled into a `SceneSnapshot`
+  (`models/scene.py`): tracks, trajectories, assessments, tile decisions, budget, map
+  summaries, stage timings and a **deterministic stride sample** of the point cloud (at most
+  `dashboard.scene_max_points`, default 6000, rounded to 2 dp, labelled with its stage and
+  `is_downsampled`). The snapshot has no field for ground truth and refuses one. It is
+  published by the full-chain endpoint (`POST /api/v1/lidar/adaptive-map`) and by the
+  scenario CLI with `--publish URL`, which hands each frame's outputs to
+  `POST /api/v1/scene/frame` after the scenario's own pipeline produced them. The backend
+  stores and broadcasts the snapshot; it runs no stage on it. `/ws/scene` pushes the latest
+  snapshot whenever a sequence counter changes, polled every 40 ms.
+- **STORED EVALUATION.** Phase 11 `EvaluationReport`s and Phase 10 `ScenarioRunResult`s are
+  read from two operator-configured directories (`reports/`, `runs/`) by an
+  `EvidenceService` in its own package `adaptx.evidence`, downstream of the evaluation
+  layer and outside every pipeline package. Reports are served whole; runs are served as a
+  summary plus one frame at a time, so a browser never parses a 40 MB record. Comparison
+  goes through `compare_reports` unchanged. Ground truth is served **only** on the run-frame
+  path, and shown only in the Run / Scenario view, labelled.
+
+Rendering is Canvas 2D: a perspective camera behind and above the ego and a top-down plan
+with +X up and +Y left (ADR-009). No DOM element is created per point, cell or tile.
+`data/format.js` is the single place where `null` becomes "Not available" and `UNKNOWN`
+stays "UNKNOWN"; loaded reports and runs are deep-frozen.
+
+**Reason:** The point of Phase 11 was that the only accuracy figures in the project are the
+ones the evaluation layer computed from a recorded run under a stated configuration. A
+dashboard that recomputed a distance, a rate or a level in the browser would create a second
+source of truth that no test covers and no report records. Making the frontend a pure
+consumer - and testing that statically, by scanning its source for `Math.hypot`,
+`.reduce(`, `predict(` and assignments to metric names - keeps one source. The same reason
+puts the evidence reader beside the evaluation layer rather than in `services/`: the Phase 11
+boundary test that no pipeline package imports evaluation stays true, and the API composition
+root reaches evaluation through exactly one module, `api/routes/evidence.py`, which the test
+now pins.
+
+A snapshot without a ground-truth field, published by producers that never held ground
+truth, is the mechanical guarantee that the live view cannot show what the perception stack
+did not perceive. Serving runs frame by frame is what makes a 42 MB record usable in a
+browser at all. Vanilla modules keep the surface auditable and the dependency count at zero;
+nothing in the views needs component state that a framework would manage better.
+
+**Alternatives considered:** A React/Vite frontend (a build step and hundreds of transitive
+packages for eight views of key-value cards and two canvases); WebGL point rendering (6000
+points draw in 6-10 ms on Canvas 2D, measured in Experiment 013, so the extra surface is not
+earned); pushing the snapshot from the producer instead of polling a counter (the producers
+are synchronous request handlers; a single integer is the whole coupling); serving the entire
+run record to the browser (40 MB parses in seconds and blocks the tab); putting
+`EvidenceService` in `services/` beside the others (breaks the Phase 11 import boundary);
+recomputing object distances in the browser from positions (rejected on the consumer rule -
+the risk assessment's own `distance_m` is shown instead); adding CARLA control endpoints
+(spawn, teleport, start, stop) so the dashboard could drive scenarios (rejected: the dashboard
+would become a control surface for a simulator and the scenario CLI already exists).
+
+**Impact:** New: `models/scene.py`, `services/scene_service.py`, `adaptx.evidence`,
+`api/routes/scene.py`, `api/routes/evidence.py`, `api/websocket/scene.py`,
+`scenarios/publish.py`, `DashboardSettings`, `StoredEvidenceError` (404), the `dashboard`
+component in system status, a `FrameObserver` hook on `ScenarioRunner`, and the `dashboard/`
+application with Node `node --test` unit tests. Additive only: no existing endpoint or
+contract changed. `POST /api/v1/lidar/adaptive-map` now also publishes a snapshot as a side
+effect. The evaluation component's status text changed from "not served over HTTP" to
+"computed only offline; stored reports served read-only".
+
+**Risks:** The scene channel shows the *last* frame, not a history; a dashboard opened after
+a scenario finished sees one stale frame, labelled with its time. The point sample is a
+stride, so thin objects can lose returns in the picture (the pipeline saw them all). The
+backend handlers are synchronous, so eight prefetched frames head-of-line block a random seek
+by about 200 ms (Experiment 013). The frontend boundary test is a source scan: it can be
+fooled by renaming, and it is not a proof.
+
+**Status:** Accepted
+
+## ADR-056: A Long-Lived Live Session Drives the Ego From the Pipeline's Own Outputs
+
+**Decision:** A post-Phase-12 extension adds a **live simulation loop** behind the
+dashboard, as three new packages and one extended boundary, without changing any Phase
+1-12 algorithm:
+
+- `adaptx.live` - `LiveSimulationService` owns one long-lived `CarlaSimulationSession` on
+  its own thread and is the **only caller of `world.tick()`** while it runs. Per frame it
+  advances the scenario, steps the session, runs the frame through the **existing**
+  `pipeline_processor` (the same Phase 2-8 chain the endpoints and the scenario runner
+  use, unchanged), asks the controller for a command, applies it, publishes a
+  `SceneSnapshot` and derives events from frame-to-frame differences in the outputs. A
+  live scenario catalogue (`live/scenarios.py`) spawns seeded Traffic Manager traffic and
+  timed scripted actors **anchored to the ego's pose at the moment they appear**, moved in
+  that anchor frame by the Phase 10 constant-velocity segments and removed after a
+  lifetime.
+- `adaptx.control` - `RiskGovernedSpeedPolicy`, a pure function of the risk assessments,
+  tracks, predicted paths and the ego's own odometry: a target speed per risk level among
+  **in-path** objects (ahead, within a corridor, now or by prediction), a hold inside a safe
+  distance, full brake inside an emergency distance, a resume dwell, a setpoint
+  rate-limited by the acceleration limit on the way up and immediate on the way down,
+  and steering that follows the map's lane centre. A `VehicleController` protocol is the
+  whole coupling to a vehicle.
+- `adaptx.carla.session` (extended) - a `drive_ego` mode that leaves the ego's physics on,
+  `apply_ego_control` (the one place a command meets `carla.VehicleControl`, with the
+  steer sign flipped there and nowhere else), anchored placement, Traffic Manager
+  traffic, a collision sensor as a safety fallback, a display-only RGB camera, and a
+  shutdown order that survives the Traffic Manager.
+
+Five high-level session controls exist over HTTP - start, pause, resume, stop, reset -
+allowlisted by full path in the route audit; no endpoint spawns, destroys, moves, ticks or
+drives anything. The dashboard gained an explicit LIVE SIMULATION / STORED EVALUATION
+mode, a Front View fed by the camera, and cards for control, events and measured timing.
+
+**Reason:** Phase 12 could show a stored run or a scenario that was already publishing;
+it could not show ADAPT-X *doing* anything. The smallest loop that closes -
+perceive, decide, actuate, observe - needed a driven ego and a decision, and the decision
+had to consume the pipeline's outputs and nothing else, or the demonstration would prove
+nothing about the pipeline. Three findings from the live server shaped the design and are
+recorded rather than smoothed over: the Phase 7 engine scores a lamp post 5 m beside the
+road HIGH or CRITICAL on proximity alone, so a governor keyed on the scene maximum pinned
+the ego at the kerb forever - the speed table is therefore keyed on in-path objects, and
+the scene level is shown beside it; a pure proportional throttle stalled 0.4 m/s under
+its target because a small error gives a throttle below rolling resistance, so a hold
+throttle was added; and the Phase 4 tracker's identity churn on a parked car swung the
+level HIGH->LOW->HIGH within frames, so the setpoint ramps up under the acceleration
+limit and events for CRUISING/SLOWING flips are coalesced.
+
+Two things the loop never reads: ground truth (the loop has no call to
+`session.ground_truth()` and the snapshot has no field for it, ADR-045) and the collision
+sensor as an input (it ends the session and records the contact; it steers nothing).
+
+**Alternatives considered:** Driving the ego through the Phase 10 runner (single-use by
+design, ADR-048, and the evaluation architecture depends on it staying so); a second,
+lighter perception chain for the loop (rejected outright: the dashboard must show the
+pipeline, not a proxy); a controller reading CARLA ground truth for other actors "just for
+the demo" (would make the demonstration a lie about the pipeline); scene-maximum risk
+governing speed (measured to pin the ego, above); a planned route or lane-change logic
+(routing and planning stay NOT IMPLEMENTED; the road geometry follow is the minimum to
+keep a driven ego on the road); an asynchronous world (breaks ADR-044 determinism and the
+frame-interval velocity measurement); raw actor endpoints for the dashboard (rejected in
+ADR-055 and still rejected).
+
+**Impact:** New packages `adaptx.control`, `adaptx.live`; `CarlaSimulationSession` extended
+additively; `SceneSnapshot` gained optional `ego`, `control`, `live` fields and a
+`live:<id>` origin; `ControlSettings`, `LiveSettings`; `GET /api/v1/live/*` reads, the five
+controls, `/api/v1/live/camera`; `CarlaStatus.ERROR`; `live_simulation` and
+`vehicle_control` components; the scene channel reports `skipped`; the Phase 11
+ground-truth boundary tests cover the two new packages; the route audit allowlists the
+five controls. The fake simulator gained kinematics, attached sensors, a Traffic Manager,
+collision and camera sensors so the loop is tested without a server. Measured live in
+Experiment 014.
+
+**Risks:** The loop runs at ~0.3x wall-clock speed on this machine (the pipeline is
+115-130 ms per 50 ms frame) and says LAGGING; a viewer sees slow motion, not a slow
+vehicle. Velocities are ego-relative with no ego-motion compensation, so a moving ego
+makes every static object "approach" at its own speed and the risk engine's closing-speed
+factor rises everywhere; the corridor rule contains but does not remove this. The
+corridor is straight along +X: on a bend, roadside geometry enters it and the ego holds.
+A killed backend leaves actors on the server and, if the Traffic Manager was in
+synchronous mode, a server that appears hung; `stop` cleans up, a crash does not. The
+controller is a baseline: it is not tuned, not validated and not collision-free by claim -
+the safety sensor counts what it fails to prevent.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title

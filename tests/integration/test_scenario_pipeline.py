@@ -59,13 +59,22 @@ def short(definition: ScenarioDefinition, duration_s: float) -> ScenarioDefiniti
     return ScenarioDefinition.model_validate(payload)
 
 
-def run(definition: ScenarioDefinition, settings: Settings, world: FakeWorld | None = None):  # type: ignore[no-untyped-def]
+def run(  # type: ignore[no-untyped-def]
+    definition: ScenarioDefinition,
+    settings: Settings,
+    world: FakeWorld | None = None,
+    observer=None,
+):
     simulator = CarlaSimulationSession(
         settings.carla.model_copy(update={"fixed_delta_seconds": definition.fixed_delta_seconds}),
         carla_module=FakeCarlaModule(world if world is not None else FakeWorld()),
     )
     return run_scenario(
-        definition, settings=settings, context=build_context(settings), simulator=simulator
+        definition,
+        settings=settings,
+        context=build_context(settings),
+        simulator=simulator,
+        observer=observer,
     )
 
 

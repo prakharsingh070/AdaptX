@@ -301,13 +301,32 @@ class TestSystemService:
         assert "SIMULATION EVIDENCE ONLY" in evaluation.detail
         assert "NOT EVALUATED" in evaluation.detail
         assert "never zero" in evaluation.detail
-        assert "Not served over HTTP" in evaluation.detail
+        assert "never over HTTP" in evaluation.detail
+        assert "READ-ONLY" in evaluation.detail
         for forbidden in ("safe", "validated", "collision probability"):
             # "not safety validation" and "not a collision probability" are the
             # only allowed occurrences; assert the negations are present.
             assert forbidden not in evaluation.detail.replace("not safety validation", "").replace(
                 "not a collision probability", ""
             ).replace("not real-world validation", "")
+
+    def test_dashboard_is_a_partial_consumer_that_controls_nothing(
+        self, context: ApplicationContext
+    ) -> None:
+        """Phase 12 added the dashboard; it displays and never computes or controls."""
+        components = {c.name: c for c in context.system.status().components}
+        dashboard = components["dashboard"]
+
+        assert dashboard.implementation is ImplementationStatus.PARTIAL
+        assert dashboard.phase == 12
+        assert dashboard.required is False
+        assert "CONSUMER ONLY" in dashboard.detail
+        assert "computes no risk" in dashboard.detail
+        assert "cannot spawn, move, start or stop" in dashboard.detail
+        assert "NOT IMPLEMENTED" in dashboard.detail
+        assert "NOT MEASURED" in dashboard.detail
+        for forbidden in ("collision probability", "production", "real-time", "safe"):
+            assert forbidden not in dashboard.detail.lower()
 
     def test_prediction_is_partial_because_it_is_a_baseline(
         self, context: ApplicationContext

@@ -34,3 +34,7 @@ data/processed/*
 *.pcd
 *.ply
 *.bag
+
+# Stored evidence read by the dashboard (docs/DASHBOARD.md)
+reports/
+runs/

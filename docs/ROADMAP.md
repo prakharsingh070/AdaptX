@@ -428,11 +428,59 @@ measures orchestration cost alone (~35 µs to resolve, ~7 µs per actor per fram
 - **Not evaluated:** mapping occupancy accuracy (no honest reference), precision over
   unlabelled tracks, peak memory, anything real-world. Nothing was tuned.
 
-## Phase 12 — Dashboard and final integration · **To do (next)**
+## Phase 12 — Dashboard and final integration · **Done (consumer console)**
 
-- Build the dashboard against the existing backend contracts. Perception logic must not
-  live in the UI.
-- Reference: [`knowledge-base/15_dashboard-ui.md`](knowledge-base/15_dashboard-ui.md).
+- `dashboard/`: a static ES-module console served by the backend at `/dashboard` - no
+  framework, no build step, no dependency. Views: Overview (the mockup's layout with every
+  unmeasured panel saying so), Live Scene (3-D perspective and top-down canvases of the
+  point sample, boxes coloured by risk level with UNKNOWN dashed, velocity vectors,
+  predicted paths, adaptive tiles; pan / zoom / fit / toggles; click selects by track id),
+  Object Inspector, Spatial Map, Adaptive Resolution, Evaluation, Fixed vs Adaptive
+  Comparison, Run / Scenario with frame playback. Design and limitations in
+  [`DASHBOARD.md`](DASHBOARD.md); ADR-055.
+- Backend, additively: `SceneSnapshot` (outputs + point sample, no ground-truth field),
+  `SceneService`, `/ws/scene`, `GET /api/v1/scene/latest`, `POST /api/v1/scene/frame`,
+  the full-chain endpoint publishing its result, the scenario CLI `--publish URL`, and
+  `adaptx.evidence` serving stored reports and runs read-only (`/api/v1/reports`,
+  `/api/v1/runs`, runs frame by frame). A `dashboard` component in system status.
+- **The dashboard computes nothing.** Every figure is a backend field; the only arithmetic
+  in the browser is pixel layout; a source scan and a route audit assert it. No endpoint
+  spawns, destroys, moves, starts or stops anything.
+- Live-validated on CARLA 0.9.16: a published scenario streamed 80 frames into the browser.
+  Browser costs measured in Experiment 013 (one machine): 6000 points draw in ~10 ms,
+  a run frame fetches in ~30 ms, a 42 MB run costs the backend ~3 s to parse once.
+- **Not done, on purpose:** routing, decision, planning, a spatial risk field, GPU
+  measurement, camera/radar, per-cell occupancy streaming, live history, event replay,
+  authentication, persistence, any control surface for the simulator.
+
+### Post-Phase-12 extension: live simulation loop · **Done (baseline)** · not a Phase 13
+
+- The dashboard now sits behind a **running** CARLA session (ADR-056): `adaptx.live`
+  owns a long-lived driven-ego session on a thread and is the only caller of
+  `world.tick()`; every LiDAR frame runs through the unchanged Phase 2-8 chain; a
+  **baseline speed governor** (`adaptx.control`) reads the risk, tracking and prediction
+  outputs and the ego's own odometry - never ground truth - and drives the ego; a
+  six-entry live scenario catalogue spawns seeded Traffic Manager traffic and timed
+  scripted actors anchored to the ego's pose; a collision sensor is a safety fallback and
+  an RGB camera feeds a display-only Front View. Five high-level session controls
+  (start / pause / resume / stop / reset), allowlisted by full path; no actor endpoint.
+- **Measured live (Experiment 014):** the ego reaches ~5 m/s, slows for a parked car the
+  pipeline detects, holds 6.3-7.7 m short of it, resumes when it leaves, 0 collisions in
+  every run; ~160 ms per 50 ms frame (0.3x wall-clock speed, reported as LAGGING).
+- **Findings recorded, not hidden:** scene-maximum risk pinned the ego at the kerb (poles
+  score HIGH/CRITICAL on proximity), so the governor keys on in-path objects; velocities
+  are ego-relative with no ego-motion compensation; the corridor is straight, so bends
+  stop the ego; destroying Traffic Manager vehicles in a synchronous world aborted the
+  client until the shutdown order was changed.
+- **Not done:** routing, planning, lane changes, ego-motion compensation, a spatial risk
+  field, camera perception, GPU measurement, real-time by claim, tuning of anything.
+
+### After Phase 12
+
+The roadmap defines **no Phase 13**. Open items are the deferred "B" sections above, the
+ground-segmentation default decision (Experiment 012), event replay (deferred from
+Phase 10), and - exposed by the live loop - ego-motion compensation and a road-following
+corridor for the governor. See [`NEXT_PHASE.md`](NEXT_PHASE.md).
 
 ---
 

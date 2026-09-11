@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ADAPT-X Console</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%230a0e17%27/%3E%3Cpath d=%27M3 12 L8 3 L13 12 M5.2 9 H10.8%27 stroke=%27%2338bdf8%27 stroke-width=%271.8%27 fill=%27none%27/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="wordmark">ADAPT-X</span>
+        <span class="subtitle">Adaptive Dynamic Perception and Tracking</span>
+      </div>
+      <div class="pills">
+        <span id="pill-backend" class="pill pill-off" title="Backend HTTP reachability">Backend: connecting…</span>
+        <span id="pill-carla" class="pill pill-off" title="From GET /api/v1/carla/status">CARLA: unknown</span>
+        <span id="pill-session" class="pill pill-off" title="From GET /api/v1/live/status">Session: —</span>
+        <span id="pill-mode" class="pill pill-mode" title="Which data the views draw">LIVE SIMULATION</span>
+        <span id="pill-scene" class="pill pill-off" title="WS /ws/scene">Scene: connecting…</span>
+        <span id="pill-telemetry" class="pill pill-off" title="WS /ws/telemetry">Telemetry: connecting…</span>
+        <span id="pill-lag" class="pill pill-warn hidden" title="Measured: the live loop's wall-clock period exceeds the simulation timestep">PIPELINE LAGGING</span>
+      </div>
+      <div class="topbar-right">
+        <span id="frame-readout" class="mono muted">frame — · t —</span>
+      </div>
+    </header>
+
+    <nav class="rail" id="rail">
+      <a href="#overview" data-view="overview" class="rail-link">Dashboard</a>
+      <a href="#live" data-view="live" class="rail-link">Live Scene</a>
+      <a href="#inspector" data-view="inspector" class="rail-link">Object Inspector</a>
+      <a href="#map" data-view="map" class="rail-link">Spatial Map</a>
+      <a href="#adaptive" data-view="adaptive" class="rail-link">Adaptive Resolution</a>
+      <a href="#evaluation" data-view="evaluation" class="rail-link">Evaluation</a>
+      <a href="#comparison" data-view="comparison" class="rail-link">Fixed vs Adaptive</a>
+      <a href="#run" data-view="run" class="rail-link">Run / Scenario</a>
+      <div class="rail-section">
+        <div class="rail-heading">Mode</div>
+        <label class="toggle"><input type="radio" name="ui-mode" id="mode-live" value="live" checked /> LIVE SIMULATION</label>
+        <label class="toggle"><input type="radio" name="ui-mode" id="mode-stored" value="stored" /> STORED EVALUATION</label>
+        <div class="rail-note" id="rail-source">Live scene from the backend</div>
+      </div>
+      <div class="rail-section" id="live-controls">
+        <div class="rail-heading">Live session</div>
+        <label class="rail-field">Scenario
+          <select id="select-scenario"><option value="">— loading —</option></select>
+        </label>
+        <label class="rail-field">Seed
+          <input type="number" id="input-seed" min="0" step="1" value="42" />
+        </label>
+        <div class="button-row">
+          <button id="btn-start" class="primary">Start</button>
+          <button id="btn-pause">Pause</button>
+          <button id="btn-resume">Resume</button>
+          <button id="btn-stop">Stop</button>
+          <button id="btn-reset">Reset</button>
+        </div>
+        <div class="rail-note small" id="live-status-note">no live session</div>
+        <div class="rail-note muted small" id="live-scenario-note"></div>
+      </div>
+      <div class="rail-section" id="stored-controls">
+        <div class="rail-heading">Stored evidence</div>
+        <label class="rail-field">Report
+          <select id="select-report"><option value="">— none loaded —</option></select>
+        </label>
+        <label class="rail-field">Run (playback)
+          <select id="select-run"><option value="">— none —</option></select>
+        </label>
+        <div class="rail-note muted small" id="rail-evidence-note"></div>
+      </div>
+      <div class="rail-section">
+        <div class="rail-heading">Overlays</div>
+        <label class="toggle"><input type="checkbox" id="tg-points" checked /> Point cloud</label>
+        <label class="toggle"><input type="checkbox" id="tg-tiles" checked /> Adaptive tiles</label>
+        <label class="toggle"><input type="checkbox" id="tg-traj" checked /> Predicted paths</label>
+        <label class="toggle"><input type="checkbox" id="tg-vel" checked /> Velocity vectors</label>
+        <label class="toggle"><input type="checkbox" id="tg-labels" checked /> Object labels</label>
+        <label class="toggle"><input type="checkbox" id="tg-grid" checked /> Grid</label>
+      </div>
+      <div class="rail-section disclaimer small">
+        Simulation / research visualisation. Risk is a heuristic engineering score, not a
+        probability of collision. No safety guarantee is implied.
+      </div>
+    </nav>
+
+    <main class="content" id="content"></main>
+
+    <footer class="footer">
+      <span id="footer-version" class="mono">ADAPT-X</span>
+      <span id="footer-source" class="muted">—</span>
+      <span class="footer-right muted">Live telemetry is a stream of what the backend last processed; it is not a real-time claim.</span>
+    </footer>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

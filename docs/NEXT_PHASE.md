@@ -1,94 +1,112 @@
-# Next Phase — Dashboard and Final Integration (Phase 12)
+# Next Work — After Phase 12
 
 Handoff for the next work item. Read [`PROJECT_STATE.md`](PROJECT_STATE.md) first.
 
 > **Numbering is settled.** Prediction is Phase 5, mapping 6, risk 7, adaptive resolution 8,
-> CARLA 9, scenarios 10, evaluation 11 — all done. The dashboard is **Phase 12**.
+> CARLA 9, scenarios 10, evaluation 11, dashboard 12 — all done as baselines.
 > `CLAUDE.md`, `ROADMAP.md` and `services/system_service.py` agree. Do not renumber.
 
 ---
 
 ## Where things stand
 
-Eleven phases in, the backend is complete as a set of deterministic baselines behind
-typed contracts, CARLA feeds it, a scenario framework drives controlled scenes, and — as
-of Phase 11 — there is a measured account of what the pipeline actually does with them
-(Experiment 011). That account is mostly unflattering, and it is the most valuable thing the
-dashboard can show, because a dashboard that only shows the pipeline working would be
-showing the one thing the evaluation says it does not reliably do.
+Twelve phases in, every numbered item on the roadmap exists: a deterministic pipeline
+behind typed contracts, CARLA feeding it, a scenario framework driving controlled scenes,
+an offline evaluation layer that measured the pipeline against ground truth and found the
+baselines wanting (Experiments 011–012), a dashboard that shows all of it without
+computing any of it (Phase 12, ADR-055, [`DASHBOARD.md`](DASHBOARD.md)), and - as an
+extension of Phase 12, not a new phase - a live loop in which a baseline governor drives
+the ego from the pipeline's own outputs on a running CARLA server (ADR-056, Experiment
+014: it stops for the parked car, resumes when it leaves, 0 collisions, 0.3x wall-clock).
 
-## Objective
+**The roadmap defines no Phase 13.** This file therefore does not invent one. What follows
+is the work already on record, in the order the evidence suggests, and the rules that
+apply to any of it.
 
-Build the dashboard against the existing backend contracts, exactly as
-[`UI_UX.md`](UI_UX.md) specifies, with perception logic kept out of the UI. Every panel
-must be fed by a real endpoint or telemetry message, and every number it shows must be one
-the backend measured. The visual target is the mockup; the numbers are never the mockup's.
+## Open items, on record
 
-## What already exists and must be reused
+1. **The ground-segmentation default (owed since Experiment 012).** `ADAPTX_LIDAR__GROUND_ENABLED`
+   is `false` by default (ADR-012). With it off, a car parked 20 m ahead and a pedestrian
+   15 m ahead are detected on zero frames; with it on, both are seen every frame, no
+   identity switch occurs, and the pipeline runs at 80 ms per frame instead of 140. This
+   is a Phase 2/3 decision that changes every endpoint's behaviour. Make it with its own
+   experiment entry stating before and after, then re-run the evaluation and load the new
+   reports into the dashboard — which needs no change for that.
+2. **The deferred "B" items** under each phase in [`ROADMAP.md`](ROADMAP.md): clustering
+   and coordinate transforms (2D), oriented boxes and a labelled dataset (3B), a motion
+   model and re-identification (4B), and so on. Each is independent and each is a phase
+   of its own with an ADR and an experiment. The evaluation layer now exists to say
+   whether any of them helped, which was not true before Phase 11.
+3. **Event replay** (deferred from Phase 10, deferred again in Phase 12 because no panel
+   needed it). The design question is still open: re-run the simulation, or re-play a
+   recording. Phase 12's run playback is *not* event replay — it steps through a stored
+   record's outputs and produces nothing marked `DataSource.REPLAY`.
+4. **What the dashboard shows as missing, honestly**: a spatial risk field (`risk_field`
+   in `not_yet_available`), routing, planning, GPU measurement, per-cell occupancy
+   streaming, live scene history. None is required by anything now; each is a feature
+   with a backend contract to design first and a panel to fill second.
+5. **What the live loop exposed (Experiment 014).** Velocities are ego-relative: with the
+   ego moving, every static object "approaches" at the ego's speed and the risk engine's
+   closing-speed factor rises everywhere. Ego-motion compensation belongs in Phase 4B
+   (tracking) with the ego odometry as an input - and it changes every evaluation figure,
+   so it needs its own experiment. The governor's corridor is straight along +X; on a
+   bend, roadside geometry stops the ego. A road-following corridor (map waypoints ahead)
+   is a controller change, not a perception change, and stays a baseline.
+6. **The live loop's speed.** ~120 ms of a 160 ms frame is the pipeline; ~40 ms of that is
+   result-contract construction rather than stage work. Profiling before optimising; no
+   figure changes until an experiment says so.
 
-- **Seventeen endpoints and one WebSocket**, unchanged since Phase 8 — see
-  [`API.md`](API.md). Every stage returns a full result object with provenance,
-  `is_baseline`, configuration snapshot and measured duration.
-- `GET /api/v1/system/status` — readiness *and* implementation status per component, so a
-  panel for something that does not exist can say so instead of looking empty.
-- `MappingComparison` — the fixed-versus-adaptive contract, per frame.
-- `EvaluationReport` (Phase 11) — JSON written by `python -m adaptx.evaluation evaluate`.
-  **Evaluation is offline by decision (ADR-050).** If the dashboard shows evaluation
-  figures, it loads a recorded report; it never recomputes one, and it never asks the
-  backend to. Adding an endpoint that serves a *stored* report is additive and acceptable;
-  adding one that runs an evaluation is not.
-- The `SIMULATION` / `SYNTHETIC_TEST` / `LIVE_SENSOR` provenance on every contract, which
-  the UI must surface, not flatten.
+## The trap after this phase
 
-## One decision owed before more evaluation runs are read
-
-**Ground segmentation is off by default** (`ADAPTX_LIDAR__GROUND_ENABLED=false`, ADR-012).
-Experiment 012 measured the consequence on the live server: with it off, a car parked 20 m
-ahead and a pedestrian 15 m ahead are detected on zero frames because their returns are
-clustered with the road; with it on, both are detected on every frame, no scenario shows an
-identity switch, and the pipeline runs at 80 ms per frame instead of 140. Changing a process
-default is a Phase 2/3 decision that affects every endpoint; make it with an experiment
-entry, not as a side effect of the dashboard. Until it is made, every evaluation report
-must state the configuration it ran under - it does.
-
-Also known: scenes with moving placed actors are near- but not bit-repeatable on CARLA
-0.9.16 (≤ 8 of 27,000 points differ on some frames; a static scene is exact). The cause is
-not established and `python -m adaptx.evaluation compare` reports it correctly.
-
-## The trap in this phase
-
-**A dashboard is a claim.** A risk gauge reads as a probability. A "detection accuracy"
-card reads as a validated number. A green status reads as production readiness. None of
-those are true, and the contracts already carry the words that say so (`is_baseline`,
-`source`, `MetricStatus`, `limitations`). Show them. The Phase 11 report renders its
-limitations after its conclusion for exactly this reason; the dashboard should do the same.
+**The console now makes the baselines look finished.** A moving box with a predicted path
+and a risk colour reads as a working perception stack, and Experiments 011–012 say it is
+not: recall 0.00–0.06 at a 1 m gate, a constant 1.7 m centroid offset, no vehicle ever
+classified as one. The Evaluation view puts those figures and the report's `limitations`
+on screen for exactly this reason. Any demo that hides that view is misrepresenting the
+project.
 
 ## MUST NOT implement
 
-- Perception, tracking, prediction, mapping, risk or resolution logic in the UI, or any
-  recomputation of a backend figure in the browser.
-- An endpoint that runs an evaluation, a scenario or a benchmark on request from the UI.
-- Any tuning of Phases 2–8 in response to Experiment 011 without its own experiment entry
-  stating the before and after.
-- Event replay, unless a panel genuinely needs it — the design question from Phase 9 is
-  still open.
-- New dependencies on the backend without an ADR.
+- Anything computed in the browser: risk, trajectory, resolution, match, distance, rate,
+  ratio or metric. If a panel wants a number, the backend or the evaluation layer produces
+  it under a contract (ADR-055). The source scan in `tests/integration/test_dashboard_api.py`
+  enforces it; do not widen its allowlist.
+- A dashboard endpoint that runs perception, an evaluation or a benchmark on request, or
+  any endpoint that spawns, destroys, moves, ticks or drives a simulator actor. The five
+  session controls (`/api/v1/live/start|pause|resume|stop|reset`) are the whole control
+  surface and are allowlisted by full path; the route audit enforces it.
+- A controller that reads CARLA ground truth about other actors, for any reason. The
+  loop never calls `session.ground_truth()`; keep it that way.
+- Calling the governor "autonomous driving", "safe" or "collision-free". It is a baseline
+  and the safety sensor counts what it fails to prevent.
+- Ground truth on the live path. `SceneSnapshot` has no field for it and refuses one; keep
+  it that way.
+- Tuning of Phases 2–8 against Experiment 011/012 figures without an experiment entry
+  stating before and after.
+- New dependencies — backend or frontend — without an ADR. The dashboard has zero and no
+  build step; keep both.
 
 ## Backward-compatibility rules
 
 1. Existing endpoint behaviour and response shapes — extend additively.
-2. Ground truth stays out of perception (ADR-045); evaluation stays offline (ADR-050); a
-   metric that could not be computed stays null with a reason (ADR-051).
+2. Ground truth stays out of perception (ADR-045); evaluation stays offline (ADR-050);
+   stored reports are served, never recomputed (ADR-055); a metric that could not be
+   computed stays null with a reason (ADR-051).
 3. `ScenarioRunResult` stays free of metrics; `EvaluationReport` stays simulation evidence
-   with its limitations.
-4. Do not weaken or delete tests. Retarget narrowly and report it, as Phases 3–11 each did.
+   with its limitations; both keep loading in the dashboard unchanged.
+4. Do not weaken or delete tests. Retarget narrowly and report it, as Phases 3–12 each did.
 5. Report only measured results, with the method, the seed, the scenario and the
    environment beside every number.
+6. The live and stored modes stay labelled and never mixed; UNKNOWN stays UNKNOWN; null is
+   "Not available"; unobserved is never shown as free; "collision probability", "safe",
+   "production ready" and "real-time" never appear in the UI.
 
 ## Testing
 
-- The UI is tested against recorded responses and a recorded evaluation report, never
-  against a live simulator.
-- A panel for a `PLANNED` or `UNAVAILABLE` component says so; a test asserts it.
-- Provenance is rendered; a test asserts a `SIMULATION` frame is never shown as live.
-- The backend suite (1565 tests) continues to pass without the dashboard present.
+- The backend suite (1663 tests) and the Node suite (18) must keep passing; `pytest -m
+  carla` (10, including the live loop and the obstacle-stop demo) when a server is up.
+- The live loop is tested against the fake simulator (kinematics, attached sensors,
+  Traffic Manager, collision, camera) in `tests/integration/test_live_simulation.py`;
+  a change to the loop needs a fake-based test first and a live run second.
+- Any new panel is fed by a real endpoint or a stored report and has a test that says so.
+- Any new endpoint is additive, documented in `API.md`, and passes the route audit.
