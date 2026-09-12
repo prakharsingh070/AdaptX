@@ -12,10 +12,11 @@ export function isMissing(value) {
 }
 
 /** Format a number with a unit; missing values stay "Not available". */
-export function fmt(value, { unit = "", digits = 2, missing = NOT_AVAILABLE } = {}) {
+export function fmt(value, { unit = "", digits = 2, missing = NOT_AVAILABLE, sign = false } = {}) {
   if (isMissing(value)) return missing;
   if (typeof value !== "number") return String(value);
-  const text = Number.isInteger(value) && digits === 0 ? String(value) : value.toFixed(digits);
+  let text = Number.isInteger(value) && digits === 0 ? String(value) : value.toFixed(digits);
+  if (sign && value > 0) text = `+${text}`;
   return unit ? `${text}${unit}` : text;
 }
 
@@ -95,4 +96,35 @@ export function fmtTime(iso) {
 export function fmtVector(v, digits = 2) {
   if (isMissing(v)) return NOT_AVAILABLE;
   return `(${fmt(v.x, { digits })}, ${fmt(v.y, { digits })}, ${fmt(v.z, { digits })})`;
+}
+
+/** A glyph per object class, for cards and scene labels. UNKNOWN stays a question mark. */
+export function classGlyph(objectClass) {
+  switch (String(objectClass ?? "unknown").toLowerCase()) {
+    case "vehicle": return "\u{1F697}";
+    case "pedestrian": return "\u{1F6B6}";
+    case "cyclist": return "\u{1F6B4}";
+    case "obstacle": return "\u26A0";
+    default: return "?";
+  }
+}
+
+/** The class as the pipeline labelled it, upper-cased; UNKNOWN stays UNKNOWN. */
+export function classLabel(objectClass) {
+  return String(objectClass ?? "unknown").toUpperCase();
+}
+
+/** "IN PATH" / "CROSSING" / "BEHIND" / "OUTSIDE" from the backend's path relation. */
+export function pathLabel(relation) {
+  if (isMissing(relation)) return NOT_AVAILABLE;
+  return String(relation).replace("_", " ");
+}
+
+/** Compact scene label: "#12 CYCLIST 14.8m HIGH", every part as received. */
+export function objectLabel(record, track, level) {
+  const cls = classLabel(track ? track.object_class : record?.object_class);
+  const id = track ? track.track_id : record?.track_id;
+  const distance = record && !isMissing(record.distance_m) ? ` ${fmt(record.distance_m, { digits: 1 })}m` : "";
+  const risk = isMissing(level) ? "" : ` ${String(level).toUpperCase()}`;
+  return `#${id} ${cls}${distance}${risk}`;
 }

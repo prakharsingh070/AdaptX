@@ -52,9 +52,18 @@ apply to any of it.
    so it needs its own experiment. The governor's corridor is straight along +X; on a
    bend, roadside geometry stops the ego. A road-following corridor (map waypoints ahead)
    is a controller change, not a perception change, and stays a baseline.
-6. **The live loop's speed.** ~120 ms of a 160 ms frame is the pipeline; ~40 ms of that is
-   result-contract construction rather than stage work. Profiling before optimising; no
-   figure changes until an experiment says so.
+6. **The live loop's speed.** Now ~85 ms of a 120 ms frame is the pipeline (Experiment
+   015); the next measured hotspot is the adaptive mapper building a `MapTile` model per
+   tile per frame. Profiling before optimising; no figure changes until an experiment
+   says so.
+7. **Re-run the Phase 11 evaluation under the ADR-057 defaults.** The elevated filter,
+   class decay, vehicle band and tentative-miss change alter detection and tracking, so
+   every report in Experiments 011/012 is now describing an older pipeline. A new
+   experiment entry with before/after per scenario is owed before any of those figures
+   is quoted again.
+8. **Cyclist classification.** A riderless CARLA bicycle clusters as 1.0-1.9 x 1.2 x 1.1 m
+   and fits no band; attach a walker to the bicycle (a rider) in the scenario, or accept
+   that the geometric baseline cannot name it. Either way, measure first.
 
 ## The trap after this phase
 
@@ -103,8 +112,9 @@ project.
 
 ## Testing
 
-- The backend suite (1663 tests) and the Node suite (18) must keep passing; `pytest -m
-  carla` (10, including the live loop and the obstacle-stop demo) when a server is up.
+- The backend suite (1684 tests) and the Node suite (20) must keep passing; `pytest -m
+  carla` (12, including the live loop, the obstacle-stop demo and the perception
+  acceptance cases) when a server is up.
 - The live loop is tested against the fake simulator (kinematics, attached sensors,
   Traffic Manager, collision, camera) in `tests/integration/test_live_simulation.py`;
   a change to the loop needs a fake-based test first and a live run second.

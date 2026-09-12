@@ -917,6 +917,52 @@ dependency, ADR-056, Experiment 014. Uncommitted on `phase-12-dashboard`.
 
 ---
 
+## Live perception upgrade — verified live · objects labelled once, in the backend
+
+**Objective.** Make every visible object carry a meaningful class, distance, speed, path
+relation and risk from the pipeline's own outputs - and find out why they did not.
+
+**Audit first, on the server.** A probe recorded every track per frame and, offline only,
+read ground truth to say which cluster was the scripted actor. Findings: 671 "pedestrian"
+track-frames a minute with no walker present, nearly all fragments 0.9-3.5 m above the
+road (signs, foliage) or labels that stuck after the cluster grew out of every band; a
+parked car never once a VEHICLE (seen from behind it is 1.7-1.9 m across and 0.5-1.1 m
+tall, which no band called a car); its id changed five times, all between 26 and 20 m
+where a 16-21-point detection came on alternate frames and a one-hit tentative track died
+on each miss; and the pedestrian scenario's walker had never spawned at spawn point 1.
+
+**Changes, each measured before and after (ADR-057, Experiment 015).** Detector: reject
+clusters whose bottom is more than 0.8 m above the ground stage's floor (`floor_estimate_m`,
+the median z of the removed ground points; walker worst case 0.63 m, fragments >= 0.96).
+Tracker: a label lapses after three UNKNOWN observations; tentative tracks survive two
+misses. Classifier: the vehicle band accepts a 1.5-6.5 m long face (`geometric_bands_v2`).
+Result: false "pedestrians" 671 -> 37, the car VEHICLE on 269 of 357 frames with two ids
+instead of six, the walker PEDESTRIAN on 101 of 144. A riderless bicycle stays mostly
+UNKNOWN/OBSTACLE - reported, not fixed.
+
+**The object record.** `adaptx.control.corridor` holds the one IN_PATH / CROSSING /
+BEHIND / OUTSIDE rule; the policy and `object_records()` both call it. Each snapshot
+carries a `TrackedObjectSnapshot` per track with distance (risk engine), longitudinal and
+lateral distance (track x, y), ego-relative and closing speed, risk, path relation,
+fit-score confidence (null for UNKNOWN), hits, age, prediction horizon. The dashboard
+gained object cards, `#id CLASS 14.8m HIGH` scene labels with `IN PATH` beneath, a path
+column, an inspector block, and `entered_path` / `crossing_path` / `left_path` events.
+
+**Performance.** cProfile put 78 of 135 ms in the adaptive resolution stage, led by
+`TileGrid.tile_bounds` called ~1,230 times a frame. Memoising tile bounds and cell shapes
+per grid (values unchanged) and skipping re-validation of the internally built point
+sample: loop 160 -> 120 ms, pipeline 126 -> 84 ms, sim/wall 0.31 -> 0.42.
+
+**Live.** Every scenario: 0 collisions, holds 7.45-7.98 m short of the in-path object,
+resumes when it leaves; the roadside walker enters the corridor, stops the ego, leaves,
+and the ego resumes with the matching events. `pytest -m carla` 12/12.
+
+**Status:** 1684 tests (1663 before), 12 live, 20 Node, ruff / format / mypy clean (142
+source files), no new dependency, ADR-057, Experiment 015. Uncommitted on
+`live-perception-upgrade`.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled

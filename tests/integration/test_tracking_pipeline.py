@@ -153,7 +153,7 @@ class TestFullTemporalChain:
                 assert math.isfinite(track.heading_rad)
 
     def test_a_disappearing_object_coasts_then_is_dropped(self) -> None:
-        chain = Chain(min_hits_to_confirm=1, max_missed_frames=1)
+        chain = Chain(min_hits_to_confirm=1, max_missed_frames=1, max_missed_frames_tentative=1)
         for index in range(3):
             chain.frame(scene_with_vehicle_at(10.0 + index), index, index * 0.5)
 

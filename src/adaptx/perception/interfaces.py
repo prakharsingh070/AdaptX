@@ -54,8 +54,12 @@ class ObjectDetector(ABC):
     is_baseline: bool = True
 
     @abstractmethod
-    def detect(self, frame: PointCloudFrame) -> DetectionResult:
+    def detect(self, frame: PointCloudFrame, *, floor_z_m: float | None = None) -> DetectionResult:
         """Detect objects in ``frame``.
+
+        ``floor_z_m`` is the road surface height the ground stage estimated,
+        or ``None`` when no estimate exists; an implementation may use it to
+        ignore overhead structure and must work without it.
 
         The detections carry frame-local ``object_id`` values; stable identity
         is assigned later by

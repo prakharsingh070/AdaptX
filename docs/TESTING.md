@@ -443,6 +443,25 @@ results. The live figures are in Experiment 011.
   site, and asserts the playback view model never reads a snapshot and the live view model
   never reads ground truth.
 
+### Live perception upgrade (ADR-057)
+
+- `tests/unit/test_perception_upgrade.py` - the elevated filter rejects an overhead sign
+  when a floor is known, passes a walker, stays off without a floor, can be disabled;
+  `floor_estimate_m` is the ground stage's median; the measured Audi rear view is a
+  VEHICLE, the far rear view still an OBSTACLE, a bicycle and a pedestrian did not become
+  vehicles, a low bench is not one; three UNKNOWN observations reset a class and keep the
+  id, an agreeing observation resets the count, a far flickering detection keeps one id.
+- `tests/unit/test_object_records.py` - the corridor rule (in path, outside, behind,
+  crossing by prediction, what governs); object records are joined by track id with every
+  field a pipeline output, confidence null for UNKNOWN, null distance/UNKNOWN risk without
+  an assessment; the snapshot carries them, refuses an orphan, round-trips as JSON.
+- `tests/integration/test_carla_live.py::TestLivePerception` (`pytest -m carla`) - on the
+  server: the parked car is a VEHICLE with at most two ids, a real distance, IN_PATH
+  inside the corridor, held short of; the crossing walker is a confirmed PEDESTRIAN whose
+  lateral distance and path relation change, with a tracked speed and a fit score.
+- `dashboard/tests` - object records pass through the view model unchanged and a track
+  without one stays null; labels and glyphs pass the class through, UNKNOWN included.
+
 ## Conventions for new tests
 
 - **Never weaken or delete a test to make the suite green.** If a test fails, either the

@@ -27,6 +27,8 @@ class TestCatalogue:
             "cyclist_crossing",
             "static_obstacle",
             "mixed_obstacles",
+            "pedestrian_roadside",
+            "multiple_vehicles",
         }
         for definition in LIVE_CATALOGUE.values():
             LiveScenarioDefinition.model_validate(definition.model_dump())

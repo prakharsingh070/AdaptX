@@ -319,7 +319,7 @@ class TestDetectionResult:
 
     def test_detector_reports_a_baseline_classifier(self) -> None:
         detected = detector().detect(scenes.frame(scenes.vehicle())).objects[0]
-        assert detected.classifier == "geometric_bands_v1"
+        assert detected.classifier == "geometric_bands_v2"
         assert detected.is_baseline_classification is True
 
 

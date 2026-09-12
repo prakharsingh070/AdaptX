@@ -5,7 +5,7 @@
 // pixel placement.
 
 import { TopDownView, PerspectiveView, heightColour } from "./projection.js";
-import { levelColour, resolutionColour } from "../data/format.js";
+import { levelColour, resolutionColour, classGlyph, objectLabel, pathLabel } from "../data/format.js";
 
 const GROUND_Z = -1.8; // sensor sits 1.8 m above the ego origin by default; drawn as a reference only
 
@@ -193,7 +193,11 @@ export class TopDownRenderer {
     if (this.toggles.labels) {
       ctx.fillStyle = colour; ctx.font = "10px monospace";
       const level = riskOf(object);
-      ctx.fillText(`#${track.track_id} ${track.object_class}${level ? " " + String(level).toUpperCase() : ""}`, x1 + 2, y0 + 10);
+      ctx.fillText(`${classGlyph(track.object_class)} ${objectLabel(object.record, track, level)}`, x1 + 2, y0 + 10);
+      if (object.record && object.record.in_ego_path) {
+        ctx.fillStyle = "#f8fafc"; ctx.font = "bold 9px monospace";
+        ctx.fillText(pathLabel(object.record.path_relation), x1 + 2, y0 + 21);
+      }
     }
   }
 }
@@ -315,7 +319,11 @@ export class PerspectiveRenderer {
       if (this.toggles.labels) {
         ctx.fillStyle = colour; ctx.font = "10px monospace";
         const level = riskOf(object);
-        ctx.fillText(`#${track.track_id} ${track.object_class}${level ? " " + String(level).toUpperCase() : ""}`, x0, y0 - 3);
+        ctx.fillText(`${classGlyph(track.object_class)} ${objectLabel(object.record, track, level)}`, x0, y0 - 3);
+        if (object.record && object.record.in_ego_path) {
+          ctx.fillStyle = "#f8fafc"; ctx.font = "bold 9px monospace";
+          ctx.fillText(pathLabel(object.record.path_relation), x0, y1 + 10);
+        }
       }
     }
     if (this.toggles.velocity && track.velocity) {

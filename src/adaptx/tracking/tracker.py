@@ -86,6 +86,7 @@ class _Track:
     #: Class seen repeatedly that disagrees with the current one, and how often.
     pending_class: ObjectClass | None = None
     pending_class_hits: int = 0
+    unknown_observations: int = 0
 
     @property
     def largest_dimension_m(self) -> float | None:
@@ -127,6 +128,7 @@ class GeometricObjectTracker(ObjectTracker):
             max_missed_frames=settings.max_missed_frames,
             max_missed_frames_tentative=settings.max_missed_frames_tentative,
             class_switch_hits=settings.class_switch_hits,
+            class_decay_observations=settings.class_decay_observations,
             velocity_smoothing=settings.velocity_smoothing,
             max_timestep_s=settings.max_timestep_s,
             min_speed_for_heading_mps=settings.min_speed_for_heading_mps,
@@ -365,6 +367,7 @@ class GeometricObjectTracker(ObjectTracker):
         if observed is track.object_class:
             track.pending_class = None
             track.pending_class_hits = 0
+            track.unknown_observations = 0
             return
 
         if track.object_class is ObjectClass.UNKNOWN:
@@ -374,8 +377,21 @@ class GeometricObjectTracker(ObjectTracker):
             return
 
         if observed is ObjectClass.UNKNOWN:
-            # An ambiguous frame is not evidence against a known class.
+            # One ambiguous frame is not evidence against a known class, but
+            # a run of them is: measured live, a label earned on a fragment
+            # stuck for the track's whole life while the cluster grew into
+            # something the bands no longer recognised. After
+            # ``class_decay_observations`` consecutive UNKNOWNs the track says
+            # UNKNOWN again rather than reporting a class the geometry has
+            # stopped supporting.
+            track.unknown_observations += 1
+            if track.unknown_observations >= self._settings.class_decay_observations:
+                track.object_class = ObjectClass.UNKNOWN
+                track.pending_class = None
+                track.pending_class_hits = 0
+                track.unknown_observations = 0
             return
+        track.unknown_observations = 0
 
         if track.pending_class is observed:
             track.pending_class_hits += 1

@@ -71,10 +71,12 @@ def _catalogue() -> dict[str, LiveScenarioDefinition]:
         blueprint=PEDESTRIAN,
         at_s=2.0,
         forward_m=32.0,
-        left_m=7.0,
+        # Measured on Town10HD_Opt from spawn point 1: +7 m left at 32 m ahead is
+        # inside street furniture and the spawn is refused; +5 m is the pavement.
+        left_m=5.0,
         yaw_offset_deg=-90.0,
-        jitter_m=0.5,
-        motion=[LiveMotion(start_s=0.0, stop_s=12.0, left_mps=-1.2)],
+        jitter_m=0.3,
+        motion=[LiveMotion(start_s=0.0, stop_s=10.0, left_mps=-1.2)],
         lifetime_s=16.0,
     )
     cyclist = SpawnEvent(
@@ -101,6 +103,35 @@ def _catalogue() -> dict[str, LiveScenarioDefinition]:
             LiveMotion(start_s=0.0, stop_s=5.0, forward_mps=4.0, left_mps=-0.7),
             LiveMotion(start_s=5.0, stop_s=40.0, forward_mps=3.0),
         ],
+        lifetime_s=40.0,
+    )
+    roadside = SpawnEvent(
+        actor_id="roadside_pedestrian",
+        kind=ActorKind.PEDESTRIAN,
+        blueprint=PEDESTRIAN,
+        at_s=1.0,
+        forward_m=48.0,
+        left_m=4.0,
+        yaw_offset_deg=-90.0,
+        jitter_m=0.3,
+        # Stands on the pavement for 2 s, steps into the lane over 3 s, waits
+        # 5 s, steps back out: an object entering and then leaving the ego
+        # path. Timed against the measured ego (cruise 8 m/s from a standing
+        # start reaches 48 m in about 9 s).
+        motion=[
+            LiveMotion(start_s=2.0, stop_s=5.0, left_mps=-1.2),
+            LiveMotion(start_s=10.0, stop_s=13.0, left_mps=1.2),
+        ],
+        lifetime_s=24.0,
+    )
+    second_parked = SpawnEvent(
+        actor_id="parked_car_kerb",
+        kind=ActorKind.VEHICLE,
+        blueprint="vehicle.mini.cooper_s",
+        at_s=1.0,
+        forward_m=28.0,
+        left_m=-3.5,
+        jitter_m=0.5,
         lifetime_s=40.0,
     )
     definitions = [
@@ -134,6 +165,28 @@ def _catalogue() -> dict[str, LiveScenarioDefinition]:
             description="A car in the adjacent lane drifts into the ego lane ahead and slows.",
             default_seed=42,
             events=[cut_in],
+        ),
+        LiveScenarioDefinition(
+            scenario_id="pedestrian_roadside",
+            name="Pedestrian at the Roadside",
+            description=(
+                "A walker stands on the pavement 48 m ahead, steps into the lane at 3 s, "
+                "waits, and steps back out at 11 s: an object entering and leaving the ego path."
+            ),
+            default_seed=42,
+            events=[roadside],
+        ),
+        LiveScenarioDefinition(
+            scenario_id="multiple_vehicles",
+            name="Multiple Vehicles",
+            description=(
+                "Eight Traffic-Manager vehicles, a car parked at the kerb 28 m ahead and a "
+                "car stopped in the lane at 45 m."
+            ),
+            default_seed=42,
+            traffic_vehicles=8,
+            traffic_blueprints=VEHICLE_BLUEPRINTS,
+            events=[second_parked, obstacle.model_copy(update={"lifetime_s": 30.0})],
         ),
         LiveScenarioDefinition(
             scenario_id="random_urban_traffic",
@@ -304,31 +357,25 @@ class LiveScenarioManager:
             if session_time_s + 1e-9 >= spawn.event.at_s:
                 self._pending.remove(spawn)
                 anchor = self._session.anchor()
-                try:
-                    handle = self._session.spawn_relative_to(
-                        anchor,
-                        spawn.event.blueprint,
-                        forward_m=spawn.base[0],
-                        left_m=spawn.base[1],
-                        up_m=spawn.event.up_m,
-                    )
-                except SimulatorUnavailableError as exc:
-                    notes.append(f"spawn of {spawn.event.actor_id} refused: {exc.message}")
+                handle, base = self._spawn_with_fallback(spawn, anchor)
+                if handle is None:
+                    notes.append(f"spawn of {spawn.event.actor_id} refused at every offset tried")
                     continue
                 self._session.place_relative_to(
                     handle,
                     anchor,
-                    forward_m=spawn.base[0],
-                    left_m=spawn.base[1],
+                    forward_m=base[0],
+                    left_m=base[1],
                     up_m=spawn.event.up_m,
                     yaw_offset_deg=spawn.event.yaw_offset_deg,
                 )
                 self._active[spawn.event.actor_id] = _Live(
-                    spawn, handle, anchor, session_time_s, int(handle.id)
+                    ResolvedSpawn(spawn.event, base), handle, anchor, session_time_s, int(handle.id)
                 )
+                shifted = "" if base == spawn.base else " (shifted from the refused placement)"
                 notes.append(
                     f"{spawn.event.kind.value} '{spawn.event.actor_id}' appeared "
-                    f"{spawn.base[0]:.0f} m ahead, {spawn.base[1]:+.0f} m left of the ego"
+                    f"{base[0]:.0f} m ahead, {base[1]:+.0f} m left of the ego{shifted}"
                 )
         for actor_id, item in list(self._active.items()):
             elapsed = session_time_s - item.spawned_at_s
@@ -349,6 +396,42 @@ class LiveScenarioManager:
                     yaw_offset_deg=item.spawn.event.yaw_offset_deg,
                 )
         return notes
+
+    def _spawn_with_fallback(
+        self, spawn: ResolvedSpawn, anchor: WorldAnchor
+    ) -> tuple[Any | None, tuple[float, float]]:
+        """Spawn at the resolved placement, or at the nearest of a fixed offset ladder.
+
+        A CARLA server refuses a spawn that intersects street furniture. The
+        ladder is deterministic (same seed, same outcome on the same server)
+        and small - a metre or two along and beside the intended spot - so the
+        scene stays the one the scenario described. The offset actually used
+        is recorded in the event.
+        """
+        forward, left = spawn.base
+        ladder = [
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (2.0, 0.0),
+            (-2.0, 0.0),
+            (2.0, 1.0),
+            (2.0, -1.0),
+        ]
+        for d_forward, d_left in ladder:
+            base = (forward + d_forward, left + d_left)
+            try:
+                handle = self._session.spawn_relative_to(
+                    anchor,
+                    spawn.event.blueprint,
+                    forward_m=base[0],
+                    left_m=base[1],
+                    up_m=spawn.event.up_m,
+                )
+            except SimulatorUnavailableError:
+                continue
+            return handle, base
+        return None, spawn.base
 
     def clear(self) -> None:
         """Forget every handle; the session destroys the actors on close."""

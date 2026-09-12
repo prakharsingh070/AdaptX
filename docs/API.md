@@ -1542,6 +1542,19 @@ the baseline controller issued after this frame: `throttle`, `brake`, `steer` [+
 `loop_ms_median`, `loop_ms_max`). `WS /ws/scene` envelopes now carry `skipped`: how
 many published frames were superseded between two pushes to that client.
 
+**Object records (live perception upgrade, ADR-057).** Every `SceneSnapshot` also carries
+`objects`: one `TrackedObjectSnapshot` per track - `track_id`, `object_class`,
+`tracking_state`, `distance_m` (planar, from the risk assessment; null if unassessed),
+`longitudinal_distance_m` (x, ahead +), `lateral_distance_m` (y, left +), `speed_mps`
+(ego-relative, null until measured), `relative_speed_mps` (closing +), `risk_level`,
+`risk_score`, `in_ego_path`, `path_relation` (`IN_PATH` / `CROSSING` / `BEHIND` /
+`OUTSIDE`, the controller's corridor rule), `confidence` (geometric fit, null for
+UNKNOWN), `hits`, `age_frames`, `predicted_horizon_s`, `predicted_points`. A record
+whose `track_id` has no track is refused. `DetectionResult.rejected[].reason` gained
+`elevated`; `DetectionConfiguration` gained `max_bottom_height_m`;
+`TrackingConfiguration` gained `class_decay_observations`. Live events gained
+`entered_path`, `crossing_path` and `left_path`.
+
 `GET /api/v1/carla/status` now reports `CONNECTED` while a live session is open and
 `ERROR` (a new `CarlaStatus` value) when the session failed, with the session's detail.
 

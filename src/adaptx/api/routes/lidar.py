@@ -20,6 +20,7 @@ from adaptx.api.schemas import (
     LiDARTrackingResponse,
 )
 from adaptx.core.exceptions import InvalidPointCloudError
+from adaptx.models.processing import floor_estimate_m
 from adaptx.models.resolution import ResolutionDecision
 from adaptx.models.scene import PointStage
 from adaptx.services.scene_service import build_snapshot
@@ -119,7 +120,7 @@ def detect_objects(
         raise InvalidPointCloudError(str(exc)) from exc
 
     processed = context.preprocessor.run(raw_frame)
-    detection = context.detector.detect(processed.frame)
+    detection = context.detector.detect(processed.frame, floor_z_m=floor_estimate_m(processed))
 
     service.ingest(
         processed.frame,
@@ -173,7 +174,7 @@ def track_frame(
         raise InvalidPointCloudError(str(exc)) from exc
 
     processed = context.preprocessor.run(raw_frame)
-    detection = context.detector.detect(processed.frame)
+    detection = context.detector.detect(processed.frame, floor_z_m=floor_estimate_m(processed))
     tracking = context.tracking.update(
         detection.objects,
         processed.frame.timestamp,
@@ -240,7 +241,7 @@ def predict_frame(
         raise InvalidPointCloudError(str(exc)) from exc
 
     processed = context.preprocessor.run(raw_frame)
-    detection = context.detector.detect(processed.frame)
+    detection = context.detector.detect(processed.frame, floor_z_m=floor_estimate_m(processed))
     tracking = context.tracking.update(
         detection.objects,
         processed.frame.timestamp,
@@ -391,7 +392,7 @@ def assess_risk(
         raise InvalidPointCloudError(str(exc)) from exc
 
     processed = context.preprocessor.run(raw_frame)
-    detection = context.detector.detect(processed.frame)
+    detection = context.detector.detect(processed.frame, floor_z_m=floor_estimate_m(processed))
     tracking = context.tracking.update(
         detection.objects,
         processed.frame.timestamp,
@@ -491,7 +492,7 @@ def adaptive_map_frame(
         raise InvalidPointCloudError(str(exc)) from exc
 
     processed = context.preprocessor.run(raw_frame)
-    detection = context.detector.detect(processed.frame)
+    detection = context.detector.detect(processed.frame, floor_z_m=floor_estimate_m(processed))
     tracking = context.tracking.update(
         detection.objects,
         processed.frame.timestamp,
@@ -565,6 +566,7 @@ def adaptive_map_frame(
             comparison=comparison,
             processing_ms=processed.metrics.duration_ms,
             max_points=context.settings.dashboard.scene_max_points,
+            path_half_width_m=context.settings.control.path_half_width_m,
         )
     )
 

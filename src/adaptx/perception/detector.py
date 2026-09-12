@@ -87,6 +87,7 @@ class GeometricObjectDetector(ObjectDetector):
         self._settings = settings
         self._clusterer = GridConnectedComponentClusterer(settings)
         self._classifier = GeometricClassifier()
+        self._floor_z_m: float | None = None
 
     @property
     def configuration(self) -> DetectionConfiguration:
@@ -100,17 +101,28 @@ class GeometricObjectDetector(ObjectDetector):
             max_height_m=settings.max_height_m,
             min_footprint_m=settings.min_footprint_m,
             max_footprint_m=settings.max_footprint_m,
+            max_bottom_height_m=settings.max_bottom_height_m,
         )
 
-    def detect(self, frame: PointCloudFrame) -> DetectionResult:
+    def detect(self, frame: PointCloudFrame, *, floor_z_m: float | None = None) -> DetectionResult:
         """Detect objects in ``frame``.
 
         ``frame`` is expected to hold the **non-ground** points produced by the
         processing pipeline. Passing an unsegmented cloud is not an error, but
         the ground surface will then form one enormous cluster and be rejected
         by the footprint filter rather than recognised as ground.
+
+        Args:
+            frame: The non-ground points.
+            floor_z_m: The road surface height in the frame's own coordinates,
+                as the ground stage estimated it (the median z of the points it
+                removed). When given, a cluster whose lowest point sits more
+                than ``max_bottom_height_m`` above it is rejected as
+                ``ELEVATED``: overhead signs, foliage and awnings are not road
+                users. ``None`` (no ground stage) disables the rule.
         """
         started = time.perf_counter()
+        self._floor_z_m = floor_z_m
         points = frame.points
         input_count = int(points.shape[0])
 
@@ -179,7 +191,7 @@ class GeometricObjectDetector(ObjectDetector):
             extent = extents[cluster_id]
             centroid = geometry.centroid[cluster_id]
 
-            rejection = self._reject(count, extent)
+            rejection = self._reject(count, extent, float(geometry.minimum[cluster_id][2]))
             if rejection is not None:
                 reason, measured, threshold = rejection
                 rejected.append(
@@ -207,7 +219,7 @@ class GeometricObjectDetector(ObjectDetector):
         return objects, rejected
 
     def _reject(
-        self, count: int, extent: np.ndarray
+        self, count: int, extent: np.ndarray, bottom_z: float
     ) -> tuple[ClusterRejection, float, float] | None:
         """Return why this cluster fails the filter, or ``None`` if it passes.
 
@@ -217,6 +229,11 @@ class GeometricObjectDetector(ObjectDetector):
         settings = self._settings
         height = float(extent[2])
         footprint = float(max(extent[0], extent[1]))
+        floor = self._floor_z_m
+        if floor is not None and settings.max_bottom_height_m is not None:
+            above_floor = bottom_z - floor
+            if above_floor > settings.max_bottom_height_m:
+                return ClusterRejection.ELEVATED, above_floor, settings.max_bottom_height_m
 
         if count < settings.min_cluster_points:
             return ClusterRejection.TOO_FEW_POINTS, float(count), float(settings.min_cluster_points)

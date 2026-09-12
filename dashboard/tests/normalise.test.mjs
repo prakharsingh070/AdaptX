@@ -96,3 +96,10 @@ test("a live-session snapshot carries ego, control and timing through unchanged;
   assert.equal(playback.control, null);
   assert.equal(playback.live, null);
 });
+
+test("backend object records are joined by track id and never derived", () => {
+  const record = { track_id: 2, object_class: "vehicle", tracking_state: "confirmed", distance_m: 23.4, longitudinal_distance_m: 23.2, lateral_distance_m: 2.1, speed_mps: 8.2, relative_speed_mps: -1.1, risk_level: "medium", risk_score: 0.5, in_ego_path: true, path_relation: "IN_PATH", confidence: 0.96, hits: 12, age_frames: 14, predicted_horizon_s: 3.0, predicted_points: 13 };
+  const scene = sceneFromSnapshot({ ...snapshot, objects: [record] });
+  assert.deepEqual(findObject(scene, 2).record, record);
+  assert.equal(findObject(scene, 1).record, null); // no record: stays null, nothing invented
+});

@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from adaptx.carla.session import CarlaSimulationSession
 from adaptx.config.settings import CarlaSettings, Settings
+from adaptx.control.corridor import PathRelation
 from adaptx.control.models import ControlCommand, ControllerState, EgoObservation
 from adaptx.control.policy import RiskGovernedSpeedPolicy
 from adaptx.core.exceptions import AdaptXError, SimulatorUnavailableError
@@ -59,7 +60,7 @@ from adaptx.models.scene import PointStage
 from adaptx.models.system import SimulationSessionStatus
 from adaptx.models.tracking import TrackStatus
 from adaptx.models.vehicle import VehicleState
-from adaptx.services.scene_service import build_snapshot
+from adaptx.services.scene_service import build_snapshot, object_records
 
 if TYPE_CHECKING:
     from adaptx.core.lifecycle import ApplicationContext
@@ -126,9 +127,11 @@ class LiveSimulationService:
         self._collision_count = 0
         # Per-frame bookkeeping for event derivation.
         self._known_tracks: dict[int, str] = {}
+        self._known_relations: dict[int, PathRelation] = {}
         self._last_level: RiskLevel | None = None
         self._last_controller_state: ControllerState | None = None
         self._last_controller_event_frame = -100
+        self._last_level_event_frame = -100
         self._last_resolution_event_frame = 0
         self._pending_refined = 0
         self._pending_coarsened = 0
@@ -504,6 +507,7 @@ class LiveSimulationService:
             ego=ego_state,
             control=command,
             live=info,
+            path_half_width_m=self._settings.control.path_half_width_m,
         )
         self._context.scene.publish(snapshot)
         loop_ms = (time.perf_counter() - loop_start) * 1000.0
@@ -536,13 +540,22 @@ class LiveSimulationService:
             for t in produced.tracking.tracks
             if t.status in (TrackStatus.CONFIRMED, TrackStatus.COASTING)
         }
+        records = object_records(
+            produced.tracking,
+            produced.prediction,
+            produced.risk,
+            self._settings.control.path_half_width_m,
+        )
+        relation_of = {r.track_id: r.path_relation for r in records}
         for track_id, object_class in current.items():
             if track_id not in self._known_tracks:
                 distance = distances.get(track_id)
                 where = f" at {distance:.1f} m" if distance is not None else ""
+                relation = relation_of.get(track_id)
+                tail = f", {relation.value.replace('_', ' ')}" if relation is not None else ""
                 self._event(
                     "object_detected",
-                    f"{object_class} track #{track_id} confirmed{where}",
+                    f"{object_class} track #{track_id} confirmed{where}{tail}",
                     track_id=track_id,
                     object_class=object_class,
                 )
@@ -556,12 +569,56 @@ class LiveSimulationService:
                 )
         self._known_tracks = current
 
+        # Path-relation transitions of confirmed tracks: entering the corridor,
+        # a predicted crossing, leaving. Derived from the same corridor rule the
+        # controller and the snapshot use, so the event matches the label.
+        relations: dict[int, PathRelation] = {}
+        for record in records:
+            if record.track_id not in current:
+                continue
+            relations[record.track_id] = record.path_relation
+            before = self._known_relations.get(record.track_id)
+            if before is None or before is record.path_relation:
+                continue
+            where = "" if record.distance_m is None else f" at {record.distance_m:.1f} m"
+            label = f"{record.object_class.value} #{record.track_id}"
+            if record.path_relation is PathRelation.IN_PATH:
+                self._event(
+                    "entered_path",
+                    f"{label} entered the ego path{where}",
+                    track_id=record.track_id,
+                    object_class=record.object_class.value,
+                )
+            elif record.path_relation is PathRelation.CROSSING:
+                self._event(
+                    "crossing_path",
+                    f"{label} predicted to cross the ego path{where}",
+                    track_id=record.track_id,
+                    object_class=record.object_class.value,
+                )
+            elif before in (PathRelation.IN_PATH, PathRelation.CROSSING):
+                self._event(
+                    "left_path",
+                    f"{label} left the ego path",
+                    track_id=record.track_id,
+                    object_class=record.object_class.value,
+                )
+        self._known_relations = relations
+
+        # The scene level is the maximum over every assessed object, roadside
+        # clutter included, and flaps HIGH<->CRITICAL several times a second
+        # as tracks come and go (measured live). One event per 20 frames.
         level = produced.risk.highest_risk_level
-        if self._last_level is not None and level is not self._last_level:
+        if (
+            self._last_level is not None
+            and level is not self._last_level
+            and self._frames - self._last_level_event_frame >= 20
+        ):
             self._event(
                 "risk_level_changed",
                 f"scene risk level {self._last_level.value.upper()} → {level.value.upper()}",
             )
+            self._last_level_event_frame = self._frames
         self._last_level = level
 
         # Hold-class transitions always make an event; CRUISING/SLOWING flips
@@ -658,9 +715,11 @@ class LiveSimulationService:
         self._last_error = None
         self._collision_count = 0
         self._known_tracks = {}
+        self._known_relations = {}
         self._last_level = None
         self._last_controller_state = None
         self._last_controller_event_frame = -100
+        self._last_level_event_frame = -100
         self._last_resolution_event_frame = 0
         self._pending_refined = 0
         self._pending_coarsened = 0

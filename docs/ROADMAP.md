@@ -475,6 +475,26 @@ measures orchestration cost alone (~35 µs to resolve, ~7 µs per actor per fram
 - **Not done:** routing, planning, lane changes, ego-motion compensation, a spatial risk
   field, camera perception, GPU measurement, real-time by claim, tuning of anything.
 
+### Live perception upgrade · **Done (measured)** · ADR-057, Experiment 015
+
+- Every live object carries a backend-built record: class, tracking state, planar
+  distance, longitudinal / lateral distance, ego-relative and closing speed, risk level
+  and score, IN_PATH / CROSSING / BEHIND / OUTSIDE by the controller's own corridor rule,
+  fit-score confidence. The dashboard shows it as object cards, scene labels
+  (`#12 VEHICLE 14.8m HIGH`, `IN PATH`), a path column and the inspector's top block;
+  events mark objects entering, predicted to cross, and leaving the path.
+- Measured perception fixes: elevated-cluster filter (bottom > 0.8 m above the ground
+  stage's floor: 671 -> 37 false "pedestrian" track-frames a minute), class decay after
+  three UNKNOWNs, a partial-view vehicle band (the parked car: VEHICLE 0 -> 269 of 357
+  frames), tentative tracks survive two misses (its id switches 5 -> 2). Tile geometry
+  memoised: loop 160 -> 120 ms (0.31 -> 0.42x wall-clock). Two live scenarios added
+  (roadside pedestrian entering and leaving the path; multiple vehicles); the pedestrian
+  scenario's walker, found never to spawn, is placed where the server accepts it.
+- **Not done, honestly:** a riderless CARLA bicycle is mostly UNKNOWN/OBSTACLE and
+  switches identity while crossing (cyclist classification is not supported by the
+  geometry); ego-motion compensation; a per-cluster floor on slopes; re-running the Phase
+  11 evaluation under the new defaults; the adaptive mapper's per-tile model cost.
+
 ### After Phase 12
 
 The roadmap defines **no Phase 13**. Open items are the deferred "B" sections above, the

@@ -2125,6 +2125,76 @@ the safety sensor counts what it fails to prevent.
 
 **Status:** Accepted
 
+## ADR-057: Objects Are Labelled Once, in the Backend - Floor-Referenced Detection, Class Decay, a Shared Corridor and the Object Record
+
+**Decision:** The live perception upgrade (post-Phase-12) makes four changes, each
+measured on CARLA 0.9.16 before it was made (Experiment 015):
+
+1. **The detector rejects elevated clusters.** `ObjectDetector.detect` gains an optional
+   `floor_z_m` - the median height of the points the ground stage removed, a single
+   number per frame from the existing Phase 2 output. A cluster whose lowest point sits
+   more than `max_bottom_height_m` (0.8 m) above it is rejected as `ELEVATED`. Without a
+   ground stage there is no floor and the rule is off.
+2. **A track's class decays.** After `class_decay_observations` (3) consecutive UNKNOWN
+   observations the track reports UNKNOWN again; its identity is untouched.
+3. **The vehicle band accepts a partial view** (larger extent 1.5-6.5 m instead of
+   2.6-6.5) and tentative tracks survive two misses instead of one.
+4. **One corridor rule and one object record.** `adaptx.control.corridor` decides
+   IN_PATH / CROSSING / BEHIND / OUTSIDE from a track's position and its predicted path;
+   the speed governor and the scene snapshot both call it. The snapshot carries a
+   `TrackedObjectSnapshot` per track - class, tracking state, planar distance,
+   longitudinal and lateral distance, ego-relative speed, closing speed, risk level and
+   score, path relation, fit-score confidence (null for UNKNOWN), hits, age, predicted
+   horizon - every field a Phase 4/5/7 output joined by track id in the backend. The
+   dashboard formats it.
+
+**Reason:** Measured live, 671 track-frames in one minute wore the label "pedestrian"
+with no walker in the scene, a parked car was never once a "vehicle", and the car's
+track id changed five times on the approach. The causes were specific and cheap to
+remove without touching an algorithm: the "pedestrians" were fragments 0.9-3.5 m above
+the road (signs, foliage) plus labels that stuck after the cluster grew out of every
+band; the car was seen from behind, 1.7-1.9 m across and 0.5-1.1 m tall, which no band
+called a vehicle; the id changes were a one-hit tentative track dying on each of the
+alternate frames a 16-21-point detection skipped. A road user touches the road, a label
+the geometry stopped supporting should lapse, a car-width face at car height is a car,
+and a far detection that flickers is still one object - each rule is a sentence, each
+threshold a measurement.
+
+The object record exists because the dashboard was reading five contracts to describe
+one object, and the rule "the frontend computes nothing" (ADR-055) meant it could not
+answer "is it in my path?" at all. Joining once in the backend, with the corridor rule
+the controller already applied, gives the dashboard the answer the vehicle acted on -
+not a second opinion.
+
+**Alternatives considered:** A learned classifier (no labelled data; ADR-020 declined
+it and nothing changed); a per-cluster floor from the ground cells under the cluster
+(better on slopes, more code; the frame-median floor is the flat-road assumption made
+explicit, and the walker's measured 0.63 m worst case fits under 0.8 m); a motion-based
+class rule (velocities are ego-relative, so a static pole "moves" - rejected until
+ego-motion compensation exists); wider cyclist bands (a riderless CARLA bicycle is
+1.0-1.9 x 1.2 x 1.1 m and overlaps the pedestrian and obstacle bands; widening would
+manufacture cyclists from fences); labelling in the frontend (forbidden).
+
+**Impact:** `DetectionSettings.max_bottom_height_m` (0.8, None disables),
+`TrackingSettings.class_decay_observations` (3), `max_missed_frames_tentative` default 1
+-> 2, `ClusterRejection.ELEVATED`, classifier name `geometric_bands_v2`,
+`ObjectDetector.detect(frame, *, floor_z_m=None)` on the contract, `floor_estimate_m`
+in `models.processing`, `adaptx.control.corridor`, `TrackedObjectSnapshot` and
+`SceneSnapshot.objects`, live events `entered_path` / `crossing_path` / `left_path`,
+two live scenarios, tile geometry memoised in `mapping.tiles` (a measured 25 %
+loop-time gain, no value changed). The Phase 11 evaluation figures were measured under
+the old detector and tracker defaults and are not re-measured here; Experiment 015
+records the live effect only.
+
+**Risks:** The floor is one number per frame: on a slope, near objects could be rejected
+or far overhead structure admitted. A bus shelter's side is now a "vehicle". The class
+decay hides nothing but makes labels flicker where clusters flicker. A riderless bicycle
+is still mostly not a CYCLIST, and crossing bicycles still switch identity. None of the
+evaluation metrics have been re-run under the new defaults; when they are, they will
+differ.
+
+**Status:** Accepted
+
 ## Decision Template
 
 ### ADR-XXX: Title

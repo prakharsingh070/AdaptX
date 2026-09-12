@@ -29,6 +29,7 @@ class ClusterRejection(StrEnum):
     TOO_TALL = "too_tall"
     FOOTPRINT_TOO_SMALL = "footprint_too_small"
     FOOTPRINT_TOO_LARGE = "footprint_too_large"
+    ELEVATED = "elevated"
 
 
 class RejectedCluster(AdaptXModel):
@@ -61,6 +62,10 @@ class DetectionConfiguration(AdaptXModel):
     max_height_m: float
     min_footprint_m: float
     max_footprint_m: float
+    max_bottom_height_m: float | None = Field(
+        default=None,
+        description="Elevated-cluster limit above the estimated road surface; null when off.",
+    )
 
 
 class DetectionResult(TimestampedModel):

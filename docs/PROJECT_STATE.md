@@ -4,7 +4,7 @@
 [`PHASE_HISTORY.md`](PHASE_HISTORY.md) for how it got here and
 [`NEXT_PHASE.md`](NEXT_PHASE.md) for what to build next.
 
-Snapshot taken 2026-09-12 (Phase 12 + live simulation extension). The repository is the source of truth; if this file
+Snapshot taken 2026-09-12 (Phase 12 + live simulation extension + live perception upgrade). The repository is the source of truth; if this file
 disagrees with the code, the code wins and this file needs fixing.
 
 ---
@@ -37,8 +37,21 @@ actors, a collision sensor as a safety fallback, an ego camera for display, five
 high-level session controls (start / pause / resume / stop / reset) and nothing that
 touches an actor over HTTP. **Measured live:** the ego slows for a parked car the pipeline
 detects, holds ~7.7 m short of it, resumes when it leaves, 0 collisions in every run; the
-loop runs at ~0.3x wall-clock speed and the header says LAGGING. Routing, planning,
+loop runs at ~0.4x wall-clock speed and the header says LAGGING. Routing, planning,
 ego-motion compensation and a spatial risk field remain NOT IMPLEMENTED.
+
+**Live perception upgrade (ADR-057, Experiment 015).** Every live object now carries a
+backend-built record - class, tracking state, planar distance, longitudinal and lateral
+distance, ego-relative speed, closing speed, risk level and score, IN_PATH / CROSSING /
+BEHIND / OUTSIDE against the controller's own corridor, fit-score confidence - and the
+dashboard draws it as cards, scene labels and the inspector. Three measured perception
+fixes: the detector rejects clusters whose bottom is more than 0.8 m above the road the
+ground stage found (94 % of the false "pedestrians" were overhead signs and foliage), a
+track's label lapses after three UNKNOWN observations, and the vehicle band accepts a
+car's rear face (the parked car is now VEHICLE from ~12 m; it had never been one).
+Tentative tracks survive two misses (the parked car's id switched 5 times, now 2). Tile
+geometry is memoised: loop 160 -> 120 ms per frame. **Not** supported: a riderless
+CARLA bicycle is mostly UNKNOWN/OBSTACLE and switches identity while crossing.
 Adaptive resolution — the thing the project is named for — exists as a deterministic
 heuristic baseline and has now been measured on live CARLA scenes against the fixed
 baseline **and** against ground truth (Experiment 011): 0.48–0.56 of the fixed map's cells,
@@ -54,11 +67,12 @@ were deliberately left as originally written.
 
 ## 3. Branch and status
 
-- Branch: `phase-12-dashboard`, branched from `origin/main` at `c0a89dd`
-- Phases 1 through 11 are committed **and merged into `origin/main`** (PR #1 through PR #8).
-  Phase 11 is commit `ad24128`, merged as PR #8 in `c0a89dd`
-- Phase 12 **and** the live simulation extension are in the working tree on this branch,
-  **not committed and not pushed**
+- Branch: `live-perception-upgrade`, branched from `phase-12-dashboard` at `24cb73e`
+- Phases 1 through 11 are committed **and merged into `origin/main`** (PR #1 through PR #8)
+- Phase 12 and the live simulation extension are commit `24cb73e` on
+  `phase-12-dashboard`, pushed, **not yet merged**
+- The live perception upgrade is in the working tree on this branch, **not committed and
+  not pushed**
 
 > Local `main` was stale at `5f68a5e` (the Phase 7 merge) when Phase 9 began, two commits
 > behind `origin/main`. Branching from it would have silently dropped Phase 8. **Check
@@ -167,7 +181,7 @@ loop never calls `session.ground_truth()`.
 | `adaptx.evaluation` | Phase 11, **the only package that reads ground truth**: `dataset` (record → evaluation view, sensor-frame conversion, finite-difference reference velocity), `matching` (greedy gated), `tracking` (detection + tracking), `prediction` (ADE/FDE), `risk` (proximity events), `mapping` (workload; accuracy explicitly unavailable), `adaptive` (paired fixed vs adaptive, churn, refinement lead), `resource`, `evaluator`, `report` (text), `compare` (repeatability), `models` (report contracts), `__main__` (CLI). Offline; imports no simulator |
 | `adaptx.carla` | Boundary: `client` (connection), `session` (deterministic simulation lifecycle), `conversion` (the single coordinate/time boundary, imports no simulator), `ground_truth`, `interfaces`, `mock`. Optional dependency. `smoke.py` was deleted in Phase 10 |
 | `adaptx.services` | `lidar_service`, `metrics_service`, `carla_service`, `system_service`, `tracking_service`, `prediction_service`, `mapping_service`, `risk_service`, `adaptive_mapping_service`, `scene_service` (Phase 12: builds and keeps the latest `SceneSnapshot`) |
-| `adaptx.control` | Live extension: `models` (`ControlCommand`, `EgoObservation`, `ControlConfiguration`, `ControllerState`), `interfaces` (`VehicleController`), `policy` (`RiskGovernedSpeedPolicy`, pure, reads no ground truth) |
+| `adaptx.control` | Live extension: `models` (`ControlCommand`, `EgoObservation`, `ControlConfiguration`, `ControllerState`), `interfaces` (`VehicleController`), `policy` (`RiskGovernedSpeedPolicy`, pure, reads no ground truth), `corridor` (the shared IN_PATH / CROSSING / BEHIND / OUTSIDE rule, ADR-057) |
 | `adaptx.live` | Live extension: `models` (`LiveState`, `LiveStatus`, `LiveEvent`, `LiveTiming`, `LiveFrameInfo`, scenario contracts), `scenarios` (six-entry catalogue, `resolve_live`, anchored `LiveScenarioManager`), `service` (`LiveSimulationService`: the loop, controls, events, camera PNG), `camera` (PNG encoder) |
 | `adaptx.evidence` | Phase 12, **downstream of evaluation and outside every pipeline package**: `service` reads stored reports and runs, validates them, serves them read-only (runs frame by frame, small LRU) and compares reports through the Phase 11 contract |
 | `adaptx.api` | `app` (also mounts `dashboard/` at `/dashboard`), `schemas`, `dependencies`, `routes/` (+ `scene`, `evidence` in Phase 12), `websocket/` (+ `scene`) |
@@ -313,15 +327,18 @@ built-in runner (Node 22 was present; it is a dev convenience, not a runtime nee
 
 ## 12–14. Verification status
 
-- **1663 tests pass**, 10 deselected (`pytest`, Python 3.13). The 10 are the live CARLA tests
-- `pytest -m carla` — **10 passed** live against CARLA 0.9.16 from `.venv312` (2026-09-12),
+- **1684 tests pass**, 12 deselected (`pytest`, Python 3.13). The 12 are the live CARLA tests
+- `pytest -m carla` — **12 passed** live against CARLA 0.9.16 from `.venv312` (2026-09-12),
+  including the perception acceptance cases: the parked car is a VEHICLE with at most two
+  ids and a real distance, the crossing walker is a PEDESTRIAN whose lateral distance and
+  path relation change,
   including the live loop: the ego drives under the controller, the obstacle-stop demo
   holds short of the parked car with no contact, and the session leaves no actor behind
   and restores the world
 - `ruff check .` — All checks passed
 - `ruff format --check .` — 223 files formatted
-- `mypy src` — no issues in 141 source files
-- `node --test` in `dashboard/` — 18 pass (format, normalise incl. live fields, projection)
+- `mypy src` — no issues in 142 source files
+- `node --test` in `dashboard/` — 20 pass (format incl. labels, normalise incl. records, projection)
 - **Phase 12 live validation (2026-09-11):** `python -m adaptx.scenarios run cyclist_crossing
   --publish http://127.0.0.1:8000` against CARLA 0.9.16 published 80 frames; the browser
   drew the streaming point sample, tiles, risk-coloured boxes and predicted paths, selection
@@ -490,10 +507,18 @@ so `tile_size_m` is the lever. Read the entry before quoting any of it.
   synchronous. Routing, decision, planning and a spatial risk field are shown as *Not
   implemented*; GPU as *Not measured*. The frontend "computes nothing" rule is enforced by a
   source scan, which is a guard, not a proof.
-- **The live loop is slow and says so.** ~160 ms per 50 ms frame on the validation
-  machine (Experiment 014), ~0.3x wall-clock speed, reported as `PIPELINE LAGGING`; with
-  the dashboard open in the same process ~0.25x. The simulation is consistent (synchronous
-  mode), just slow-motion.
+- **The live loop is slow and says so.** ~120 ms per 50 ms frame on the validation
+  machine (Experiment 015; 160 ms before the tile memoisation), ~0.42x wall-clock speed,
+  reported as `PIPELINE LAGGING`; with the dashboard open in the same process slower
+  still. The simulation is consistent (synchronous mode), just slow-motion. The next
+  hotspot is the adaptive mapper's per-tile model construction.
+- **Classification is geometric and says so.** Bands on cluster extents plus an
+  elevated-cluster filter and label decay (ADR-057): a walker is PEDESTRIAN in ~70 % of its
+  tracked frames, a parked car VEHICLE from ~12 m and OBSTACLE beyond, a riderless bicycle
+  mostly UNKNOWN/OBSTACLE with identity churn while crossing, a bollard can read
+  PEDESTRIAN, a bus shelter's side VEHICLE. Confidence is a fit score. Phase 11's
+  evaluation reports were measured under the old detector and tracker defaults and have
+  not been re-run under the new ones.
 - **The controller is a baseline, and the perception it obeys is the baseline it is.**
   Velocities are ego-relative (no ego-motion compensation), so a moving ego sees every
   static object "approach" and the risk engine's closing-speed factor rises everywhere;
@@ -509,7 +534,7 @@ so `tile_size_m` is the lever. Read the entry before quoting any of it.
 
 ## 16. Architecture decisions
 
-ADR-001 … ADR-056 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
+ADR-001 … ADR-057 in [`decisions/architecture-decisions.md`](decisions/architecture-decisions.md).
 Most load-bearing for future work:
 
 - **ADR-050** — evaluation is offline from the run record, which carries the pipeline's
@@ -527,6 +552,10 @@ Most load-bearing for future work:
   the loop owns the tick, runs the unchanged chain, a baseline speed governor keyed on
   in-path risk reads no ground truth, five high-level session controls and no actor
   endpoint, shutdown order that survives the Traffic Manager
+- **ADR-057** — objects are labelled once, in the backend: floor-referenced elevated
+  filter in the detector, class decay in the tracker, a partial-view vehicle band, one
+  corridor rule shared by the governor and the snapshot, and a per-object record the
+  dashboard only formats
 
 - **ADR-009** — coordinate convention: **+x forward, +y left, +z up**, metres, right-handed
 - **ADR-005** — readiness *and* implementation status reported separately
@@ -644,6 +673,11 @@ Most load-bearing for future work:
     measured to not abort the client.
 41. Nothing calls the controller "autonomous driving", "safe" or "collision-free"; it is a
     baseline speed governor and every threshold carries the word.
+42. The object record is built by `object_records()` in the backend and nowhere else;
+    the corridor rule lives in `control.corridor` and nowhere else. The frontend formats
+    (ADR-057). A new per-object figure is a backend field first.
+43. The detector's floor comes from the ground stage's own output (`floor_estimate_m`),
+    never from the sensor mount setting and never from the simulator.
 
 ## 18–19. Next step
 

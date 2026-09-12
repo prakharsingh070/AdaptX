@@ -92,7 +92,7 @@ dashboard or API code (knowledge-base boundary rule).
 | `adaptx.evaluation` | Offline evaluation of a run record against its ground truth; the one package allowed to read ground truth; no simulator import (`docs/EVALUATION.md`) |
 | `adaptx.services` | Ingest, metrics, CARLA, system-status, tracking, prediction, mapping, risk and (Phase 12) scene services |
 | `adaptx.evidence` | Phase 12: stored reports and runs read from configured directories, validated and served read-only; the one package outside `adaptx.evaluation` that imports it, sitting downstream of it and outside the pipeline |
-| `adaptx.control` | Live extension: `ControlCommand` / `EgoObservation` contracts, the `VehicleController` protocol and `RiskGovernedSpeedPolicy` - a pure function of the pipeline's outputs and ego odometry |
+| `adaptx.control` | Live extension: `ControlCommand` / `EgoObservation` contracts, the `VehicleController` protocol, `RiskGovernedSpeedPolicy` - a pure function of the pipeline's outputs and ego odometry - and `corridor`, the one IN_PATH / CROSSING / BEHIND / OUTSIDE rule the policy and the scene snapshot share (ADR-057) |
 | `adaptx.live` | Live extension: the live scenario catalogue and anchored scenario manager, the `LiveSimulationService` loop, the PNG encoder for the camera, and the session contracts |
 | `adaptx.api` | Routes, HTTP schemas, WebSocket telemetry and scene channels, dependency wiring; mounts `dashboard/` |
 | `dashboard/` | Not a Python package: the static browser console (`docs/DASHBOARD.md`) |
@@ -557,6 +557,22 @@ HTTP or telemetry; since Phase 12, stored reports are **served** read-only by
 the evaluation layer (the boundary test pins it). Metric definitions: `docs/EVALUATION.md`.
 
 ---
+
+## 8e. Object labelling (live perception upgrade, ADR-057)
+
+```
+ground stage ──► floor_estimate_m (median z of removed ground points, per frame)
+                        │
+non-ground points ──► detector: cluster ──► reject (points, height, footprint, ELEVATED > 0.8 m above floor)
+                                        ──► classify by bands (geometric_bands_v2) ──► DetectedObject
+tracker: associate (tentative survives 2 misses) ──► class hysteresis (2 hits to switch, 3 UNKNOWNs to decay)
+risk engine ──► distance_m, closing_speed_mps, level        predictor ──► path
+                        └──────────── object_records(): join by track_id + corridor rule ──► TrackedObjectSnapshot
+```
+
+The label, the distance, the speed, the risk and the path relation are decided once, in
+the backend, from pipeline outputs; the controller and the dashboard read the same
+record. No ground truth enters any of it.
 
 ## 8d. Live loop boundary (post-Phase-12 extension)
 

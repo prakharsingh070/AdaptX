@@ -28,7 +28,7 @@ than covering ground it does not have.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -37,6 +37,11 @@ from adaptx.models.spatial_map import MapBounds
 
 #: Stage name used in quantisation errors, matching the Phase 2B convention.
 STAGE = "adaptive_mapping"
+
+
+#: Grids by geometry; a session uses one, tests a handful.
+_GRIDS: dict[tuple[float, float, float, float, float, int, int], TileGrid] = {}
+_GRID_CACHE_SIZE = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +57,16 @@ class TileGrid:
     tile_size_m: float
     columns: int
     rows: int
+    # Geometry memos. A tile's extent and cell shape are functions of the
+    # (immutable) grid alone, yet the controller and mapper asked for them
+    # about 1,200 times per frame on a 144-tile map - 8-9 times per tile -
+    # and each answer built a MapBounds model. Measured in the live loop
+    # (Experiment 015) as a leading cost of the Phase 8 stage; memoising them
+    # changes no value. Excluded from equality and repr.
+    _tile_bounds: dict[int, MapBounds] = field(default_factory=dict, repr=False, compare=False)
+    _cell_shapes: dict[tuple[int, float], tuple[int, int]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @classmethod
     def over(cls, bounds: MapBounds, tile_size_m: float, *, max_tiles: int) -> TileGrid:
@@ -89,7 +104,17 @@ class TileGrid:
                     "max_tiles": max_tiles,
                 },
             )
-        return cls(bounds=bounds, tile_size_m=tile_size_m, columns=columns, rows=rows)
+        # One grid object per distinct geometry, so the memos above survive
+        # across frames: the controller and mapper rebuild "their" grid from
+        # settings on every call, and the settings do not change mid-session.
+        key = (bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y, tile_size_m, columns, rows)
+        cached = _GRIDS.get(key)
+        if cached is None:
+            cached = cls(bounds=bounds, tile_size_m=tile_size_m, columns=columns, rows=rows)
+            if len(_GRIDS) >= _GRID_CACHE_SIZE:
+                _GRIDS.clear()
+            _GRIDS[key] = cached
+        return cached
 
     # -- shape -------------------------------------------------------------
     @property
@@ -107,16 +132,21 @@ class TileGrid:
 
     # -- geometry ----------------------------------------------------------
     def tile_bounds(self, tile_index: int) -> MapBounds:
-        """Extent of one tile, clipped to the map bounds."""
+        """Extent of one tile, clipped to the map bounds. Memoised per grid."""
+        cached = self._tile_bounds.get(tile_index)
+        if cached is not None:
+            return cached
         row, column = self.row_column(tile_index)
         min_x = self.bounds.min_x + column * self.tile_size_m
         min_y = self.bounds.min_y + row * self.tile_size_m
-        return MapBounds(
+        bounds = MapBounds(
             min_x=min_x,
             max_x=min(min_x + self.tile_size_m, self.bounds.max_x),
             min_y=min_y,
             max_y=min(min_y + self.tile_size_m, self.bounds.max_y),
         )
+        self._tile_bounds[tile_index] = bounds
+        return bounds
 
     def tile_centre(self, tile_index: int) -> tuple[float, float]:
         """Centre of one tile in metres, accounting for clipping at the edges."""
@@ -132,7 +162,12 @@ class TileGrid:
         Derived from the tile clipped extent, so a clipped edge tile allocates
         only the cells it needs rather than a full tile worth.
         """
-        return cells_for(self.tile_bounds(tile_index), resolution_m)
+        key = (tile_index, resolution_m)
+        cached = self._cell_shapes.get(key)
+        if cached is None:
+            cached = cells_for(self.tile_bounds(tile_index), resolution_m)
+            self._cell_shapes[key] = cached
+        return cached
 
     # -- lookup ------------------------------------------------------------
     def locate(self, x: float, y: float) -> int | None:

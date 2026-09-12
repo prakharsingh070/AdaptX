@@ -180,3 +180,23 @@ table.data tr.selectable:hover { background: #121d31; }
 .control-bars .bar.brake > span { background: #ef4444; }
 .control-bars .bar.steer { position: relative; }
 .control-bars .bar.steer > span { position: absolute; top: 0; bottom: 0; background: #a78bfa; }
+
+/* live object cards (perception upgrade) */
+.class-counts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.class-count { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel-2); }
+.object-cards { display: flex; flex-direction: column; gap: 6px; }
+.object-card { border: 1px solid var(--border); border-left: 3px solid #64748b; border-radius: 6px; padding: 6px 8px; background: var(--panel-2); cursor: pointer; }
+.object-card.selected { outline: 1px solid var(--accent); }
+.object-card.lvl-border-low { border-left-color: #34d399; }
+.object-card.lvl-border-medium { border-left-color: #fbbf24; }
+.object-card.lvl-border-high { border-left-color: #fb923c; }
+.object-card.lvl-border-critical { border-left-color: #ef4444; }
+.object-card.lvl-border-unknown { border-left-color: #a78bfa; border-left-style: dashed; }
+.object-card-head { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 12px; }
+.object-card-head .title { flex: 1; }
+.object-card-body { display: flex; gap: 12px; font-size: 11px; font-family: ui-monospace, monospace; margin-top: 3px; color: #cbd5e1; flex-wrap: wrap; }
+.path { color: #8b98b0; }
+.path.in { color: #f8fafc; font-weight: 700; }
+.event-list li .dot.entered_path { background: #ef4444; }
+.event-list li .dot.crossing_path { background: #fb923c; }
+.event-list li .dot.left_path { background: #34d399; }
