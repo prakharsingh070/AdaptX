@@ -31,6 +31,7 @@ from adaptx.models.common import DataSource
 from adaptx.models.system import SimulationState
 from tests.fixtures.fake_carla import (
     BoundingBox,
+    FakeActor,
     FakeCarlaModule,
     FakeSensor,
     FakeWorld,
@@ -38,6 +39,7 @@ from tests.fixtures.fake_carla import (
     Rotation,
     Transform,
     Vector3D,
+    WorldSettings,
 )
 
 
@@ -532,3 +534,83 @@ class TestScenarioPlacement:
     def test_spawning_before_an_ego_exists_is_refused(self) -> None:
         with pytest.raises(SimulatorUnavailableError, match="no ego"):
             session()._world_position_for(10.0, 0.0, 0.0)
+
+
+class TestStaleActorReclaim:
+    """A session opening onto a server littered by a dead ADAPT-X process cleans it.
+
+    Measured live (Experiment 016): a backend killed without a clean stop left
+    three egos, nine sensors and ~25 Traffic-Manager vehicles standing in the
+    lanes at 0 m/s, and the world synchronous with nobody ticking. Only actors
+    ADAPT-X tagged are reclaimed; another client's actors are never touched.
+    """
+
+    def _litter(self, world: FakeWorld) -> tuple[FakeActor, FakeActor, FakeActor, FakeActor]:
+        library = world.get_blueprint_library()
+        ego_bp = library.find("vehicle.tesla.model3")
+        ego_bp.set_attribute("role_name", "ego")
+        stale_ego = world.try_spawn_actor(ego_bp, Transform(Location(5.0, 0.0, 0.0), Rotation()))
+        lidar = world.try_spawn_actor(
+            library.find("sensor.lidar.ray_cast"), Transform(), attach_to=stale_ego
+        )
+        traffic_bp = library.find("vehicle.audi.tt")
+        traffic_bp.set_attribute("role_name", "traffic")
+        stale_traffic = world.try_spawn_actor(
+            traffic_bp, Transform(Location(30.0, 0.0, 0.0), Rotation())
+        )
+        foreign_bp = library.find("vehicle.audi.tt")
+        foreign_bp.set_attribute("role_name", "someone_elses_car")
+        foreign = world.try_spawn_actor(foreign_bp, Transform(Location(60.0, 5.0, 0.0), Rotation()))
+        assert stale_ego and lidar and stale_traffic and foreign
+        return stale_ego, lidar, stale_traffic, foreign
+
+    def test_owned_orphans_and_their_sensors_are_destroyed_and_others_kept(self) -> None:
+        world = FakeWorld()
+        stale_ego, lidar, stale_traffic, foreign = self._litter(world)
+        stage = session(world)
+        stage.open()
+        try:
+            assert stale_ego.destroyed and lidar.destroyed and stale_traffic.destroyed
+            assert not foreign.destroyed, "another client's actor is never touched"
+            assert stage.reclaimed_actors == 3
+            assert stage.status().reclaimed_actors == 3
+        finally:
+            stage.close()
+        assert foreign.id in world.actors and len(world.actors) == 1
+
+    def test_a_world_left_synchronous_by_the_dead_process_is_released(self) -> None:
+        world = FakeWorld()
+        self._litter(world)
+        world.apply_settings(WorldSettings(synchronous_mode=True, fixed_delta_seconds=0.05))
+        stage = session(world)
+        stage.open()
+        stage.close()
+        assert world.settings.synchronous_mode is False, "not 'restored' to the orphaned sync mode"
+
+    def test_a_clean_server_reclaims_nothing_and_a_foreign_sync_mode_is_kept(self) -> None:
+        world = FakeWorld()
+        world.apply_settings(WorldSettings(synchronous_mode=True, fixed_delta_seconds=0.1))
+        stage = session(world)
+        stage.open()
+        assert stage.reclaimed_actors == 0
+        stage.close()
+        assert world.settings.synchronous_mode is True, "someone else's setting, untouched"
+
+    def test_reclaim_can_be_switched_off(self) -> None:
+        world = FakeWorld()
+        stale_ego, _, _, _ = self._litter(world)
+        stage = session(world, reclaim_stale_actors=False)
+        stage.open()
+        stage.close()
+        assert not stale_ego.destroyed
+
+    def test_scripted_actors_are_tagged_so_a_later_session_can_reclaim_them(self) -> None:
+        world = FakeWorld()
+        stage = session(world)
+        stage.open()
+        stage.step()
+        actor = stage.spawn_relative_to(stage.anchor(), "vehicle.audi.tt", forward_m=20.0)
+        assert actor.attributes["role_name"] == "adaptx_scenario"
+        placed = stage.spawn_ahead_of_ego("walker.pedestrian.0001", forward_m=10.0)
+        assert placed.attributes["role_name"] == "adaptx_scenario"
+        stage.close()

@@ -122,6 +122,14 @@ class SimulationSessionStatus(AdaptXModel):
         default=None, ge=0, description="Points in the most recent LiDAR frame."
     )
     detail: str = ""
+    reclaimed_actors: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Stale ADAPT-X actors (by role_name) an earlier process left on the server "
+            "and this session destroyed on open. Zero on a clean server."
+        ),
+    )
 
 
 class ComponentReadiness(StrEnum):

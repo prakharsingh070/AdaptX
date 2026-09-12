@@ -245,7 +245,8 @@ frame. **Counts only** — never point data, never ground truth, never an actor 
     "sensor_actor_id": null,
     "actor_count": 0,
     "last_point_count": null,
-    "detail": ""
+    "detail": "",
+    "reclaimed_actors": 0
   }
 }
 ```
@@ -254,6 +255,9 @@ frame. **Counts only** — never point data, never ground truth, never an actor 
 `ego_spawn_index` is the map spawn point the ego took (the first that accepted it, or the
 one `ADAPTX_CARLA__EGO_SPAWN_INDEX` pins) and `server_version` is what the server reported
 at connect - both null until a session is open (ADR-049).
+`reclaimed_actors` counts the stale ADAPT-X actors (by `role_name`: ego, traffic,
+adaptx_scenario, plus their sensors) an earlier killed process left on the server and this
+session destroyed when it opened; zero on a clean server (Experiment 016).
 
 **Phase 11 added no endpoint.** Evaluation is an offline research workflow
 (`python -m adaptx.evaluation`, see `docs/EVALUATION.md`); nothing about it is served over

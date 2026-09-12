@@ -133,6 +133,11 @@ class FakeActor:
         self.autopilot: tuple[bool, int] | None = None
         self.parent: FakeActor | None = None
 
+    @property
+    def attributes(self) -> dict[str, str]:
+        """The blueprint attributes the actor was spawned with, as ``carla.Actor.attributes``."""
+        return self.blueprint_attributes
+
     def get_transform(self) -> Transform:
         if not self.settled:
             return Transform()

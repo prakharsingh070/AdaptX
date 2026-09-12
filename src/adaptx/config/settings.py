@@ -184,6 +184,16 @@ class CarlaSettings(BaseModel):
             "the first three columns, so this costs downstream nothing."
         ),
     )
+    reclaim_stale_actors: bool = Field(
+        default=True,
+        description=(
+            "On open, destroy actors an earlier ADAPT-X process left behind (those "
+            "whose role_name is ego, traffic or adaptx_scenario, and their sensors) "
+            "and release a synchronous mode it left on. Other clients' actors are "
+            "never touched. Measured: a backend killed without a clean stop leaves "
+            "orphaned Traffic-Manager vehicles standing in the lane at 0 m/s."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_lidar(self) -> CarlaSettings:

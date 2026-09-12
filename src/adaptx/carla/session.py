@@ -98,6 +98,14 @@ CAMERA_MOUNT_M = (1.2, 0.0, 1.5)
 #: How many collision events are kept.
 COLLISION_HISTORY = 50
 
+#: ``role_name`` values ADAPT-X stamps on the actors it spawns. Reclaiming
+#: stale actors on open touches these and their attached sensors only -
+#: never another client's actors.
+EGO_ROLE = "ego"
+TRAFFIC_ROLE = "traffic"
+SCENARIO_ROLE = "adaptx_scenario"
+OWNED_ROLES = frozenset({EGO_ROLE, TRAFFIC_ROLE, SCENARIO_ROLE})
+
 
 class WorldAnchor(NamedTuple):
     """An opaque world pose (CARLA frame) captured from the ego at one instant.
@@ -214,6 +222,7 @@ class CarlaSimulationSession:
         self._last_point_count: int | None = None
         self._map_name: str | None = None
         self._server_version: str | None = None
+        self._reclaimed_actors = 0
 
     # -- state -------------------------------------------------------------
     @property
@@ -253,7 +262,13 @@ class CarlaSimulationSession:
             actor_count=len(self._actors),
             last_point_count=self._last_point_count,
             detail=self._detail,
+            reclaimed_actors=self._reclaimed_actors,
         )
+
+    @property
+    def reclaimed_actors(self) -> int:
+        """Stale ADAPT-X actors destroyed when this session opened."""
+        return self._reclaimed_actors
 
     # -- lifecycle ---------------------------------------------------------
     def open(self) -> None:
@@ -280,6 +295,7 @@ class CarlaSimulationSession:
         self._state = SimulationState.CONFIGURING
         try:
             self._connect()
+            self._reclaim_stale_actors()
             self._configure_world()
             self._spawn_ego()
             self._attach_lidar()
@@ -526,6 +542,8 @@ class CarlaSimulationSession:
         carla = self._require_carla()
         world = self._require_world()
         blueprint = self._find_blueprint(blueprint_id)
+        if blueprint.has_attribute("role_name"):
+            blueprint.set_attribute("role_name", SCENARIO_ROLE)
         cx, cy, cz = self._world_position_for(forward_m, left_m, up_m + SPAWN_CLEARANCE_M)
 
         transform = carla.Transform(
@@ -635,6 +653,8 @@ class CarlaSimulationSession:
         carla = self._require_carla()
         world = self._require_world()
         blueprint = self._find_blueprint(blueprint_id)
+        if blueprint.has_attribute("role_name"):
+            blueprint.set_attribute("role_name", SCENARIO_ROLE)
         cx, cy, cz = ego_offset_to_carla_world(
             (forward_m, left_m, up_m + SPAWN_CLEARANCE_M),
             (anchor.x, anchor.y, anchor.z),
@@ -707,7 +727,7 @@ class CarlaSimulationSession:
             return None
         blueprint = self._find_blueprint(blueprint_id)
         if blueprint.has_attribute("role_name"):
-            blueprint.set_attribute("role_name", "traffic")
+            blueprint.set_attribute("role_name", TRAFFIC_ROLE)
         actor = world.try_spawn_actor(blueprint, spawn_points[spawn_index])
         if actor is None:
             return None
@@ -927,9 +947,94 @@ class CarlaSimulationSession:
             logger.warning("CARLA server version unavailable", exc_info=True)
             self._server_version = None
 
+    def _reclaim_stale_actors(self) -> None:
+        """Destroy actors an earlier ADAPT-X process left behind, and nothing else.
+
+        A backend killed without a clean stop (measured: the desktop app
+        terminating the process between turns) leaves its ego, sensors,
+        Traffic-Manager traffic and scripted actors on the server. Orphaned
+        traffic has no client driving it and sits in the lane at 0 m/s; the
+        next session then spawns into that road and, correctly, stops behind
+        a "vehicle at 7.8 m, 0.0 m/s". Only actors carrying one of
+        ``OWNED_ROLES`` in ``role_name`` are touched, plus the sensors
+        attached to them. If such orphans exist and the world was left
+        synchronous, the dead process also left it that way, so the settings
+        this session will restore on close are asynchronous - otherwise the
+        next client finds a server that appears hung (Experiment 016).
+        """
+        if not self._settings.reclaim_stale_actors:
+            return
+        world = self._require_world()
+        # Measured on 0.9.16: a fresh client's actor list is EMPTY on a world
+        # left synchronous until one frame is produced. One bootstrap tick (or
+        # one asynchronous frame) refreshes it; this happens before the live
+        # loop exists, so the loop remains the only ticker while it runs.
+        try:
+            if world.get_settings().synchronous_mode:
+                world.tick()
+            else:
+                world.wait_for_tick()
+        except Exception as exc:  # pragma: no cover - a hung server is reported, not hidden
+            logger.warning(
+                "could not refresh the actor list", extra={"context": {"error": str(exc)}}
+            )
+        stale: list[Any] = []
+        stale_ids: set[int] = set()
+        for actor in world.get_actors():
+            attributes = getattr(actor, "attributes", None) or {}
+            if attributes.get("role_name") in OWNED_ROLES:
+                stale.append(actor)
+                stale_ids.add(int(actor.id))
+        if not stale:
+            return
+        for actor in world.get_actors():
+            parent = getattr(actor, "parent", None)
+            if (
+                parent is not None
+                and int(parent.id) in stale_ids
+                and int(actor.id) not in stale_ids
+            ):
+                stale.append(actor)
+                stale_ids.add(int(actor.id))
+
+        settings = world.get_settings()
+        left_synchronous = bool(settings.synchronous_mode)
+        if left_synchronous:
+            settings.synchronous_mode = False
+            settings.fixed_delta_seconds = None
+            self._safely(lambda: world.apply_settings(settings), "release stale synchronous mode")
+            # The dead process's Traffic Manager may be gone; the port is the one
+            # this session uses, so releasing it is harmless when it is live.
+            client = self._client
+            if client is not None:
+                self._safely(
+                    lambda: client.get_trafficmanager(self._tm_port).set_synchronous_mode(False),
+                    "release stale traffic manager",
+                )
+        for actor in stale:
+            if str(getattr(actor, "type_id", "")).startswith("sensor."):
+                self._safely(actor.stop, f"stop stale sensor {actor.id}")
+        for actor in stale:
+            self._safely(actor.destroy, f"destroy stale actor {actor.id}")
+        self._reclaimed_actors = len(stale)
+        logger.warning(
+            "reclaimed stale ADAPT-X actors left by an earlier process",
+            extra={
+                "context": {
+                    "count": len(stale),
+                    "left_synchronous": left_synchronous,
+                    "types": sorted({str(getattr(a, "type_id", "?")) for a in stale}),
+                }
+            },
+        )
+
     def _configure_world(self) -> None:
         world = self._require_world()
         self._original_settings = world.get_settings()
+        if self._reclaimed_actors and self._original_settings.synchronous_mode:
+            # Belt and braces: the reclaim step already switched it off.
+            self._original_settings.synchronous_mode = False
+            self._original_settings.fixed_delta_seconds = None
 
         settings = world.get_settings()
         settings.synchronous_mode = self._settings.synchronous_mode
@@ -952,7 +1057,7 @@ class CarlaSimulationSession:
         world = self._require_world()
         blueprint = self._find_blueprint(self._settings.ego_blueprint)
         if blueprint.has_attribute("role_name"):
-            blueprint.set_attribute("role_name", "ego")
+            blueprint.set_attribute("role_name", EGO_ROLE)
 
         spawn_points = world.get_map().get_spawn_points()
         if not spawn_points:
