@@ -963,6 +963,29 @@ source files), no new dependency, ADR-057, Experiment 015. Uncommitted on
 
 ---
 
+## Debug: "the front vehicle stopped moving" · orphaned actors · Experiment 016
+
+**Report.** Ego STOPPED behind `VEHICLE #17 at 7.8 m, 0.0 m/s` in `vehicle_cut_in`.
+
+**Traced before touching code.** Scripted cut-in car: physics off, placed per frame,
+moved 55.7 m in 17 s (CARLA velocity 0 by design; LiDAR-tracked 0.3-4.9 m/s). TM cars:
+physics on, autopilot on TM 8050 synchronous seeded, 20-37 m in 6 s. Only the live loop
+ticks. No actor reset to its initial transform. The stationary vehicle was one of ~25
+Traffic-Manager cars orphaned by backend processes the desktop app terminated without a
+Stop; the world was also left synchronous, which makes a fresh client's actor list empty
+until one frame is produced.
+
+**Fix.** `open()` reclaims ADAPT-X-tagged orphans (and attached sensors) after one
+bootstrap frame and releases the orphaned synchronous mode; scripted actors are tagged
+`adaptx_scenario`; `CarlaSettings.reclaim_stale_actors`. No controller, threshold or
+physics change. Verified by recreating the damage on the real server (5 reclaimed, car
+moved 28 m in 10 s, 0 collisions, 0 actors after stop) and by the five required scenarios.
+
+**Status:** 1689 tests, 12 live, ruff / format / mypy clean. Uncommitted on
+`live-perception-upgrade`.
+
+---
+
 ## Cross-phase pattern
 
 Each phase ships a **deterministic, explainable baseline** behind an interface, labelled

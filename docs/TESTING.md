@@ -462,6 +462,14 @@ results. The live figures are in Experiment 011.
 - `dashboard/tests` - object records pass through the view model unchanged and a track
   without one stays null; labels and glyphs pass the class through, UNKNOWN included.
 
+### Stale-actor reclaim (Experiment 016)
+
+- `tests/unit/test_carla_session.py::TestStaleActorReclaim` - a session opening onto a
+  fake world littered with a tagged ego, its attached LiDAR and tagged traffic destroys
+  them and leaves a foreign actor alone; a world the dead process left synchronous is
+  released and not "restored" to it; a clean server reclaims nothing and a foreign
+  synchronous setting is kept; the rule can be switched off; scripted actors are tagged.
+
 ## Conventions for new tests
 
 - **Never weaken or delete a test to make the suite green.** If a test fails, either the

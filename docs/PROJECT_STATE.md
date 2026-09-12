@@ -528,9 +528,14 @@ so `tile_size_m` is the lever. Read the entry before quoting any of it.
   churn. Poles are labelled "pedestrian", cars "obstacle". Not tuned, not validated, not
   collision-free by claim - the safety sensor counts what it fails to prevent (0 in the
   measured runs).
-- **Actor hygiene depends on a clean stop.** A killed backend leaves actors on the server;
-  a server left synchronous shows a fresh client a stale actor list. `Stop` (or process
-  shutdown) cleans up; a crash does not.
+- **Actor hygiene: a killed backend leaks until the next open.** Measured (Experiment 016):
+  the desktop app terminating the backend left three ego sessions and ~25 Traffic-Manager
+  cars standing at 0 m/s, and the world synchronous - the next session then stopped,
+  correctly, behind an orphan at 7.8 m. `CarlaSimulationSession.open()` now reclaims
+  ADAPT-X-tagged orphans (role_name `ego` / `traffic` / `adaptx_scenario`, plus attached
+  sensors) after one bootstrap frame (a fresh client's actor list is empty on a synchronous
+  world until then) and releases the orphaned synchronous mode. Never other clients'
+  actors. `reclaimed_actors` is on the session status.
 
 ## 16. Architecture decisions
 
@@ -678,6 +683,11 @@ Most load-bearing for future work:
     (ADR-057). A new per-object figure is a backend field first.
 43. The detector's floor comes from the ground stage's own output (`floor_estimate_m`),
     never from the sensor mount setting and never from the simulator.
+44. Scripted actors keep physics OFF and are placed per frame (ADR-047/054); Traffic-Manager
+    vehicles and the driven ego keep physics ON. Never flip these globally: Experiment 016
+    traced both categories moving as designed - the "stopped front vehicle" was an orphan.
+45. Stale-actor reclaim touches only ADAPT-X-tagged actors. Every actor the session spawns
+    carries an ADAPT-X `role_name` so a later open can find it.
 
 ## 18–19. Next step
 

@@ -1508,3 +1508,80 @@ One map, one spawn point, one seed per scenario; the offline actor matching is b
 nearest track within a radius and can pick a neighbouring pole; nothing was tuned
 against an evaluation figure and Phase 11's reports were not re-run under the new
 defaults; the frame-median floor assumes a level road; velocities remain ego-relative.
+
+## Experiment 016 - "The front vehicle stopped": orphaned actors from a killed backend
+
+**Date:** 2026-09-12
+
+### Question
+
+The dashboard reported the ego STOPPED behind `VEHICLE #17 at 7.8 m, 0.0 m/s, IN_PATH`
+in `vehicle_cut_in`, whose only scripted actor is a car that drives away at 3-4 m/s. Was
+the scenario vehicle standing still, and if so why?
+
+### What the server held
+
+Connecting a fresh client found the world **synchronous with nobody ticking**
+(`wait_for_tick` timed out) and, once refreshed, **three orphaned ego sessions** (three
+`vehicle.tesla.model3` with `role_name=ego`, three LiDARs, three cameras, three collision
+sensors) and **~25 Traffic-Manager vehicles** (`role_name=traffic`) from backend processes
+the desktop app had terminated between turns without a `Stop` (preview log: "stopped by
+the app", twice). A Traffic-Manager vehicle whose client process is gone is never driven
+again: it stands in the lane at 0 m/s. The reported #17 was one of those, not the scenario's
+car.
+
+Also measured: a fresh client's `get_actors()` on a world left synchronous returns an
+**empty list until one frame is produced** - a `tick()` or an asynchronous
+`wait_for_tick()` refreshes it. An earlier cleanup script had "found nothing" for exactly
+that reason.
+
+### Traced on a clean server (no code change), `vehicle_cut_in`
+
+| sim t | scripted Lincoln (physics off, placed per frame) | ego |
+|---|---|---|
+| 1.1 s | moved 0.0 m, CARLA velocity 0.0 (placed, not simulated) | 2.3 m/s CRUISING |
+| 5.2 s | moved 16.6 m | 4.9 m/s |
+| 10.2 s | moved 32.2 m | 3.5 m/s, following at 13-15 m |
+| 17.0 s | moved 52.7 m | HOLDING/SLOWING 14-16 m behind |
+
+The scripted car moves as scripted; its `get_velocity()` reads 0 because it is teleported
+along a closed-form path (ADR-047); the LiDAR-tracked speed the pipeline sees is 0.3-4.9
+m/s. `multiple_vehicles` on a clean server: 8 TM cars moved 20-37 m in 6 s at 5-8 m/s (two
+stopped at a red light). Physics: off for scripted actors, on for TM vehicles and the ego.
+Tick ownership: only the live loop ticks. No actor is reset to its initial transform.
+
+### The fix (session `open()`)
+
+Reclaim actors carrying an ADAPT-X `role_name` (`ego`, `traffic`, `adaptx_scenario` -
+scripted actors are now tagged too) plus the sensors attached to them, after one bootstrap
+frame so the list is fresh; if such orphans exist on a synchronous world, release it and
+treat the settings to restore on close as asynchronous. Other clients' actors are never
+touched. `CarlaSettings.reclaim_stale_actors` (default on) switches it off.
+
+### Verification on the real server
+
+The damage was recreated deliberately (a tagged ego + attached LiDAR + three TM cars, world
+synchronous, process exited without cleanup). Opening `vehicle_cut_in`: **reclaimed 5**;
+the Lincoln moved 4.3 / 12.4 / 28.1 m at 1 / 5 / 10 s; ego CRUISING -> SLOWING behind it;
+0 collisions; after Stop the world was asynchronous and **0 actors** remained.
+
+Then the five required scenarios, all 0 collisions, all clean after stop:
+
+| scenario | frames · sim s · wall s | loop med / p90 | pipeline med | sim/wall | max ego speed | first hold (nearest) | resume |
+|---|---|---|---|---|---|---|---|
+| static_obstacle | 628 · 31.4 · 100 | 151 / 171 ms | 116 ms | 0.33 | 7.65 m/s | 10.65 s (7.96 m), min 7.68 m | 23.65 s |
+| vehicle_cut_in | 367 · 18.4 · 60 | 154 / 176 | 118 | 0.33 | 4.93 (following) | 9.25 s (13.7 m), HOLDING 23 frames, STOPPED 1 | 9.85 s |
+| multiple_vehicles | 343 · 17.2 · 65 | 155 / 172 | 111 | 0.32 | 7.04 | 11.45 s (7.96 m) | - |
+| mixed_obstacles | 587 · 29.4 · 105 | 155 / 176 | 114 | 0.32 | 7.65 | 10.65 s (7.96 m) | 23.65 s |
+| pedestrian_crossing | 375 · 18.8 · 60 | 151 / 173 | 115 | 0.33 | 7.65 | 11.5 s (9.0 m), min 6.39 m | 12.35 s |
+
+The loop measured 150-155 ms in this session against 120 ms in Experiment 015 on the same
+code path minus the fix (which runs once at open): the machine was busier (CARLA had just
+been restarted with its window rendering). Reported as measured; the sim/wall ratio on
+screen says 0.32-0.33x. `pytest -m carla` 12/12.
+
+### Limitations
+
+Reclaim recognises only actors ADAPT-X tagged; an untagged orphan from any other tool
+stays. A process killed mid-run still leaks until the next open. The bootstrap tick
+advances a synchronous world by one frame before the ego exists.

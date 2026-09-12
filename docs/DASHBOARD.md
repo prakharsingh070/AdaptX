@@ -307,9 +307,12 @@ so in the Routing card.
 - The controller's corridor is straight along +X; on a bend, roadside geometry enters it
   and the ego holds until it clears. The obstacle-stop demo runs on the straight from
   spawn point 1.
-- A killed backend (not a stopped session) leaves actors on the CARLA server; `Stop`
-  cleans up, a crash does not. A fresh client sees a stale actor list on a server left
-  synchronous - switch it asynchronous and wait a frame before cleaning.
+- A killed backend (not a stopped session) leaves its actors on the CARLA server until
+  the **next session opens**: `open()` now reclaims actors ADAPT-X tagged (`ego`,
+  `traffic`, `adaptx_scenario`) and their sensors, and releases a synchronous mode the
+  dead process left (Experiment 016). Orphaned Traffic-Manager cars stand at 0 m/s - if
+  the dashboard shows a stationary VEHICLE in the lane at session start, that is what it
+  was; the controller stopping for it is correct. Other clients' actors are never touched.
 - Classification is geometric (ADR-057): a parked car is VEHICLE from ~12 m and OBSTACLE
   beyond; a walker is PEDESTRIAN in about 70 % of its tracked frames and UNKNOWN when its
   cluster merges with furniture; a riderless bicycle is mostly not a CYCLIST and switches
