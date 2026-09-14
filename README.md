@@ -17,7 +17,7 @@ observable story:
 
 ```text
 raw points → 🧹 clean and filter → 🔎 detect shapes → 🧭 track motion
-           → 🔮 predict trajectories → ⚠️ assess risk → 🗺️ allocate map detail
+           → 🔮 predict trajectories → ⚠️ assess risk → 🗺️ allocate map detail/.
 ```
 
 An open region may stay at a larger cell size, while a region near a moving object receives
