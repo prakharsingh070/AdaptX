@@ -2,30 +2,61 @@
 
 **Adaptive Dynamic Perception and Tracking** — a LiDAR-based perception framework whose
 goal is to allocate spatial map resolution according to environmental risk and uncertainty
-instead of spending it uniformly.
+instead of spending it uniformly. Think of it as a perception system that asks, frame by
+frame: **“Where does detail matter most right now?”**
 
-The intended behaviour: low-risk, open regions represented coarsely, while regions holding
-pedestrians, vehicles, obstacles or high uncertainty receive finer detail. **That allocation
-is not implemented yet** — see the implementation status below. Object-level risk and
-uncertainty exist as of Phase 7, and the resolution policy that acts on them arrived in
-Phase 8.
+The intended behaviour is easy to picture: 🌤️ open road gets a coarser map, while 🚶
+pedestrians, 🚗 vehicles, obstacles, motion and uncertainty attract finer detail. The
+allocation is implemented as a deterministic, explainable heuristic baseline. It is a
+research prototype, not a collision probability or a safety margin.
+
+## Follow one frame
+
+Imagine a LiDAR frame arriving at an intersection. ADAPT-X walks it through a small,
+observable story:
+
+```text
+raw points → 🧹 clean and filter → 🔎 detect shapes → 🧭 track motion
+           → 🔮 predict trajectories → ⚠️ assess risk → 🗺️ allocate map detail
+```
+
+An open region may stay at a larger cell size, while a region near a moving object receives
+smaller cells. The dashboard then shows the scene the backend produced, including the
+objects, map tiles and measured timings. Nothing is guessed in the browser.
+
+Try the first checkpoint after starting the API:
+
+```bash
+curl http://localhost:8000/api/v1/system/status
+```
+
+For a full example, submit a frame to the pipeline, then inspect the result:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/lidar/risk \
+  -H "Content-Type: application/json" \
+  -d '{"frame_id":0,"sensor_id":"demo-lidar","source":"synthetic_test","points":[[4.0,0.2,0.8],[4.2,0.3,0.9],[4.1,0.1,0.7]],"timestamp":"2026-09-14T12:00:00Z"}'
+```
+
+That response is the system’s current explanation of the frame: detected and tracked
+objects, available risk factors, uncertainty reasons, and measured stage timing. Missing
+evidence stays missing; it is never silently turned into a zero.
 
 ---
 
 ## Implementation status
 
-> **Phases 1 to 7 are what exist today** — foundation, LiDAR processing and
-> benchmarking, geometric object detection, temporal tracking, trajectory prediction, 2.5D
-> spatial mapping, and object-level risk and uncertainty — each a deterministic, explainable
-> baseline, not a finished subsystem.
-> The **adaptive resolution algorithm** exists as of Phase 8, as a deterministic heuristic
+> **Phases 1 to 12 are implemented** — foundation, LiDAR processing and benchmarking,
+> geometric object detection, temporal tracking, trajectory prediction, 2.5D spatial
+> mapping, object-level risk and uncertainty, adaptive resolution, CARLA integration,
+> scenario generation, offline evaluation and the dashboard. Each is a deterministic,
+> explainable baseline, not a finished production subsystem.
+> The **adaptive resolution algorithm** exists as of Phase 8 as a deterministic heuristic
 > baseline. Its detail priority is an engineering prioritisation score — **not** a probability
 > of collision, not a safety margin, never calibrated and never validated, because no labelled
 > data exists. Whether the allocation is *appropriate* is unmeasured and unmeasurable; only
 > what it costs has been measured (Experiment 007), and that comparison is **not** a clean
 > win — see the entry rather than assuming one.
-> The repository provides its data contracts and interfaces so it can be added without
-> architectural rewrites.
 >
 > **No accuracy figure appears anywhere in this repository**, because no labelled data
 > exists to measure one against. Detection, tracking and prediction are benchmarked for
